@@ -1,0 +1,123 @@
+"""Hive partitioning tests."""
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+
+class TestPartitionedRegistration:
+    def test_engine_reads_partitioned_dir(self, tmp_path):
+        from qpx.core.engine import DuckDBEngine
+
+        # Create Hive-partitioned structure
+        for run in ["run_01.raw", "run_02.raw"]:
+            run_dir = tmp_path / "feature" / f"run_file_name={run}"
+            run_dir.mkdir(parents=True)
+            table = pa.table({"sequence": ["PEPTIDEK"], "charge": [2]})
+            pq.write_table(table, run_dir / "part-0.parquet")
+
+        engine = DuckDBEngine()
+        engine.register_partitioned_parquet("feature", tmp_path / "feature")
+        result = engine.execute("SELECT COUNT(*) AS cnt FROM feature").fetchone()
+        assert result[0] == 2
+
+        # Verify the partition column is accessible
+        result = engine.execute("SELECT DISTINCT run_file_name FROM feature ORDER BY run_file_name").fetchall()
+        assert len(result) == 2
+        engine.close()
+
+    def test_dataset_discovers_partitioned_dir(self, dataset_dir):
+        """Move feature into partitioned layout and verify Dataset discovers it."""
+        import qpx
+
+        feature_file = list(dataset_dir.glob("*.feature.parquet"))[0]
+        table = pq.read_table(feature_file)
+        original_rows = table.num_rows
+        feature_file.unlink()
+
+        # Write as partitioned
+        from qpx.writers.base import BaseWriter
+
+        part_dir = dataset_dir / "feature"
+        BaseWriter.write_partitioned(table, part_dir, ["run_file_name"])
+
+        ds = qpx.open_dataset(str(dataset_dir))
+        assert "feature" in ds.available_structures
+        assert ds.feature.count() == original_rows
+        ds.close()
+
+    def test_single_file_preferred_over_partitioned(self, dataset_dir):
+        """When both a single file and partitioned dir exist, single file wins."""
+        import qpx
+
+        # Create a partitioned dir alongside the existing single file
+        part_dir = dataset_dir / "feature"
+        part_dir.mkdir()
+        run_dir = part_dir / "run_file_name=fake_run"
+        run_dir.mkdir()
+        table = pa.table(
+            {
+                "sequence": ["FAKEPEP"],
+                "charge": pa.array([1], type=pa.int16()),
+            }
+        )
+        pq.write_table(table, run_dir / "part-0.parquet")
+
+        ds = qpx.open_dataset(str(dataset_dir))
+        # Should use the single file (3 rows), not the partitioned dir (1 row)
+        assert ds.feature.count() == 3
+        ds.close()
+
+
+class TestPartitionedWriting:
+    def test_write_partitioned_creates_hive_dirs(self, tmp_path):
+        from qpx.writers.base import BaseWriter
+
+        table = pa.table(
+            {
+                "run_file_name": ["run_01", "run_01", "run_02"],
+                "sequence": ["PEP1", "PEP2", "PEP3"],
+            }
+        )
+        out = tmp_path / "partitioned"
+        BaseWriter.write_partitioned(table, out, ["run_file_name"])
+        dirs = sorted(d.name for d in out.iterdir() if d.is_dir())
+        assert "run_file_name=run_01" in dirs
+        assert "run_file_name=run_02" in dirs
+
+    def test_write_partitioned_data_readable(self, tmp_path):
+        from qpx.core.engine import DuckDBEngine
+        from qpx.writers.base import BaseWriter
+
+        table = pa.table(
+            {
+                "run_file_name": ["run_01", "run_01", "run_02"],
+                "sequence": ["PEP1", "PEP2", "PEP3"],
+                "charge": [2, 3, 2],
+            }
+        )
+        out = tmp_path / "partitioned"
+        BaseWriter.write_partitioned(table, out, ["run_file_name"])
+
+        engine = DuckDBEngine()
+        engine.register_partitioned_parquet("test", out)
+        result = engine.execute("SELECT COUNT(*) FROM test").fetchone()
+        assert result[0] == 3
+
+        # Verify data integrity
+        result = engine.execute("SELECT sequence FROM test WHERE run_file_name = 'run_02'").fetchone()
+        assert result[0] == "PEP3"
+        engine.close()
+
+    def test_write_partitioned_default_partition_col(self, tmp_path):
+        from qpx.writers.base import BaseWriter
+
+        table = pa.table(
+            {
+                "run_file_name": ["run_01", "run_02"],
+                "data": ["a", "b"],
+            }
+        )
+        out = tmp_path / "default_part"
+        BaseWriter.write_partitioned(table, out)  # No partition_cols arg
+        dirs = sorted(d.name for d in out.iterdir() if d.is_dir())
+        assert any("run_file_name=" in d for d in dirs)

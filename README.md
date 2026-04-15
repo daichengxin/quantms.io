@@ -1,40 +1,263 @@
-# quantms.io
+# QPX
 
-[quantms](https://docs.quantms.org) is a nf-core pipeline for the analysis of quantitative proteomics data. The pipeline is based on the [OpenMS](https://www.openms.de/) framework and [DIA-NN](https://github.com/vdemichev/DiaNN); and it is designed to analyze large scale experiments. the main outputs of quantms tools are the following: 
+[![Python application](https://github.com/bigbio/qpx/actions/workflows/python-app.yml/badge.svg?branch=dev)](https://github.com/bigbio/qpx/actions/workflows/python-app.yml)
+[![Upload Python Package](https://github.com/bigbio/qpx/actions/workflows/python-publish.yml/badge.svg)](https://github.com/bigbio/qpx/actions/workflows/python-publish.yml)
+[![Codacy Badge](https://app.codacy.com/project/badge/Grade/e71a662e8d4f483094576c1d8f8888c3)](https://app.codacy.com/gh/bigbio/qpx/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
+[![Codacy Badge](https://app.codacy.com/project/badge/Coverage/e71a662e8d4f483094576c1d8f8888c3)](https://app.codacy.com/gh/bigbio/qpx/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_Coverage)
+[![PyPI version](https://badge.fury.io/py/qpx.svg)](https://badge.fury.io/py/qpx)
 
-- [mzTab](https://github.com/HUPO-PSI/mzTab) files with the identification and quantification information.
-- [MSstats](https://msstats.org/wp-content/uploads/2017/01/MSstats_v3.7.3_manual.pdf) input file with the peptide quantification values needed for the MSstats analysis.
-- [MSstats](https://msstats.org/wp-content/uploads/2017/01/MSstats_v3.7.3_manual.pdf) output file with the differential expression values for each protein. 
-- The input [SDRF](https://github.com/bigbio/proteomics-sample-metadata) of the pipeline if available. 
+A Python package for working with mass spectrometry data in the QPX format.
 
-Here, we aim to formalize and develop a more standardized format that enables better representation of the identification and quantification results but also enables new and novel use cases for proteomics data analysis: 
+![QPX Architecture](docs/images/qpx-architecture.svg)
 
-- Fast and easy visualization of the identification and quantification results.
-- Easy integration with other omics data.
-- Easy integration with sample metadata.
-- AI/ML model development based on identification and quantification results.
+## Features
 
-**Note**: We are not trying to replace the mzTab format, but to provide a new format that enables AI-related use cases. Most of the features of the mzTab format will be included in the new format.  
+- **Convert** data from DIA-NN, MaxQuant, FragPipe, QuantMS (mzTab), mzIdentML, and SDRF to QPX Parquet format
+- **Transform** QPX data: gene mapping, protein quantification (DirectLFQ, MaxLFQ, iBAQ, TopN, …), accession normalization, metadata updates
+- **Query** datasets with SQL, filter rows, or preview with `head`
+- **Inspect** dataset summaries, Arrow schemas, and Parquet metadata
+- **Validate** datasets against the canonical QPX schema
+- **Ontology** management for PSI-MS and PRIDE CV terms
 
-## Data model
+### MuData Export (quantification results only)
 
-The GitHub repository aims to provide multiple formats for serialization of the data model, including:
+QPX datasets can be exported to [MuData](https://mudata.readthedocs.io/) — the multi-modal container from the scverse ecosystem. This export is available **only for quantification results** (precursor/protein intensities and, optionally, protein expression and differential expression results).
 
-- `Tab-delimited` format similar to mzTab. 
-- `JSON` format to enable integration with other bioinformatics resources. 
-- `Parquet` format to enable integration with big data frameworks and large-scale data integration. 
+![QPX MuData Structure](docs/images/mudata-architecture.svg)
 
-## How to contribute
+```python
+ds = Dataset("path/to/PXD000000/")
+mdata = ds.to_mudata()              # auto-detects label & available modalities
+mdata.write("PXD000000.h5mu")       # serialize to HDF5
+```
 
-External contributors, researchers and the proteomics community are more than welcome to contribute to this project.
+> Requires the optional `mudata` dependency: `pip install "qpx[mudata]"`
 
-Contribute with the specification: you can contribute to the specification with ideas or refinements by adding an issue into the [issue tracker](https://github.com/bigbio/proteomics-quant-formats/issues) or performing a PR.
+### Performance
+
+![QPX Benchmark](docs/images/qpx-benchmark.svg)
+
+## Installation
+
+### Install from PyPI
+
+```bash
+pip install qpx
+
+# With optional extras
+pip install "qpx[quantify]"    # protein quantification (mokume + DirectLFQ)
+pip install "qpx[all]"         # all optional dependencies
+```
+
+### Install from GitHub (latest dev)
+
+```bash
+pip install git+https://github.com/bigbio/qpx.git
+```
+
+### Install from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/bigbio/qpx.git
+cd qpx
+
+# Install the package locally
+pip install .
+```
+
+### Install and build with uv
+
+[uv](https://docs.astral.sh/uv/) is a fast Python package installer and resolver. The project supports PEP 621 and can be installed, built, and published with uv.
+
+**Prerequisites:** [Install uv](https://docs.astral.sh/uv/getting-started/installation/) (e.g. `curl -LsSf https://astral.sh/uv/install.sh | sh` or `pip install uv`).
+
+```bash
+# Install from GitHub
+uv pip install "qpx @ git+https://github.com/bigbio/qpx.git"
+
+# With optional extras (transforms, plotting)
+uv pip install "qpx[transforms,plotting] @ git+https://github.com/bigbio/qpx.git"
+```
+
+**From a local clone:**
+
+```bash
+git clone https://github.com/bigbio/qpx.git
+cd qpx
+
+# Create a venv, install the project and its dependencies (recommended)
+uv sync
+
+# Or install in editable mode with optional dev dependencies
+uv sync --extra dev
+
+# Run the CLI without installing globally
+uv run qpxc --help
+```
+
+**Build distributable packages** (sdist and wheel in `dist/`):
+
+```bash
+uv build
+```
+
+**Publish to PyPI** (after configuring credentials or trusted publishing):
+
+```bash
+uv build
+uv publish
+```
+
+The `pyproject.toml` uses PEP 621 metadata with Hatchling as the build backend.
+
+### Development Installation
+
+For development with all dependencies:
+
+```bash
+# Using uv (recommended for fast installs)
+uv sync --extra dev
+
+# Or using pip
+pip install -e ".[dev]"
+```
+
+### System Dependencies
+
+QPX depends on pyOpenMS, which requires certain system libraries. If you encounter errors related to missing shared libraries (e.g., `libglib-2.0.so.0`), install the required system dependencies:
+
+**Ubuntu/Debian:**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libglib2.0-0
+```
+
+**macOS:**
+
+```bash
+brew install glib
+```
+
+**Using Conda/Mamba (Recommended for pyOpenMS):**
+
+Using mamba (faster dependency resolution):
+
+```bash
+mamba env create -f environment.yml
+conda activate qpx
+pip install git+https://github.com/bigbio/qpx.git
+```
+
+Or with conda:
+
+```bash
+conda env create -f environment.yml
+conda activate qpx
+pip install git+https://github.com/bigbio/qpx.git
+```
+
+## Usage
+
+The package provides a command-line interface (`qpxc`) with the following command groups:
+
+```bash
+qpxc [OPTIONS] COMMAND [ARGS]...
+
+Commands:
+  convert    Convert external tool outputs to QPX format.
+  transform  Transform QPX data into derived representations.
+  query      Query and inspect QPX datasets.
+  info       Show information about a QPX dataset.
+  validate   Validate a QPX dataset or structure against the canonical schema.
+  ontology   Manage CV ontology data (PSI-MS, PRIDE CV).
+```
+
+### Convert
+
+```bash
+qpxc convert [diann | maxquant | quantms | fragpipe | mzidentml | sdrf] [OPTIONS]
+```
+
+### Transform
+
+```bash
+qpxc transform [gene-map | quantify | normalize-accessions | update-metadata] [OPTIONS]
+```
+
+### Query
+
+```bash
+# Run SQL against a dataset
+qpxc query sql --dataset-path ./PXD014414 --sql "SELECT anchor_protein, COUNT(*) FROM feature GROUP BY 1"
+
+# Filter rows
+qpxc query filter --dataset-path ./PXD014414 --structure feature --condition "charge >= 3"
+
+# Preview first N rows
+qpxc query head --dataset-path ./PXD014414 --structure feature -n 20
+```
+
+### Info & Validate
+
+```bash
+# Dataset summary
+qpxc info --dataset-path ./PXD014414
+
+# Validate against canonical schema
+qpxc validate --dataset-path ./PXD014414
+```
+
+## Configuration
+
+Most commands support a `--verbose` flag that enables more detailed logging to stdout. The CLI uses standard logging configuration and does not require environment variables.
+
+## Development
+
+### Project Structure
+
+```text
+qpx/
+├── cli/                    # Click CLI (entry point: qpx.cli.main:main)
+│   ├── main.py             # Top-level CLI group
+│   └── convert.py          # convert subcommands (maxquant, diann, quantms, fragpipe, mzidentml, sdrf)
+├── converters/             # Tool-specific converters
+│   ├── quantms/            # QuantMS (mzTab) converter
+│   ├── diann/              # DIA-NN converter
+│   ├── maxquant/           # MaxQuant converter
+│   ├── fragpipe/           # FragPipe converter
+│   ├── mzidentml/          # mzIdentML converter
+│   └── sdrf.py             # Shared SDRF converter
+├── core/                   # Core logic & formats
+│   ├── data/               # Schema definitions (YAML + Python)
+│   │   └── schemas/        # YAML schema files for all structures
+│   ├── engine.py           # DuckDB engine wrapper
+│   ├── scores.py           # Score normalization & ontology
+│   └── ontology/           # OBO ontology registry
+├── writers/                # Parquet writers (one per structure)
+├── views/                  # Analytical views (protein, peptide, QC)
+└── dataset.py              # Main Dataset class entry point
+```
+
+### Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests
+5. Submit a pull request
+
+## License
+
+This project is licensed under the Apache-2.0 License - see the LICENSE file for details.
 
 ## Core contributors and collaborators
 
 The project is run by different groups:
 
 - Yasset Perez-Riverol (PRIDE Team, European Bioinformatics Institute - EMBL-EBI, U.K.)
+- Ping Zheng (Chongqing Key Laboratory of Big Data for Bio Intelligence, Chongqing University of Posts and Telecommunications, Chongqing, China)
 
 IMPORTANT: If you contribute with the following specification, please make sure to add your name to the list of contributors.
 
@@ -46,18 +269,9 @@ As part of our efforts toward delivering open and inclusive science, we follow t
 
 ## Copyright notice
 
+```text
+Copyright 2025 BigBio
 
-    This information is free; you can redistribute it and/or modify it
-    under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This information is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this work; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
-
+Licensed under the Apache License, Version 2.0.
+See the LICENSE file for details.
+```

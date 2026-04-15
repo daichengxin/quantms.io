@@ -1,0 +1,42 @@
+# Converter Coverage Matrix
+
+This page lists which QPX data views each converter produces. Use it to see at a glance what output to expect from each tool.
+
+## Views produced per converter
+
+| Converter | PSM | Feature | PG | Pepmap | Sample | Run | Dataset | Ontology | Provenance | mz |
+|-----------|:---:|:-------:|:--:|:------:|:------:|:---:|:-------:|:--------:|:----------:|:--:|
+| **MaxQuant** | Yes | Yes | Yes | No | If SDRF | If SDRF | Yes | If SDRF | No | No |
+| **FragPipe** | Yes | Yes | Yes | No | If SDRF | If SDRF | Yes | If SDRF | No | No |
+| **DIA-NN** | No | Yes | Yes | No | If SDRF | If SDRF | Yes | If SDRF | No | No |
+| **quantms** | Yes | Yes | Yes | No | If SDRF | If SDRF | Yes | Yes | No | No |
+| **mzIdentML** | Yes | No | No | Yes | If SDRF | If SDRF | Yes | Yes | Yes | No |
+| **SDRF** | No | No | No | No | Yes | Yes | No | Optional | No | No |
+
+- **Yes** — the converter produces this view.
+- **No** — the converter does not produce this view (e.g. DIA-NN has no PSM view; mzIdentML has no Feature/PG).
+- **If SDRF** — the view is produced only when an SDRF file is provided (sample and run metadata). SDRF is optional for all converters.
+
+## CLI commands
+
+| Converter | Command |
+|-----------|---------|
+| MaxQuant | `qpxc convert maxquant` |
+| FragPipe | `qpxc convert fragpipe` |
+| DIA-NN | `qpxc convert diann` |
+| quantms | `qpxc convert quantms` |
+| mzIdentML | `qpxc convert mzidentml` |
+| SDRF only | `qpxc convert sdrf` |
+
+## Input files (summary)
+
+| Converter | Typical inputs |
+|-----------|----------------|
+| MaxQuant | msms.txt, evidence.txt, proteinGroups.txt |
+| FragPipe | psm.tsv, combined_ion/combined_peptide, combined_protein |
+| DIA-NN | report (tsv), pg_matrix (optional) |
+| quantms | mzTab; optional MSstats, optional SDRF |
+| mzIdentML | .mzid / .mzid.gz; optional MGF or mzML (file/folder) for spectra; optional SDRF |
+| SDRF | Single SDRF TSV file |
+
+For field-level mappings from each tool’s columns to QPX, see [Tool Field Mappings](tool-mappings.md).

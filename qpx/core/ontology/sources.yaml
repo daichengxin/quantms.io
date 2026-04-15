@@ -1,0 +1,33 @@
+# Ontology source configuration for QPX.
+# Ships with the Python package — configuration only, no data.
+# Data files are resolved via three-layer resolution:
+#   1. Repo checkout (data/ontology/ at repo root)
+#   2. Auto-updated cache (~/.qpx/ontology/)
+#   3. Bundled fallback (qpx/core/ontology/data/)
+
+repo_base_url: "https://raw.githubusercontent.com/bigbio/quantms.io/main/data/ontology"
+cache_dir: "~/.qpx/ontology"
+check_interval_hours: 24
+version_check_timeout_seconds: 5
+
+ontologies:
+  psi_ms:
+    display_name: "PSI-MS Controlled Vocabulary"
+    obo_url: "https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"
+    source_prefix: "MS"
+
+  pride_cv:
+    display_name: "PRIDE Controlled Vocabulary"
+    obo_url: "https://raw.githubusercontent.com/PRIDE-Archive/pride-ontology/master/pride_cv.obo"
+    source_prefix: "PRIDE"
+
+  # --- Phase 2 ---
+  # unimod:
+  #   display_name: "UNIMOD Modifications"
+  #   obo_url: "https://www.unimod.org/obo/unimod.obo"
+  #   source_prefix: "UNIMOD"
+  #
+  # uberon:
+  #   display_name: "UBERON Anatomy Ontology"
+  #   obo_url: "http://purl.obolibrary.org/obo/uberon.obo"
+  #   source_prefix: "UBERON"

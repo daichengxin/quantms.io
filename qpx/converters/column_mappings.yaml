@@ -1,0 +1,195 @@
+# Central column-mapping registry for all supported tools.
+# Each QPX field maps to an ordered list of candidate column names;
+# the first match against actual input columns wins (see resolve_columns()).
+
+fragpipe:
+  tool_name: "FragPipe"
+  tool_versions: "20+"
+  rt_unit: "minute"
+  column_mapping:
+    feature:
+      sequence: ["Peptide Sequence"]
+      modified_sequence: ["Modified Sequence", "Modified Peptide"]
+      pg_accessions: ["Protein", "Protein ID"]
+      gg_names: ["Gene"]
+      observed_mz: ["M/Z"]
+      charge: ["Charge"]
+      charges: ["Charges"]
+      modifications: ["Assigned Modifications"]
+    psm:
+      sequence: ["Peptide"]
+      modified_sequence: ["Modified Peptide"]
+      charge: ["Charge"]
+      observed_mz: ["Observed M/Z"]
+      calculated_mz: ["Calculated M/Z"]
+      rt: ["Retention"]
+      pg_accessions: ["Protein"]
+    pg:
+      pg_accessions: ["Protein", "Protein ID"]
+      gg_accessions: ["Gene", "Gene Names"]
+      pg_names: ["Description", "Protein Description"]
+      pg_qvalue: ["Protein Probability", "Protein FDR", "Protein Q-Value", "Combined Protein FDR"]
+      peptide_count_total: ["Combined Total Peptides", "Total Peptides"]
+      peptide_count_unique: ["Combined Unique Peptides", "Unique Peptides"]
+      spectral_count: ["Combined Spectral Count", "Spectral Count"]
+      sequence_coverage: ["Percent Coverage", "Coverage"]
+      molecular_weight: ["Protein Molecular Weight (Da)"]
+
+diann:
+  tool_name: "DIA-NN"
+  tool_versions: "1.8+"
+  rt_unit: "minute"
+  column_mapping:
+    feature:
+      intensity: ["Precursor.Quantity"]
+      posterior_error_probability: ["PEP"]
+      rt: ["RT"]
+      rt_start: ["RT.Start"]
+      rt_stop: ["RT.Stop"]
+      predicted_rt: ["Predicted.RT"]
+      pg_accessions: ["Protein.Group"]
+      observed_mz: ["Precursor.Mz"]
+      charge: ["Precursor.Charge"]
+      sequence: ["Stripped.Sequence"]
+      modified_sequence: ["Modified.Sequence"]
+      gg_names: ["Genes"]
+      run_file_name: ["Run"]
+      qvalue: ["Q.Value"]
+      pg_qvalue: ["PG.Q.Value"]
+      global_qvalue: ["Global.Q.Value"]
+      pg_global_qvalue: ["Global.PG.Q.Value"]
+      mp_accessions: ["Protein.Ids"]
+      normalize_intensity: ["Precursor.Normalised"]
+      ms1_area: ["Ms1.Area"]
+      lfq_maxlfq: ["PG.MaxLFQ"]
+      precursor_quantification_score: ["Quantity.Quality"]
+      ms2_scan: ["MS2.Scan"]
+      ion_mobility: ["IM"]
+      mass_error_ppm: ["Mass.Error (ppm)"]
+      ion_mobility_start: ["IM.Start"]
+      ion_mobility_stop: ["IM.Stop"]
+      cscore: ["CScore"]
+      evidence: ["Evidence"]
+      spectrum_similarity: ["Spectrum.Similarity"]
+      ms1_profile_corr: ["Ms1.Profile.Corr"]
+      mass_evidence: ["Mass.Evidence"]
+      averagine: ["Averagine"]
+      lib_qvalue: ["Lib.Q.Value"]
+      lib_pg_qvalue: ["Lib.PG.Q.Value"]
+      protein_qvalue: ["Protein.Q.Value"]
+      decoy_cscore: ["Decoy.CScore"]
+      decoy_evidence: ["Decoy.Evidence"]
+      translated_quality: ["Translated.Quality"]
+      translated_qvalue: ["Translated.Q.Value"]
+      proteotypic: ["Proteotypic"]
+      irt: ["iRT"]
+      predicted_irt: ["Predicted.iRT"]
+      predicted_im: ["Predicted.IM"]
+      predicted_iim: ["Predicted.iIM"]
+      iim: ["iIM"]
+      decoy: ["Decoy"]
+    pg:
+      intensity: ["Precursor.Quantity", "PG.Quantity"]
+      pg_accessions: ["Protein.Group"]
+      pg_names: ["Protein.Names"]
+      gg_accessions: ["Genes"]
+      global_qvalue: ["Global.PG.Q.Value"]
+      gg_qvalue: ["GG.Q.Value"]
+      lfq: ["PG.MaxLFQ"]
+      qvalue: ["PG.Q.Value"]
+      run_file_name: ["Run"]
+
+maxquant:
+  tool_name: "MaxQuant"
+  tool_versions: "2.x"
+  rt_unit: "minute"
+  column_mapping:
+    feature:
+      sequence: ["Sequence"]
+      modified_sequence: ["Modified sequence"]
+      charge: ["Charge"]
+      run_file_name: ["Raw file"]
+      is_decoy: ["Reverse"]
+      scan: ["MS/MS scan number"]
+      observed_mz: ["m/z"]
+      rt: ["Calibrated retention time"]
+      rt_start: ["Calibrated retention time start"]
+      rt_stop: ["Calibrated retention time finish"]
+      posterior_error_probability: ["PEP"]
+      ion_mobility: ["1/K0"]
+      pg_accessions: ["Leading proteins"]
+      anchor_protein: ["Leading razor protein"]
+      gg_names: ["Gene names"]
+      intensity: ["Intensity"]
+      andromeda_score: ["Score"]
+      andromeda_delta_score: ["Delta score"]
+      mass: ["Mass"]
+      mass_error_ppm: ["Mass error [ppm]"]
+      missed_cleavages: ["Missed cleavages"]
+    psm:
+      sequence: ["Sequence"]
+      modified_sequence: ["Modified sequence"]
+      charge: ["Charge"]
+      run_file_name: ["Raw file"]
+      is_decoy: ["Reverse"]
+      scan: ["Scan number", "MS/MS scan number"]
+      observed_mz: ["m/z"]
+      rt: ["Retention time"]
+      posterior_error_probability: ["PEP"]
+      andromeda_score: ["Score"]
+      andromeda_delta_score: ["Delta score"]
+      mass_error_ppm: ["Mass error [ppm]"]
+      missed_cleavages: ["Missed cleavages"]
+    pg:
+      pg_accessions: ["Protein IDs"]
+      pg_names: ["Protein names"]
+      gg_accessions: ["Gene names"]
+      anchor_protein: ["Majority protein IDs"]
+      global_qvalue: ["Q-value"]
+      is_decoy: ["Reverse"]
+      contaminant: ["Potential contaminant"]
+      sequence_coverage: ["Sequence coverage [%]"]
+      molecular_weight: ["Mol. weight [kDa]"]
+      peptide_count_total: ["Peptides"]
+      peptide_count_unique: ["Unique peptides"]
+      peptide_count_razor: ["Razor + unique peptides"]
+      andromeda_score: ["Score"]
+      intensity: ["Intensity"]
+
+quantms:
+  tool_name: "quantms"
+  tool_versions: "mzTab 1.0"
+  rt_unit: "minute"
+  phospho_site_columns:
+    opt_global_phosphors_score: "phosphors_site_probability"
+    opt_global_phosphors_site_probability: "phosphors_site_probability"
+    opt_global_ptmrs_site_probability: "ptmrs_site_probability"
+    opt_global_ptm_site_probability: "ptmrs_site_probability"
+    opt_global_luciphor_score: "luciphor_site_probability"
+    opt_global_luciphor_site_probability: "luciphor_site_probability"
+    "opt_global_d-score": "d_score_site_probability"
+  column_mapping:
+    feature:
+      peptidoform: ["PeptideSequence", "peptidoform", "Peptide"]
+      pg_accessions: ["ProteinName", "pg_accessions", "Protein"]
+      run_file_name: ["Reference", "reference_file_name", "Run"]
+      charge: ["Charge", "charge", "PrecursorCharge"]
+      intensity: ["Intensity", "intensity"]
+      channel: ["Channel", "channel"]
+      rt: ["RetentionTime", "rt", "RT"]
+    pg:
+      pg_accessions: ["ProteinName", "pg_accessions", "Protein"]
+      run_file_name: ["Reference", "reference_file_name", "Run"]
+      peptidoform: ["PeptideSequence", "peptidoform", "Peptide"]
+      charge: ["Charge", "charge", "PrecursorCharge"]
+      intensity: ["Intensity", "intensity"]
+      channel: ["Channel", "channel", "IsotopeLabelType"]
+    psm:
+      sequence: ["sequence"]
+      peptidoform: ["opt_global_cv_MS:1000889_peptidoform_sequence"]
+      charge: ["charge"]
+      posterior_error_probability: ["opt_global_Posterior_Error_Probability_score"]
+      is_decoy: ["opt_global_cv_MS:1002217_decoy_peptide"]
+      calculated_mz: ["calc_mass_to_charge"]
+      observed_mz: ["exp_mass_to_charge"]
+      rt: ["retention_time"]
