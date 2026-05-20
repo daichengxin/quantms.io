@@ -14,7 +14,7 @@ A standardized format and toolkit for mass spectrometry proteomics data
 QPX is a comprehensive ecosystem for proteomics data that provides:
 
 - **Standardized Data Format**: Parquet-based format for efficient storage and processing of proteomics data
-- **Universal Converter**: Convert data from MaxQuant, DIA-NN, FragPipe, quantms, mzIdentML, and more
+- **Universal Converter**: Convert data from MaxQuant, DIA-NN, Spectronaut, FragPipe, quantms, mzIdentML, and more
 - **Complete Toolkit**: Process, analyze, visualize, and share your proteomics results
 - **Python API & CLI**: Flexible tools for both programmatic and command-line usage
 
@@ -34,14 +34,15 @@ QPX provides a comprehensive proteomics data processing architecture with core m
 
 ## Supported Input Formats
 
-| Software      | PSM              | Feature              | Protein Group        |
-| ------------- | ---------------- | -------------------- | -------------------- |
-| **MaxQuant**  | msms.txt         | evidence.txt         | proteinGroups.txt    |
-| **DIA-NN**    | -                | report.tsv           | pg_matrix.tsv        |
-| **FragPipe**  | psm.tsv          | combined_peptide.tsv | combined_protein.tsv |
-| **quantms**   | mzTab PSM section| mzTab + MSstats      | mzTab PRT section    |
-| **mzIdentML** | .mzid / .mzid.gz | -                    | -                    |
-| **SDRF**      | -                | -                    | - (sample + run)     |
+| Software        | PSM              | Feature              | Protein Group            |
+| --------------- | ---------------- | -------------------- | ------------------------ |
+| **MaxQuant**    | msms.txt         | evidence.txt         | proteinGroups.txt        |
+| **DIA-NN**      | -                | report.tsv           | pg_matrix.tsv            |
+| **Spectronaut** | -                | report.tsv           | report.tsv (PG.Quantity) |
+| **FragPipe**    | psm.tsv          | combined_peptide.tsv | combined_protein.tsv     |
+| **quantms**     | mzTab PSM section| mzTab + MSstats      | mzTab PRT section        |
+| **mzIdentML**   | .mzid / .mzid.gz | -                    | -                        |
+| **SDRF**        | -                | -                    | - (sample + run)         |
 
 All conversions produce standardized Parquet and AnnData files following the [QPX specification](spec/index.md).
 

@@ -20,12 +20,16 @@ from qpx.converters.maxquant.feature_adapter import MaxQuantFeatureAdapter
 from qpx.converters.maxquant.pg_adapter import MaxQuantPgAdapter
 from qpx.converters.maxquant.psm_adapter import MaxQuantPsmAdapter
 from qpx.converters.mzidentml.psm_adapter import MzIdentMLPsmAdapter
+from qpx.converters.openms.converter import OpenMSConverter
 from qpx.converters.orchestrator import BaseOrchestrator, build_dataset_record
 from qpx.converters.quantms.converter import QuantMSConverter
 from qpx.converters.quantms.feature_adapter import QuantmsFeatureAdapter
 from qpx.converters.quantms.pg_adapter import QuantmsPgAdapter
 from qpx.converters.quantms.psm_adapter import QuantmsPsmAdapter
 from qpx.converters.sdrf import SdrfConverter
+from qpx.converters.spectronaut.converter import SpectronautConverter
+from qpx.converters.spectronaut.feature_adapter import SpectronautFeatureAdapter
+from qpx.converters.spectronaut.pg_adapter import SpectronautPgAdapter
 
 __all__ = [
     # Base
@@ -55,4 +59,10 @@ __all__ = [
     "FragPipeConverter",
     # mzIdentML
     "MzIdentMLPsmAdapter",
+    # OpenMS
+    "OpenMSConverter",
+    # Spectronaut
+    "SpectronautFeatureAdapter",
+    "SpectronautPgAdapter",
+    "SpectronautConverter",
 ]

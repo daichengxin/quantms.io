@@ -1,0 +1,251 @@
+"""Spectronaut converter integration tests using small example dataset.
+
+Runs the full Spectronaut conversion pipeline once (module scope) and
+validates that feature.parquet, pg.parquet, and ontology.parquet are
+written with correct schemas and plausible values.
+"""
+
+from pathlib import Path
+
+import pyarrow.parquet as pq
+import pytest
+
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples" / "spectronaut" / "small"
+
+_REPORT = EXAMPLES_DIR / "spectronaut_report.tsv"
+
+
+# ---------------------------------------------------------------------------
+# Module-scoped fixture: run conversion once, share outputs across tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def converted_output(tmp_path_factory):
+    """Run Spectronaut conversion once for all tests in this module."""
+    from qpx.converters.spectronaut.converter import SpectronautConverter
+
+    if not _REPORT.exists():
+        pytest.skip(f"Test data not found: {_REPORT}")
+
+    output = tmp_path_factory.mktemp("spectronaut_output")
+
+    converter = SpectronautConverter(report_path=str(_REPORT))
+    converter.convert_features(
+        qvalue_threshold=1.0,
+        output_folder=str(output),
+        output_prefix="sn_test",
+    )
+    converter.convert_pg(
+        output_folder=str(output),
+        output_prefix="sn_test",
+    )
+    converter.write_ontology(output_folder=output, prefix="sn_test")
+    converter.write_provenance(output_folder=output, prefix="sn_test")
+    converter.write_dataset(output_folder=output, prefix="sn_test")
+
+    return output
+
+
+@pytest.fixture(scope="module")
+def feature_table(converted_output):
+    """Read the feature.parquet produced by the converter."""
+    path = converted_output / "sn_test.feature.parquet"
+    if not path.exists():
+        pytest.skip("feature.parquet was not produced")
+    return pq.read_table(str(path))
+
+
+@pytest.fixture(scope="module")
+def pg_table(converted_output):
+    """Read the pg.parquet produced by the converter."""
+    path = converted_output / "sn_test.pg.parquet"
+    if not path.exists():
+        pytest.skip("pg.parquet was not produced")
+    return pq.read_table(str(path))
+
+
+# ---------------------------------------------------------------------------
+# Feature conversion tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestSpectronautFeatureConversion:
+    """Validate feature.parquet output from Spectronaut conversion."""
+
+    def test_file_exists(self, converted_output):
+        path = converted_output / "sn_test.feature.parquet"
+        assert path.exists(), "feature.parquet was not created"
+
+    def test_has_rows(self, feature_table):
+        assert feature_table.num_rows > 0, "feature.parquet is empty"
+
+    def test_key_columns_present(self, feature_table):
+        column_names = set(feature_table.column_names)
+        expected = {"sequence", "charge", "intensities", "run_file_name"}
+        missing = expected - column_names
+        assert not missing, f"Missing columns: {missing}"
+
+    def test_sequence_values_are_nonempty(self, feature_table):
+        sequences = feature_table.column("sequence").to_pylist()
+        for seq in sequences:
+            assert isinstance(seq, str) and len(seq) > 0
+
+    def test_charge_values_are_valid(self, feature_table):
+        charges = feature_table.column("charge").to_pylist()
+        for charge in charges:
+            assert 1 <= charge <= 10, f"Charge out of range: {charge}"
+
+    def test_intensities_are_nonnegative(self, feature_table):
+        rows = feature_table.column("intensities").to_pylist()
+        for row_intensities in rows:
+            assert row_intensities is not None and len(row_intensities) > 0
+            for entry in row_intensities:
+                assert entry["intensity"] >= 0, f"Negative intensity: {entry['intensity']}"
+
+    def test_run_file_names_are_nonempty(self, feature_table):
+        run_names = feature_table.column("run_file_name").to_pylist()
+        for name in run_names:
+            assert isinstance(name, str) and len(name) > 0
+
+    def test_two_runs_present(self, feature_table):
+        run_names = set(feature_table.column("run_file_name").to_pylist())
+        assert len(run_names) == 2, f"Expected 2 runs, got {len(run_names)}"
+
+    def test_scan_is_empty_list(self, feature_table):
+        scans = feature_table.column("scan").to_pylist()
+        for scan in scans:
+            assert scan == [], f"Expected empty scan list, got {scan}"
+
+    def test_schema_validation(self, feature_table):
+        from qpx.core.data import FeatureSchema
+
+        errors = FeatureSchema.validate(feature_table)
+        assert not errors, f"Schema validation errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Protein group conversion tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestSpectronautPgConversion:
+    """Validate pg.parquet output from Spectronaut conversion."""
+
+    def test_file_exists(self, converted_output):
+        path = converted_output / "sn_test.pg.parquet"
+        assert path.exists(), "pg.parquet was not created"
+
+    def test_has_rows(self, pg_table):
+        assert pg_table.num_rows > 0, "pg.parquet is empty"
+
+    def test_key_columns_present(self, pg_table):
+        column_names = set(pg_table.column_names)
+        expected = {
+            "pg_accessions",
+            "anchor_protein",
+            "run_file_name",
+            "intensities",
+        }
+        missing = expected - column_names
+        assert not missing, f"Missing columns: {missing}"
+
+    def test_protein_accessions_are_nonempty(self, pg_table):
+        accessions_col = pg_table.column("pg_accessions").to_pylist()
+        for accessions in accessions_col:
+            assert accessions is not None and len(accessions) > 0
+            for acc in accessions:
+                assert isinstance(acc, str) and len(acc) > 0
+
+    def test_anchor_protein_is_nonempty(self, pg_table):
+        anchors = pg_table.column("anchor_protein").to_pylist()
+        for anchor in anchors:
+            assert isinstance(anchor, str) and len(anchor) > 0
+
+    def test_run_file_names_are_nonempty(self, pg_table):
+        run_names = pg_table.column("run_file_name").to_pylist()
+        for name in run_names:
+            assert isinstance(name, str) and len(name) > 0
+
+    def test_intensities_structure(self, pg_table):
+        rows = pg_table.column("intensities").to_pylist()
+        for row_intensities in rows:
+            assert row_intensities is not None and len(row_intensities) > 0
+            for entry in row_intensities:
+                assert "label" in entry
+                assert "intensity" in entry
+
+    def test_schema_validation(self, pg_table):
+        from qpx.core.data import PgSchema
+
+        errors = PgSchema.validate(pg_table)
+        assert not errors, f"Schema validation errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Ontology conversion tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestSpectronautOntologyConversion:
+    """Validate ontology.parquet output from Spectronaut conversion."""
+
+    def test_ontology_file_exists_or_no_scores(self, converted_output):
+        path = converted_output / "sn_test.ontology.parquet"
+        if not path.exists():
+            pytest.skip("ontology.parquet not written (no scores discovered)")
+        table = pq.read_table(str(path))
+        assert table.num_rows > 0, "ontology.parquet exists but is empty"
+
+    def test_ontology_columns(self, converted_output):
+        path = converted_output / "sn_test.ontology.parquet"
+        if not path.exists():
+            pytest.skip("ontology.parquet not written (no scores discovered)")
+        table = pq.read_table(str(path))
+        column_names = set(table.column_names)
+        expected = {"field_name", "view"}
+        missing = expected - column_names
+        assert not missing, f"Missing ontology columns: {missing}"
+
+    def test_schema_validation(self, converted_output):
+        from qpx.core.data import OntologySchema
+
+        path = converted_output / "sn_test.ontology.parquet"
+        if not path.exists():
+            pytest.skip("ontology.parquet not written (no scores discovered)")
+        table = pq.read_table(str(path))
+        errors = OntologySchema.validate(table)
+        assert not errors, f"Schema validation errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Provenance tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestSpectronautProvenance:
+    """Validate provenance.parquet output."""
+
+    def test_provenance_exists(self, converted_output):
+        path = converted_output / "sn_test.provenance.parquet"
+        assert path.exists(), "provenance.parquet was not created"
+
+    def test_has_spectronaut_step(self, converted_output):
+        path = converted_output / "sn_test.provenance.parquet"
+        if not path.exists():
+            pytest.skip("provenance.parquet not written")
+        table = pq.read_table(str(path))
+        tool_names = table.column("tool_name").to_pylist()
+        assert any("Spectronaut" in str(t) for t in tool_names if t), "Expected Spectronaut in provenance tool_names"
+
+    def test_has_qpx_step(self, converted_output):
+        path = converted_output / "sn_test.provenance.parquet"
+        if not path.exists():
+            pytest.skip("provenance.parquet not written")
+        table = pq.read_table(str(path))
+        tool_names = table.column("tool_name").to_pylist()
+        assert any("qpx" in str(t).lower() for t in tool_names if t), "Expected qpx in provenance tool_names"

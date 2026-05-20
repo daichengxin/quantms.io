@@ -99,6 +99,7 @@ The `convert` command group provides converters for multiple proteomics software
 
 - [quantms](#quantms) - Convert QuantMS mzTab output to QPX format
 - [diann](#diann) - Convert DIA-NN report to QPX format
+- [spectronaut](#spectronaut) - Convert Spectronaut report to QPX format
 - [maxquant](#maxquant) - Convert MaxQuant output to QPX format
 - [fragpipe](#fragpipe) - Convert FragPipe output to QPX format
 - [mzidentml](#mzidentml) - Convert mzIdentML file to PSM format
@@ -285,6 +286,103 @@ Output files generated:
 - Use verbose mode during initial testing to diagnose issues
 - Ensure SDRF file correctly matches sample names in DIA-NN report
 - For protein groups, ensure both report and pg_matrix files are from the same DIA-NN run
+
+---
+
+## spectronaut
+
+Convert Spectronaut report files to QPX format.
+
+### Description {#spectronaut-description}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_spectronaut_cmd
+print(generate_description(convert_spectronaut_cmd))
+```
+
+### Parameters {#spectronaut-parameters}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_spectronaut_cmd
+print(generate_params_table(convert_spectronaut_cmd))
+```
+
+### Usage Examples {#spectronaut-examples}
+
+#### Basic Example {#spectronaut-example-basic}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_spectronaut_cmd
+print(generate_example(convert_spectronaut_cmd, 'Convert Spectronaut data with default settings:'))
+```
+
+#### With SDRF Metadata {#spectronaut-example-sdrf}
+
+```bash
+qpxc convert spectronaut \
+    --report-path report.tsv \
+    --sdrf-file data.sdrf.tsv \
+    --output-folder ./qpx_output \
+    --qvalue-threshold 0.01 \
+    --verbose
+```
+
+#### Large Dataset with Custom DuckDB Settings {#spectronaut-example-large}
+
+```bash
+qpxc convert spectronaut \
+    --report-path large_report.tsv \
+    --sdrf-file data.sdrf.tsv \
+    --output-folder ./qpx_output \
+    --duckdb-max-memory 16GB \
+    --duckdb-threads 8 \
+    --verbose
+```
+
+### Output Files {#spectronaut-output}
+
+Output files generated:
+
+- **Feature**: `{output-prefix}.feature.parquet` (always produced)
+- **Protein Group**: `{output-prefix}.pg.parquet` (always produced)
+- **Ontology**: `{output-prefix}.ontology.parquet` (score CV terms)
+- **Provenance**: `{output-prefix}.provenance.parquet` (conversion metadata)
+
+### Supported Spectronaut Columns {#spectronaut-columns}
+
+The converter auto-detects column names from the Spectronaut report, supporting both standard and custom column naming. Key mapped columns include:
+
+| Spectronaut Column       | QPX Field                  | Notes                              |
+| ------------------------ | -------------------------- | ---------------------------------- |
+| `R.FileName`             | `run_file_name`            | File extensions auto-stripped      |
+| `PEP.StrippedSequence`   | `sequence`                 | Bare amino acid sequence           |
+| `EG.ModifiedSequence`    | `peptidoform`              | Converted to ProForma notation     |
+| `FG.Charge`              | `charge`                   | Precursor charge state             |
+| `FG.Quantity`            | `intensities[0].intensity` | Raw precursor intensity            |
+| `EG.Qvalue`              | `additional_scores`        | Mapped to PSI-MS CV terms          |
+| `PG.ProteinGroups`       | `pg_accessions`            | Semicolon-delimited protein groups |
+| `PG.Quantity`            | PG `intensities`           | Protein group quantity             |
+
+### Common Issues {#spectronaut-issues}
+
+**Issue**: European decimal separator (comma instead of period)
+
+- **Solution**: The converter auto-detects decimal separators by inspecting the `EG.Qvalue` column
+
+**Issue**: Out of memory with large reports
+
+- **Solution**: Increase `--duckdb-max-memory` (e.g., `16GB`) and `--duckdb-threads`
+
+**Issue**: Missing modifications in output
+
+- **Solution**: Ensure `EG.ModifiedSequence` column is present in the Spectronaut export
+
+### Best Practices {#spectronaut-best-practices}
+
+- Export all required columns from Spectronaut (at minimum: `R.FileName`, `PEP.StrippedSequence`, `EG.ModifiedSequence`, `FG.Charge`, `FG.Quantity`, `PG.ProteinGroups`)
+- Provide SDRF file for complete sample and run metadata
+- Use Q-value threshold of 0.01 or 0.05 for high-confidence results
+- For large datasets (>10M rows), increase DuckDB memory and threads
 
 ---
 

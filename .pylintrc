@@ -1,4 +1,5 @@
 [MESSAGES CONTROL]
 disable=arguments-differ,
         unexpected-keyword-arg,
-        no-value-for-parameter
+        no-value-for-parameter,
+        line-too-long

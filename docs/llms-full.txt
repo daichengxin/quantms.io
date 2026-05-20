@@ -1,0 +1,112 @@
+# qpx — Full Reference
+
+> Python toolkit for the QPX quantitative proteomics Parquet format.
+
+## Overview
+
+qpx defines a standardized Parquet-based format (QPX) for quantitative proteomics data and provides tools to convert, query, transform, validate, and export datasets.
+
+## Installation
+
+pip install qpx                    # Core
+pip install qpx[all]               # All optional dependencies
+pip install qpx[mzidentml]         # mzIdentML support
+pip install qpx[transforms]        # Gene mapping, AnnData export
+pip install qpx[plotting]          # Visualization
+pip install qpx[quantify]          # Integration with mokume
+
+## CLI Usage
+
+### Convert mzTab to QPX
+qpxc convert mztab input.mzTab -o output.parquet
+
+### Convert MaxQuant to QPX
+qpxc convert maxquant evidence.txt proteinGroups.txt -o output.parquet
+
+### Convert DIA-NN report to QPX
+qpxc convert diann report.tsv -o output.parquet
+
+### Validate a QPX file
+qpxc validate dataset.parquet
+
+### Query with SQL
+qpxc query dataset.parquet "SELECT ProteinName, AVG(Intensity) FROM psms GROUP BY ProteinName"
+
+## Python API
+
+### Reading QPX files
+import qpx
+
+# Read as pandas DataFrame
+df = qpx.read_parquet("dataset.parquet")
+
+# Read with DuckDB (lazy, memory-efficient)
+conn = qpx.connect("dataset.parquet")
+result = conn.sql("SELECT * FROM psms WHERE Intensity > 1000").df()
+
+### Converting formats
+from qpx.converters import MzTabConverter, MaxQuantConverter, DiannConverter
+
+# mzTab → QPX
+converter = MzTabConverter("results.mzTab")
+converter.convert("output.parquet")
+
+# MaxQuant → QPX
+converter = MaxQuantConverter("evidence.txt", "proteinGroups.txt")
+converter.convert("output.parquet")
+
+# DIA-NN → QPX
+converter = DiannConverter("report.tsv")
+converter.convert("output.parquet")
+
+### Transforms
+from qpx.transforms import gene_mapping, protein_grouping
+
+# Map UniProt accessions to gene names
+df = gene_mapping(df, organism="human")
+
+# Group protein accessions
+df = protein_grouping(df, method="razor")
+
+### Export
+import qpx
+
+# To AnnData (for scanpy)
+adata = qpx.to_anndata(df)
+adata.write("dataset.h5ad")
+
+# To CSV
+qpx.to_csv(df, "dataset.csv")
+
+## QPX Format Specification
+
+QPX files are Apache Parquet files with standardized column names:
+
+### Required Columns
+- ProteinName (string): Protein accession(s)
+- PeptideSequence (string): Peptide sequence
+- Charge (int): Precursor charge state
+- Intensity (float): Quantification value
+
+### Optional Columns
+- SampleID (string): Sample identifier
+- Condition (string): Experimental condition
+- Fraction (int): Fraction number
+- RetentionTime (float): Retention time in seconds
+- MassToCharge (float): Precursor m/z
+- ModifiedSequence (string): Modified peptide sequence
+- Score (float): Identification score
+- QValue (float): q-value (FDR)
+
+## Troubleshooting
+
+- "Column not found": QPX requires standardized column names — check that input format is supported
+- Large files slow: use DuckDB backend (qpx.connect()) instead of pandas
+- mzIdentML support: install with pip install qpx[mzidentml]
+
+## Related Tools
+
+- quantms: DDA pipeline that outputs QPX-compatible data (https://docs.quantms.org)
+- quantmsdiann: DIA pipeline (https://quantmsdiann.quantms.org)
+- mokume: protein quantification from QPX data (https://mokume.quantms.org)
+- quantms Portal: hosts QPX datasets (https://portal.quantms.org)

@@ -1,0 +1,36 @@
+# Exclude non-essential content from the Docker build context.
+# Keep only what ``pip install .`` needs: pyproject.toml, README.md, LICENSE, qpx/.
+
+.git/
+.github/
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.tmp/
+.vscode/
+.windsurf/
+.idea/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.coverage
+coverage.xml
+.DS_Store
+.venv/
+venv/
+env/
+
+# Project-specific large/non-essential dirs
+tests/
+docs/
+site/
+benchmarks/
+scripts/
+data/
+
+# Docker-related files are not needed inside the image
+Dockerfile
+.dockerignore

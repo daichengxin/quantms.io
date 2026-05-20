@@ -174,7 +174,7 @@ class FragPipePsmAdapter(BaseConverter):
         )
         calculated_mz = safe_float(row.get(r.get("calculated_mz", "Calculated M/Z"))) or 0.0
 
-        # RT
+        # RT (FragPipe Retention is already in seconds)
         rt = safe_float(row.get(r.get("rt", "Retention")))
 
         # PEP (FragPipe uses PeptideProphet Probability; convert to 1-prob)

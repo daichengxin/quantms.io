@@ -60,6 +60,9 @@ _CV_MAPPINGS = [
 ]
 
 
+_RT_SECONDS_FACTOR = 60.0
+
+
 class DiannFeatureAdapter(DiaNNBaseAdapter):
     """Convert DIA-NN report to ``feature.parquet``.
 
@@ -315,9 +318,13 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         me_col = r.get("mass_error_ppm")
         parts.append(f"{_sf(me_col)} AS mass_error_ppm" if me_col and _has(me_col) else "NULL::FLOAT AS mass_error_ppm")
 
-        # predicted_rt
+        # predicted_rt (minutes → seconds)
         prt_col = r.get("predicted_rt")
-        parts.append(f"{_sf(prt_col)} AS predicted_rt" if prt_col and _has(prt_col) else "NULL::FLOAT AS predicted_rt")
+        parts.append(
+            f"CAST({_sf(prt_col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS predicted_rt"
+            if prt_col and _has(prt_col)
+            else "NULL::FLOAT AS predicted_rt"
+        )
 
         # run_file_name (strip extension)
         parts.append(f"regexp_replace(r.\"{run_col}\", '\\.(mzML|raw|d)$', '') AS run_file_name")
@@ -331,9 +338,11 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         else:
             parts.append("[]::INTEGER[] AS scan")
 
-        # rt
+        # rt (minutes → seconds)
         rt_col = r.get("rt")
-        parts.append(f"{_sf(rt_col)} AS rt" if rt_col and _has(rt_col) else "NULL::FLOAT AS rt")
+        parts.append(
+            f"CAST({_sf(rt_col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS rt" if rt_col and _has(rt_col) else "NULL::FLOAT AS rt"
+        )
 
         # ion_mobility
         im_col = r.get("ion_mobility")
@@ -375,10 +384,12 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         # id_run_file_name
         parts.append(f"regexp_replace(r.\"{run_col}\", '\\.(mzML|raw|d)$', '') AS id_run_file_name")
 
-        # rt_start / rt_stop
+        # rt_start / rt_stop (minutes → seconds)
         for field in ("rt_start", "rt_stop"):
             col = r.get(field)
-            parts.append(f"{_sf(col)} AS {field}" if col and _has(col) else f"NULL::FLOAT AS {field}")
+            parts.append(
+                f"CAST({_sf(col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS {field}" if col and _has(col) else f"NULL::FLOAT AS {field}"
+            )
 
         # --- Nested: intensities ---
         int_col = r["intensity"]
@@ -603,7 +614,7 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         """Merge MS scan info (scan, observed_mz) with report data for a single run."""
         target = pd.read_parquet(ms_info_path, columns=["rt", "scan", "precursor_mz"])
         target = target.rename(columns={"precursor_mz": "observed_mz"})
-        target["rt"] = target["rt"] / 60  # Convert to minutes
+        # ms_info RT is already in seconds (matching report RT after SQL conversion)
 
         # Ensure matching types for merge_asof (SQL may produce float32, ms_info float64)
         run_data = run_data.copy()

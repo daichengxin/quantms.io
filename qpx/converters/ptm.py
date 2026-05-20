@@ -322,14 +322,45 @@ def from_proforma(
 # ---------------------------------------------------------------------------
 
 
+def _sum_sequence_mass(modified_seq: str) -> Optional[float]:
+    """Sum residue + modification masses for a modified sequence string.
+
+    Supports ``(UniMod:N)`` and ``[UNIMOD:N]`` bracket formats,
+    as well as the ProForma N-term separator ``-``.
+    """
+    mass = 0.0
+    i = 0
+    n = len(modified_seq)
+
+    while i < n:
+        ch = modified_seq[i]
+        if ch in ("(", "["):
+            close = ")" if ch == "(" else "]"
+            end = modified_seq.index(close, i)
+            delta = parse_unimod_delta(modified_seq[i + 1 : end])
+            if delta is None:
+                return None
+            mass += delta
+            i = end + 1
+        elif ch == "-":
+            i += 1
+        else:
+            aa_mass = AA_MASS.get(ch.upper())
+            if aa_mass is None:
+                return None
+            mass += aa_mass
+            i += 1
+    return mass
+
+
 def compute_precursor_mz(modified_seq: str, charge: int) -> Optional[float]:
     """Compute theoretical precursor m/z for a modified peptide.
 
-    Uses monoisotopic amino-acid masses plus modification deltas encoded as
-    ``(UniMod:N)`` tokens.
+    Supports ``(UniMod:N)``, ProForma ``[UNIMOD:N]``, and N-term ``-``.
 
     Args:
-        modified_seq: Modified sequence, e.g. ``PEPTM(UniMod:35)IDE``.
+        modified_seq: Modified sequence, e.g. ``PEPTM(UniMod:35)IDE``
+            or ``PEPTM[UNIMOD:35]IDE`` or ``[UNIMOD:1]-PEPTIDE``.
         charge: Precursor charge state.
 
     Returns:
@@ -337,28 +368,9 @@ def compute_precursor_mz(modified_seq: str, charge: int) -> Optional[float]:
     """
     if not modified_seq or charge <= 0:
         return None
-
-    mass = 0.0
-    i = 0
-    n = len(modified_seq)
-
-    while i < n:
-        if modified_seq[i] == "(":
-            end = modified_seq.index(")", i)
-            mod_token = modified_seq[i + 1 : end]
-            delta = parse_unimod_delta(mod_token)
-            if delta is None:
-                return None
-            mass += delta
-            i = end + 1
-        else:
-            aa = modified_seq[i]
-            aa_mass = AA_MASS.get(aa.upper())
-            if aa_mass is None:
-                return None
-            mass += aa_mass
-            i += 1
-
+    mass = _sum_sequence_mass(modified_seq)
+    if mass is None:
+        return None
     neutral_mass = mass + WATER_MASS
     return (neutral_mass + charge * PROTON_MASS) / charge
 

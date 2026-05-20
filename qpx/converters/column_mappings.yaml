@@ -5,7 +5,7 @@
 fragpipe:
   tool_name: "FragPipe"
   tool_versions: "20+"
-  rt_unit: "minute"
+  rt_unit: "second"
   column_mapping:
     feature:
       sequence: ["Peptide Sequence"]
@@ -159,7 +159,7 @@ maxquant:
 quantms:
   tool_name: "quantms"
   tool_versions: "mzTab 1.0"
-  rt_unit: "minute"
+  rt_unit: "second"
   phospho_site_columns:
     opt_global_phosphors_score: "phosphors_site_probability"
     opt_global_phosphors_site_probability: "phosphors_site_probability"
@@ -193,3 +193,44 @@ quantms:
       calculated_mz: ["calc_mass_to_charge"]
       observed_mz: ["exp_mass_to_charge"]
       rt: ["retention_time"]
+
+spectronaut:
+  tool_name: "Spectronaut"
+  tool_versions: "14+"
+  rt_unit: "minute"
+  column_mapping:
+    feature:
+      sequence: ["PEP.StrippedSequence"]
+      modified_sequence: ["EG.ModifiedSequence", "EG.ModifiedPeptide"]
+      charge: ["FG.Charge"]
+      run_file_name: ["R.FileName"]
+      pg_accessions: ["PG.ProteinGroups"]
+      pg_protein_accessions: ["PG.ProteinAccessions"]
+      intensity: ["FG.Quantity"]
+      observed_mz: ["FG.PrecMz"]
+      observed_mz_calibrated: ["FG.PrecMzCalibrated"]
+      qvalue: ["EG.Qvalue"]
+      pg_qvalue: ["PG.Qvalue"]
+      pg_qvalue_runwise: ["PG.QValue (Run-Wise)"]
+      posterior_error_probability: ["EG.PEP"]
+      is_decoy: ["EG.IsDecoy"]
+      is_proteotypic: ["PEP.IsProteotypic"]
+      missed_cleavages: ["PEP.NrOfMissedCleavages"]
+      rt: ["EG.ApexRT"]
+      predicted_rt: ["EG.RTPredicted"]
+      irt_predicted: ["EG.iRTPredicted"]
+      irt_empirical: ["EG.iRTEmpirical"]
+      cscore: ["EG.Cscore"]
+      pg_cscore: ["PG.Cscore"]
+      is_imputed: ["EG.IsImputed"]
+      pg_quantity: ["PG.Quantity"]
+      gg_names: ["PG.Genes"]
+    pg:
+      pg_accessions: ["PG.ProteinGroups"]
+      pg_protein_accessions: ["PG.ProteinAccessions"]
+      pg_names: ["PG.ProteinNames"]
+      gg_accessions: ["PG.Genes"]
+      intensity: ["PG.Quantity"]
+      qvalue: ["PG.Qvalue"]
+      pg_qvalue_runwise: ["PG.QValue (Run-Wise)"]
+      run_file_name: ["R.FileName"]
