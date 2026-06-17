@@ -139,6 +139,9 @@ Now that you've completed your first conversion, explore more:
 # Convert DIA-NN data
 qpxc convert diann --report-path report.tsv --sdrf-file data.sdrf.tsv --output-folder ./output
 
+# Convert Spectronaut data
+qpxc convert spectronaut --report-path report.tsv --output-folder ./output
+
 # Convert FragPipe data
 qpxc convert fragpipe --psm-file psm.tsv --output-folder ./output
 

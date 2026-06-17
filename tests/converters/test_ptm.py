@@ -41,18 +41,20 @@ class TestBuildProforma:
 class TestFromProforma:
     def test_unimod_tag(self):
         meta = {"UNIMOD:35": ("Oxidation", ["M"], ["Anywhere"])}
-        result = from_proforma("M[UNIMOD:35]PEPTIDEK", "MPEPTIDEK", meta=meta)
+        _, result = from_proforma("M[UNIMOD:35]PEPTIDEK", "MPEPTIDEK", meta=meta)
         assert result is not None
         assert len(result) == 1
         assert result[0]["name"] == "Oxidation"
         assert result[0]["accession"] == "UNIMOD:35"
 
     def test_no_mods(self):
-        assert from_proforma("PEPTIDEK", "PEPTIDEK", meta=None) is None
+        peptidoform, result = from_proforma("PEPTIDEK", "PEPTIDEK", meta=None)
+        assert result is None
+        assert peptidoform == "PEPTIDEK"
 
     def test_nterm(self):
         meta = {"UNIMOD:1": ("Acetyl", ["X"], ["N-term"])}
-        result = from_proforma("[UNIMOD:1]-PEPTIDEK", "PEPTIDEK", meta=meta)
+        _, result = from_proforma("[UNIMOD:1]-PEPTIDEK", "PEPTIDEK", meta=meta)
         assert result is not None
         assert result[0]["positions"][0]["position"] == 0
 
@@ -67,7 +69,7 @@ class TestFromProforma:
                 }
             ],
         }
-        result = from_proforma(
+        _, result = from_proforma(
             "M[UNIMOD:35]PEPTIDEK",
             "MPEPTIDEK",
             meta=None,
@@ -81,7 +83,7 @@ class TestFromProforma:
 
     def test_site_scores_none_when_not_provided(self):
         """Without site_scores, positions still have scores=None."""
-        result = from_proforma("M[UNIMOD:35]PEPTIDEK", "MPEPTIDEK", meta=None)
+        _, result = from_proforma("M[UNIMOD:35]PEPTIDEK", "MPEPTIDEK", meta=None)
         assert result is not None
         assert result[0]["positions"][0]["scores"] is None
 
@@ -97,7 +99,7 @@ class TestFromProforma:
             ],
         }
         # Two mods: position 1 and position 5; only position 5 has scores
-        result = from_proforma(
+        _, result = from_proforma(
             "M[UNIMOD:35]PEPTS[UNIMOD:21]IDEK",
             "MPEPTSIDEK",
             meta=None,
@@ -133,13 +135,13 @@ class TestNormalizePeptidoform:
             raise AssertionError(f"Unexpected: {result!r}")
 
     def test_nterm_mod(self):
-        result = _normalize_peptidoform("(Acetyl)PEPTIDEK")
-        if result != "[Acetyl]PEPTIDEK":
+        result = _normalize_peptidoform(".(Acetyl)PEPTIDEK")
+        if result != "[Acetyl]-PEPTIDEK":
             raise AssertionError(f"Unexpected: {result!r}")
 
     def test_multiple_mods(self):
-        result = _normalize_peptidoform("(Acetyl)M(Oxidation)PEPTC(Carbamidomethyl)K")
-        if result != "[Acetyl]M[Oxidation]PEPTC[Carbamidomethyl]K":
+        result = _normalize_peptidoform(".(Acetyl)M(Oxidation)PEPTC(Carbamidomethyl)K")
+        if result != "[Acetyl]-M[Oxidation]PEPTC[Carbamidomethyl]K":
             raise AssertionError(f"Unexpected: {result!r}")
 
     def test_unmatched_open_paren(self):
@@ -158,7 +160,7 @@ class TestFromProformaMzTab:
 
     def test_mztab_simple(self):
         meta = {"UNIMOD:4": ("Carbamidomethyl", ["C"], ["Anywhere"])}
-        result = from_proforma("C(UNIMOD:4)PEPTIDEK", "CPEPTIDEK", meta=meta)
+        _, result = from_proforma("C(UNIMOD:4)PEPTIDEK", "CPEPTIDEK", meta=meta)
         if result is None:
             raise AssertionError("Expected mods, got None")
         if result[0]["accession"] != "UNIMOD:4":
@@ -166,7 +168,7 @@ class TestFromProformaMzTab:
 
     def test_mztab_nterm(self):
         meta = {"UNIMOD:1": ("Acetyl", ["X"], ["N-term"])}
-        result = from_proforma("(UNIMOD:1)-PEPTIDEK", "PEPTIDEK", meta=meta)
+        _, result = from_proforma("(UNIMOD:1)-PEPTIDEK", "PEPTIDEK", meta=meta)
         if result is None:
             raise AssertionError("Expected mods, got None")
         if result[0]["positions"][0]["position"] != 0:
@@ -174,7 +176,7 @@ class TestFromProformaMzTab:
 
     def test_mztab_nested_parens(self):
         # Normalization preserves inner parens as-is
-        result = from_proforma("C(Carbamidomethyl (C))PEPTIDEK", "CPEPTIDEK", meta=None)
+        _, result = from_proforma("C(Carbamidomethyl (C))PEPTIDEK", "CPEPTIDEK", meta=None)
         if result is None:
             raise AssertionError("Expected mods, got None")
         mod_name = result[0]["name"]

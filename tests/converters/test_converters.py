@@ -350,7 +350,7 @@ class TestModificationParsing:
             "UNIMOD:35": ("Oxidation", ["M"], ["Anywhere"]),
             "UNIMOD:4": ("Carbamidomethyl", ["C"], ["Anywhere"]),
         }
-        result = from_proforma(
+        _, result = from_proforma(
             peptidoform="M[UNIMOD:35]PEPTIDEC[UNIMOD:4]K",
             sequence="MPEPTIDECK",
             meta=mods_meta,
@@ -365,14 +365,14 @@ class TestModificationParsing:
     def test_parse_modifications_no_mods(self):
         from qpx.converters.ptm import from_proforma
 
-        result = from_proforma("PEPTIDEK", "PEPTIDEK", meta=None)
+        _, result = from_proforma("PEPTIDEK", "PEPTIDEK", meta=None)
         assert result is None
 
     def test_parse_modifications_mass_shift(self):
         from qpx.converters.ptm import from_proforma
 
         mods_meta = {"UNIMOD:35": ("Oxidation", ["M"], ["Anywhere"])}
-        result = from_proforma(
+        _, result = from_proforma(
             peptidoform="M[+15.9949]PEPTIDEK",
             sequence="MPEPTIDEK",
             meta=mods_meta,
@@ -386,7 +386,7 @@ class TestModificationParsing:
         from qpx.converters.ptm import from_proforma
 
         mods_meta = {"UNIMOD:1": ("Acetyl", ["X"], ["N-term"])}
-        result = from_proforma(
+        _, result = from_proforma(
             peptidoform="[UNIMOD:1]-PEPTIDEK",
             sequence="PEPTIDEK",
             meta=mods_meta,

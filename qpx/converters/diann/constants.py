@@ -53,7 +53,7 @@ def to_proforma(modified_sequence: str) -> str:
     return build_proforma(plain_seq, mods)
 
 
-def to_modifications(modified_sequence: str, sequence: str) -> list[dict] | None:
+def to_modifications(modified_sequence: str, sequence: str) -> tuple[str, list[dict] | None]:
     """Parse modifications from a DIA-NN Modified.Sequence string.
 
     Converts to ProForma first, then delegates to the shared ``from_proforma``
@@ -64,7 +64,8 @@ def to_modifications(modified_sequence: str, sequence: str) -> list[dict] | None
         sequence: Stripped peptide sequence (no modification annotations).
 
     Returns:
-        List of modification dicts per QPX schema, or ``None`` if unmodified.
+        Tuple of (peptidoform, modifications) where modifications is a list
+        of modification dicts per QPX schema, or ``None`` if unmodified.
     """
     proforma = to_proforma(modified_sequence)
     return from_proforma(proforma, sequence, meta=None)

@@ -370,7 +370,7 @@ class QuantmsPsmAdapter(BaseConverter):
                 )
 
         # --- Modifications (structured) ---
-        modifications = from_proforma(
+        peptidoform, modifications = from_proforma(
             peptidoform,
             sequence,
             meta=modifications_meta,

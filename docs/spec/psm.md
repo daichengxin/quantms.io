@@ -35,16 +35,16 @@ The PSM (Peptide Spectrum Match) view captures spectrum-level identification res
 
 These fields are optional and may not exist in the file at all. They are included based on conversion settings or user preference.
 
-| Field | Description | Type | Required |
-|-------|-------------|------|----------|
+| Field | Description                                                                                                                                             | Type | Required |
+|-------|---------------------------------------------------------------------------------------------------------------------------------------------------------|------|----------|
 | `protein_accessions` | Protein accessions of all proteins that the peptide maps to. Optional because protein mapping can be recovered from the feature and protein group views | array[string], null | no |
-| `cross_links` | Cross-link information for XL-MS experiments. Each entry describes one cross-link site. `null` for non-cross-linked PSMs | array[struct], null | no |
-| `ion_mobility` | Ion mobility value for the precursor ion | float32, null | no |
-| `mz_array` | Array of m/z values for the spectrum | array[float32], null | no |
-| `intensity_array` | Array of intensity values for the spectrum | array[float32], null | no |
-| `charge_array` | Array of fragment ion charge values | array[int32], null | no |
-| `ion_type_array` | Array of fragment ion type annotations (e.g., b, y, a) | array[string], null | no |
-| `ion_mobility_array` | Array of fragment ion mobility values | array[float32], null | no |
+| `cross_links` | Cross-link information for XL-MS experiments. Each entry describes one cross-link site. `null` for non-cross-linked PSMs                                | array[struct], null | no |
+| `ion_mobility` | Ion mobility value for the precursor ion                                                                                                                | float32, null | no |
+| `mz_array` | Array of m/z values for the spectrum                                                                                                                    | array[float32], null | no |
+| `intensity_array` | Array of intensity values for the spectrum                                                                                                              | array[float32], null | no |
+| `charge_array` | Array of fragment ion charge values                                                                                                                     | array[int32], null | no |
+| `ion_type_array` | Array of fragment ion type annotations (e.g., b1, y2, a2)                                                                                               | array[string], null | no |
+| `ion_mobility_array` | Array of fragment ion mobility values                                                                                                                   | array[float32], null | no |
 
 !!! note "Nullable vs Optional"
     Core fields marked as "not required" are **nullable** -- the column always exists in the file but individual values may be null. Optional fields (protein accessions, spectral data) may be **absent from the file entirely**, depending on conversion settings. Protein mappings can be recovered by joining with the feature and protein group views.
@@ -101,7 +101,7 @@ Several fields in the PSM view use structures shared across other QPX views:
 ```json
 {
   "sequence": "AAAAAAAAAAGAAGGR",
-  "peptidoform": "_(Acetyl (Protein N-term))AAAAAAAAAAGAAGGR_",
+  "peptidoform": "[Acetyl]-AAAAAAAAAAGAAGGR",
   "charge": 2,
   "scan": [42164],
   "rt": 5140.98,
@@ -156,7 +156,7 @@ When spectral arrays are included, the record also contains peak-level data:
 ```json
 {
   "sequence": "AAAAAAAAAAGAAGGR",
-  "peptidoform": "_(Acetyl (Protein N-term))AAAAAAAAAAGAAGGR_",
+  "peptidoform": "[Acetyl]-AAAAAAAAAAGAAGGR",
   "charge": 2,
   "scan": [42164],
   "rt": 5140.98,

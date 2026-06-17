@@ -384,7 +384,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         # Modifications (reuse assigned_mods_str already extracted for peptidoform)
         modifications = None
         if assigned_mods_str:
-            modifications = to_modifications(assigned_mods_str, sequence)
+            _, modifications = to_modifications(assigned_mods_str, sequence)
 
         # M/Z (from feature file — used as fallback)
         mz = safe_float(row.get(r.get("observed_mz", "M/Z"))) or 0.0

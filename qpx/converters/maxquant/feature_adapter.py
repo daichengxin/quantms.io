@@ -286,7 +286,7 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         peptidoform = to_proforma(
             str(row.get(r.get("modified_sequence", "Modified sequence"), "")),
         )
-        modifications = from_proforma(peptidoform, sequence) if peptidoform else None
+        _, modifications = from_proforma(peptidoform, sequence) if peptidoform else (None, None)
         charge = int(row.get(r.get("charge", "Charge"), 0))
         run_file_name = str(row.get(r.get("run_file_name", "Raw file"), ""))
 
@@ -312,10 +312,16 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         # m/z
         observed_mz = safe_float(row.get(r.get("observed_mz", "m/z"))) or 0.0
 
-        # RT
+        # RT (minutes → seconds)
         rt = safe_float(row.get(r.get("rt", "Calibrated retention time")))
+        if rt is not None:
+            rt *= 60.0
         rt_start = safe_float(row.get(r.get("rt_start", "Calibrated retention time start")))
+        if rt_start is not None:
+            rt_start *= 60.0
         rt_stop = safe_float(row.get(r.get("rt_stop", "Calibrated retention time finish")))
+        if rt_stop is not None:
+            rt_stop *= 60.0
 
         # PEP
         pep = safe_float(row.get(r.get("posterior_error_probability", "PEP")))

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Spectronaut converter**: `qpxc convert spectronaut` — full support for Spectronaut report TSV files, producing feature.parquet and pg.parquet with DuckDB-accelerated batch processing
+
+### Fixed
+
+- **RT unit conversion**: DIA-NN and MaxQuant converters now correctly convert retention time from minutes to seconds in feature and PSM parquet output
+- **Code quality**: Spectronaut converter refactored to reduce cyclomatic complexity, fix logging f-string interpolation, remove unused arguments, and eliminate duplicate code
+
 ## [1.0.0] - 2025-03-22
 
 ### Added

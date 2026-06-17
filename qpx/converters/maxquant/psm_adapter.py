@@ -162,7 +162,7 @@ class MaxQuantPsmAdapter(MaxQuantBaseAdapter):
         if pd.notna(phospho_raw) and phospho_raw:
             site_scores = parse_phospho_probabilities(str(phospho_raw))
 
-        modifications = (
+        peptidoform, modifications = (
             from_proforma(
                 peptidoform,
                 sequence,
@@ -199,8 +199,10 @@ class MaxQuantPsmAdapter(MaxQuantBaseAdapter):
         else:
             calculated_mz = 0.0
 
-        # RT
+        # RT (minutes → seconds)
         rt = safe_float(row.get(r.get("rt", "Retention time")))
+        if rt is not None:
+            rt *= 60.0
 
         # PEP
         pep = safe_float(row.get(r.get("posterior_error_probability", "PEP")))

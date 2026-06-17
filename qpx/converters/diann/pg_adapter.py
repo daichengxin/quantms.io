@@ -14,6 +14,7 @@ Key schema changes:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 import pandas as pd
@@ -26,6 +27,8 @@ from qpx.core.sql import sql_build, validate_identifier
 from qpx.writers.pg import PgWriter
 
 logger = logging.getLogger(__name__)
+
+_EXT_RE = re.compile(r"\.(mzML|raw|d|wiff|htrms)$", re.IGNORECASE)
 
 # Extra columns needed for PG aggregation but not in the field mappings
 _PG_EXTRA_COLS = [
@@ -117,8 +120,9 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         names_col = pg_matrix_resolved["pg_names"]
         genes_col = pg_matrix_resolved["gg_accessions"]
 
-        mzml_cols = [c for c in header if c.endswith(".mzML")]
-        usecols = [pg_col, names_col, genes_col] + mzml_cols
+        meta_cols = {pg_col, names_col, genes_col, "Protein.Ids", "First.Protein.Description"}
+        run_cols = [c for c in header if c not in meta_cols]
+        usecols = [pg_col, names_col, genes_col] + run_cols
         df = pd.read_csv(path, sep="\t", usecols=usecols)
         df.rename(
             columns={
@@ -128,8 +132,8 @@ class DiannPgAdapter(DiaNNBaseAdapter):
             },
             inplace=True,
         )
-        # Strip .mzML from column names
-        df.columns = [c.replace(".mzML", "") for c in df.columns]
+        # Strip common file extensions from run column names
+        df.columns = [_EXT_RE.sub("", c) for c in df.columns]
         return df
 
     def _get_unique_runs(self) -> list[str]:
@@ -181,7 +185,7 @@ class DiannPgAdapter(DiaNNBaseAdapter):
 
         # Push run_file_name extension stripping into SQL
         run_col = r["run_file_name"]
-        select_parts.append(f"regexp_replace(\"{run_col}\", '\\.(mzML|raw|d)$', '') AS run_file_name_clean")
+        select_parts.append(f"regexp_replace(\"{run_col}\", '\\.(mzML|raw|d|wiff|htrms)$', '') AS run_file_name_clean")
 
         select_clause = ",\n                ".join(select_parts)
 

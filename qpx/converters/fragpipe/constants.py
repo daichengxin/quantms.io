@@ -70,7 +70,7 @@ def to_proforma(assigned_mods: str, sequence: str) -> str:
     return build_proforma(sequence, mods)
 
 
-def to_modifications(assigned_mods: str, sequence: str) -> list[dict] | None:
+def to_modifications(assigned_mods: str, sequence: str) -> tuple[str, list[dict] | None]:
     """Parse modifications from FragPipe Assigned Modifications format.
 
     Args:
@@ -78,7 +78,8 @@ def to_modifications(assigned_mods: str, sequence: str) -> list[dict] | None:
         sequence: Stripped peptide sequence.
 
     Returns:
-        List of modification dicts per QPX schema, or ``None`` if unmodified.
+        Tuple of (peptidoform, modifications) where modifications is a list
+        of modification dicts per QPX schema, or ``None`` if unmodified.
     """
     proforma = to_proforma(assigned_mods, sequence)
     return from_proforma(proforma, sequence, meta=None)

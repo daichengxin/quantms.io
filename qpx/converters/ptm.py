@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # UNIMOD mass registry
@@ -155,6 +155,7 @@ def _normalize_peptidoform(peptidoform: str) -> str:
     if "(" not in peptidoform:
         return peptidoform
     out: list[str] = []
+    peptidoform = peptidoform.removeprefix(".")
     n = len(peptidoform)
     i = 0
     while i < n:
@@ -179,7 +180,16 @@ def _normalize_peptidoform(peptidoform: str) -> str:
         else:
             out.append(peptidoform[i])
             i += 1
-    return "".join(out)
+
+    result = "".join(out)
+
+    # For N-term
+    if result.startswith("["):
+        idx = result.find("]")
+        if idx != -1 and idx + 1 < len(result) and result[idx + 1] != "-":
+            result = result[: idx + 1] + "-" + result[idx + 1 :]
+
+    return result
 
 
 def _from_proforma_impl(
@@ -187,7 +197,7 @@ def _from_proforma_impl(
     sequence: str,
     meta: Optional[dict] = None,
     site_scores: Optional[dict[int, list[dict]]] = None,
-) -> Optional[list[dict]]:
+) -> Tuple[str, Optional[list[dict]]]:
     """Core implementation of ProForma modification parsing.
 
     See :func:`from_proforma` for full documentation.
@@ -195,11 +205,12 @@ def _from_proforma_impl(
     # Normalise mzTab parenthetical notation to ProForma brackets
     peptidoform = _normalize_peptidoform(peptidoform)
     if not peptidoform or peptidoform == sequence:
-        return None
+        return peptidoform, None
 
     mods: dict[str, dict] = {}
     seq_pos = 0
     n = len(peptidoform)
+    last_aa = None
 
     i = 0
     while i < n:
@@ -207,11 +218,17 @@ def _from_proforma_impl(
             try:
                 end = peptidoform.index("]", i)
             except ValueError:
-                return None  # Malformed ProForma
+                return peptidoform, None  # Malformed ProForma
             mod_str = peptidoform[i + 1 : end]
 
-            position = seq_pos
-            aa = sequence[seq_pos - 1] if 0 < seq_pos <= len(sequence) else None
+            if seq_pos == 0:
+                # N-term
+                position = 0
+                aa = None
+            else:
+                # 1-based position
+                position = seq_pos
+                aa = last_aa
 
             name = mod_str
             accession = None
@@ -246,14 +263,17 @@ def _from_proforma_impl(
         elif peptidoform[i] == "-":
             i += 1
         else:
+            last_aa = peptidoform[i]
             seq_pos += 1
             i += 1
 
-    return list(mods.values()) if mods else None
+    mods = list(mods.values()) if mods else None
+
+    return peptidoform, mods
 
 
 @lru_cache(maxsize=8192)
-def _from_proforma_cached(peptidoform: str, sequence: str) -> Optional[list[dict]]:
+def _from_proforma_cached(peptidoform: str, sequence: str) -> Tuple[str, Optional[list[dict]]]:
     """Cached fast path for from_proforma when no meta or site_scores."""
     return _from_proforma_impl(peptidoform, sequence)
 
@@ -263,7 +283,7 @@ def from_proforma(
     sequence: str,
     meta: Optional[dict] = None,
     site_scores: Optional[dict[int, list[dict]]] = None,
-) -> Optional[list[dict]]:
+) -> Tuple[str, Optional[list[dict]]]:
     """Parse modifications from a ProForma-style peptidoform string.
 
     Handles: ``M[UNIMOD:35]PEPTIDEK``, ``M[+15.9949]PEPTIDEK``,
@@ -287,8 +307,10 @@ def from_proforma(
             Used for phospho site localization probabilities.
 
     Returns:
-        List of modification dicts (``{name, accession, positions}``) per QPX
-        schema, or ``None`` if no modifications.
+        Tuple of (peptidoform, modifications) where peptidoform is the
+        normalised ProForma string and modifications is a list of dicts
+        (``{name, accession, positions}``) per QPX schema, or ``None``
+        if no modifications.
     """
     if meta is None and site_scores is None:
         return _from_proforma_cached(peptidoform, sequence)
@@ -300,14 +322,45 @@ def from_proforma(
 # ---------------------------------------------------------------------------
 
 
+def _sum_sequence_mass(modified_seq: str) -> Optional[float]:
+    """Sum residue + modification masses for a modified sequence string.
+
+    Supports ``(UniMod:N)`` and ``[UNIMOD:N]`` bracket formats,
+    as well as the ProForma N-term separator ``-``.
+    """
+    mass = 0.0
+    i = 0
+    n = len(modified_seq)
+
+    while i < n:
+        ch = modified_seq[i]
+        if ch in ("(", "["):
+            close = ")" if ch == "(" else "]"
+            end = modified_seq.index(close, i)
+            delta = parse_unimod_delta(modified_seq[i + 1 : end])
+            if delta is None:
+                return None
+            mass += delta
+            i = end + 1
+        elif ch == "-":
+            i += 1
+        else:
+            aa_mass = AA_MASS.get(ch.upper())
+            if aa_mass is None:
+                return None
+            mass += aa_mass
+            i += 1
+    return mass
+
+
 def compute_precursor_mz(modified_seq: str, charge: int) -> Optional[float]:
     """Compute theoretical precursor m/z for a modified peptide.
 
-    Uses monoisotopic amino-acid masses plus modification deltas encoded as
-    ``(UniMod:N)`` tokens.
+    Supports ``(UniMod:N)``, ProForma ``[UNIMOD:N]``, and N-term ``-``.
 
     Args:
-        modified_seq: Modified sequence, e.g. ``PEPTM(UniMod:35)IDE``.
+        modified_seq: Modified sequence, e.g. ``PEPTM(UniMod:35)IDE``
+            or ``PEPTM[UNIMOD:35]IDE`` or ``[UNIMOD:1]-PEPTIDE``.
         charge: Precursor charge state.
 
     Returns:
@@ -315,28 +368,9 @@ def compute_precursor_mz(modified_seq: str, charge: int) -> Optional[float]:
     """
     if not modified_seq or charge <= 0:
         return None
-
-    mass = 0.0
-    i = 0
-    n = len(modified_seq)
-
-    while i < n:
-        if modified_seq[i] == "(":
-            end = modified_seq.index(")", i)
-            mod_token = modified_seq[i + 1 : end]
-            delta = parse_unimod_delta(mod_token)
-            if delta is None:
-                return None
-            mass += delta
-            i = end + 1
-        else:
-            aa = modified_seq[i]
-            aa_mass = AA_MASS.get(aa.upper())
-            if aa_mass is None:
-                return None
-            mass += aa_mass
-            i += 1
-
+    mass = _sum_sequence_mass(modified_seq)
+    if mass is None:
+        return None
     neutral_mass = mass + WATER_MASS
     return (neutral_mass + charge * PROTON_MASS) / charge
 

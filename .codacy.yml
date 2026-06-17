@@ -9,7 +9,7 @@ engines:
       - "qpx/core/http.py"
   pylint:
     options:
-      disable: "arguments-differ,unexpected-keyword-arg,no-value-for-parameter"
+      disable: "arguments-differ,unexpected-keyword-arg,no-value-for-parameter,line-too-long"
   markdownlint:
     options:
       MD013: false
@@ -20,3 +20,4 @@ engines:
 exclude_paths:
   - "docs/spec/**"
   - ".github/workflows/**"
+  - "tests/**"

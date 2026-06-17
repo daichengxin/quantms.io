@@ -9,7 +9,7 @@ mapping is stored as a boolean sparse adjacency matrix in
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -69,10 +69,13 @@ def _pivot_to_sparse(
     return mat.tocsr()
 
 
-_LABEL_FIELD_QUERIES: dict[str, str] = {
-    "channel": "SELECT i.channel FROM feature, UNNEST(intensities) AS _t(i) LIMIT 1",
-    "label": "SELECT i.label FROM feature, UNNEST(intensities) AS _t(i) LIMIT 1",
+_LABEL_FIELD_QUERIES: dict[tuple[str, str], str] = {
+    ("channel", "feature"): "SELECT i.channel FROM feature, UNNEST(intensities) AS _t(i) LIMIT 1",
+    ("channel", "pg"): "SELECT i.channel FROM pg, UNNEST(intensities) AS _t(i) LIMIT 1",
+    ("label", "feature"): "SELECT i.label FROM feature, UNNEST(intensities) AS _t(i) LIMIT 1",
+    ("label", "pg"): "SELECT i.label FROM pg, UNNEST(intensities) AS _t(i) LIMIT 1",
 }
+
 
 _PRECURSOR_QUERIES: dict[str, str] = {
     "channel": """
@@ -129,16 +132,19 @@ def _detect_label_field(engine: DuckDBEngine, table: str = "feature") -> str:
         return "label"
 
 
-def _detect_intensity_label(engine: DuckDBEngine) -> str:
-    """Auto-detect the first intensity label from feature.parquet."""
-    label_field = _detect_label_field(engine, "feature")
+def _detect_intensity_label(engine: DuckDBEngine, table: str = "feature") -> str:
+    """Auto-detect the first intensity label from the given table."""
+    label_field = _detect_label_field(engine, table)
 
+    query = _LABEL_FIELD_QUERIES.get((label_field, table))
+    if query is None:
+        raise ValueError(f"Invalid label_field={label_field!r} or table={table!r}")
     try:
-        row = engine.execute(_LABEL_FIELD_QUERIES[label_field]).fetchone()
+        row = engine.execute(query).fetchone()
     except Exception as exc:
-        raise ValueError(f"Failed to read intensity labels from feature.parquet: {exc}") from exc
+        raise ValueError(f"Failed to read intensity labels from {table}: {exc}") from exc
     if row is None:
-        raise ValueError("No intensity labels found in feature.parquet")
+        raise ValueError(f"No intensity labels found in {table}")
     return row[0]
 
 
@@ -172,8 +178,40 @@ def _load_run_obs(engine: DuckDBEngine, run_index: pd.Index) -> pd.DataFrame:
     # Keep first row per run_file_name (one sample per run for obs)
     df = df.drop_duplicates(subset="run_file_name", keep="first")
     df = df.set_index("run_file_name")
-    # Reindex to match run_index, filling missing with NaN
+
+    # Reindex to match run_index; if direct match fails (e.g. extension
+    # mismatch between run.parquet and feature.parquet), try stem-based
+    # matching so that "BSA1_F1" matches "BSA1_F1.mzML".
     df = df.reindex(run_index)
+    if df.isna().all(axis=None) and not df.empty:
+        df_stems = df.index.map(lambda n: PurePosixPath(n).stem)
+        if not df_stems.duplicated().any():
+            # Re-query with original index, map via stems
+            df2 = engine.execute(
+                """
+                SELECT r.run_file_name,
+                       r.run_accession,
+                       rs.sample_accession,
+                       rs.label,
+                       rs.biological_replicate,
+                       rs.technical_replicate,
+                       r.fraction,
+                       r.instrument
+                FROM run r, UNNEST(r.samples) AS _t(rs)
+                """
+            ).fetchdf()
+            df2 = df2.drop_duplicates(subset="run_file_name", keep="first")
+            df2["_stem"] = df2["run_file_name"].map(lambda n: PurePosixPath(n).stem)
+            df2 = df2.set_index("_stem").drop(columns=["run_file_name"])
+            df2.index.name = "run_file_name"
+            # Map stems back to original run_index names
+            df2 = df2.reindex([PurePosixPath(n).stem for n in run_index])
+            df2.index = run_index
+            df = df2
+
+    # Fill remaining NaN in string columns to avoid h5py serialization errors
+    str_cols = df.select_dtypes(include=["object"]).columns
+    df[str_cols] = df[str_cols].fillna("")
     return df
 
 
@@ -191,8 +229,13 @@ def _attach_uns_metadata(engine: DuckDBEngine, mdata) -> None:
     row = df.iloc[0]
     for col in df.columns:
         val = row[col]
-        if val is not None and not (isinstance(val, float) and np.isnan(val)):
-            mdata.uns[col] = val
+        if val is None:
+            continue
+        # pd.isna() catches np.nan, pd.NA, pd.NaT on scalars; guarded by is_scalar
+        # so that dicts/lists/arrays do not raise or get misclassified.
+        if pd.api.types.is_scalar(val) and pd.isna(val):
+            continue
+        mdata.uns[col] = val
 
 
 # ---------------------------------------------------------------------------
@@ -438,15 +481,19 @@ def build_mudata(
     else:
         requested = _VALID_MODALITIES.copy()
 
-    if intensity_label is None:
-        intensity_label = _detect_intensity_label(engine)
+    feat_label_field = _detect_label_field(engine, "feature")
+    feat_intensity = intensity_label or _detect_intensity_label(engine, "feature")
 
-    label_field = _detect_label_field(engine, "feature")
+    pg_label_field = _detect_label_field(engine, "pg")
+    try:
+        pg_intensity = intensity_label or _detect_intensity_label(engine, "pg")
+    except ValueError:
+        pg_intensity = feat_intensity
 
     mod: dict = {}
     builders = {
-        "precursors": lambda: _build_precursor_adata(engine, intensity_label, label_field),
-        "proteins": lambda: _build_protein_adata(engine, intensity_label, label_field),
+        "precursors": lambda: _build_precursor_adata(engine, feat_intensity, feat_label_field),
+        "proteins": lambda: _build_protein_adata(engine, pg_intensity, pg_label_field),
         "expression": lambda: _build_expression_adata(ds_path),
         "differential": lambda: _build_differential_adata(ds_path),
     }
@@ -466,5 +513,13 @@ def build_mudata(
 
     # Attach dataset-level metadata
     _attach_uns_metadata(engine, mdata)
+
+    # Sanitize NaN in object columns across all modalities to prevent
+    # h5py serialization errors (can't write NaN in vlen-string arrays).
+    for adata in mdata.mod.values():
+        for frame in (adata.obs, adata.var):
+            str_cols = frame.select_dtypes(include=["object"]).columns
+            if len(str_cols):
+                frame[str_cols] = frame[str_cols].fillna("")
 
     return mdata
