@@ -12,7 +12,7 @@ A Python package for working with mass spectrometry data in the QPX format.
 
 ## Features
 
-- **Convert** data from DIA-NN, MaxQuant, Spectronaut, FragPipe, QuantMS (mzTab), mzIdentML, and SDRF to QPX Parquet format
+- **Convert** data from DIA-NN, MaxQuant, Spectronaut, FragPipe, QuantMS (mzTab), CPTAC CDAP (`.psm`), mzIdentML, and SDRF to QPX Parquet format
 - **Transform** QPX data: gene mapping, protein quantification (DirectLFQ, MaxLFQ, iBAQ, TopN, …), accession normalization, metadata updates
 - **Query** datasets with SQL, filter rows, or preview with `head`
 - **Inspect** dataset summaries, Arrow schemas, and Parquet metadata
@@ -172,12 +172,26 @@ Commands:
   info       Show information about a QPX dataset.
   validate   Validate a QPX dataset or structure against the canonical schema.
   ontology   Manage CV ontology data (PSI-MS, PRIDE CV).
+  pdc2qpx    Download a PDC/CPTAC study and convert it to a QPX dataset.
+```
+
+### pdc2qpx
+
+One-shot download + conversion of a PDC/CPTAC study (requires `pip install qpx[pdc]`):
+
+```bash
+# Entire QPX including full spectra (for quantms reanalysis)
+qpxc pdc2qpx \
+    --study PDC000109 \
+    --download-dir ./downloads \
+    --output-folder ./qpx/PDC000109 \
+    --include-spectra --max-cpus 24
 ```
 
 ### Convert
 
 ```bash
-qpxc convert [diann | maxquant | spectronaut | quantms | fragpipe | mzidentml | sdrf] [OPTIONS]
+qpxc convert [diann | maxquant | spectronaut | quantms | fragpipe | mzidentml | cdap | mz | sdrf] [OPTIONS]
 ```
 
 ### Transform
@@ -221,9 +235,12 @@ Most commands support a `--verbose` flag that enables more detailed logging to s
 qpx/
 ├── cli/                    # Click CLI (entry point: qpx.cli.main:main)
 │   ├── main.py             # Top-level CLI group
-│   └── convert.py          # convert subcommands (maxquant, diann, spectronaut, quantms, fragpipe, mzidentml, sdrf)
+│   ├── pdc2qpx.py          # pdc2qpx command (PDC download + convert)
+│   └── convert.py          # convert subcommands (maxquant, diann, spectronaut, quantms, fragpipe, mzidentml, cdap, mz, sdrf)
+├── pipeline/               # High-level orchestration (pdc2qpx: download + CDAP + mz)
 ├── converters/             # Tool-specific converters
 │   ├── quantms/            # QuantMS (mzTab) converter
+│   ├── cdap/               # CPTAC CDAP (.psm) converter
 │   ├── diann/              # DIA-NN converter
 │   ├── maxquant/           # MaxQuant converter
 │   ├── spectronaut/        # Spectronaut converter

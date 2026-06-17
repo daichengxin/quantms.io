@@ -156,6 +156,7 @@ nav:
       - Troubleshooting: troubleshooting.md
   - Tools:
       - Converters: guide/convert.md
+      - PDC to QPX: guide/pdc2qpx.md
       - Transforms: guide/transform.md
       - Ontology: guide/ontology.md
       - Visualization: guide/visualize.md

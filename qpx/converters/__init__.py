@@ -8,6 +8,10 @@ Each converter:
 """
 
 from qpx.converters.base import BaseConverter
+from qpx.converters.cdap.converter import CdapConverter
+from qpx.converters.cdap.feature_adapter import CdapFeatureAdapter
+from qpx.converters.cdap.pg_adapter import CdapPgAdapter
+from qpx.converters.cdap.psm_adapter import CdapPsmAdapter
 from qpx.converters.diann.converter import DiaNNConverter
 from qpx.converters.diann.feature_adapter import DiannFeatureAdapter
 from qpx.converters.diann.pg_adapter import DiannPgAdapter
@@ -38,6 +42,11 @@ __all__ = [
     "build_dataset_record",
     # SDRF
     "SdrfConverter",
+    # CDAP (CPTAC .psm)
+    "CdapPsmAdapter",
+    "CdapFeatureAdapter",
+    "CdapPgAdapter",
+    "CdapConverter",
     # QuantMS (mzTab)
     "QuantmsPsmAdapter",
     "QuantmsFeatureAdapter",

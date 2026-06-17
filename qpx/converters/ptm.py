@@ -353,6 +353,7 @@ def _sum_sequence_mass(modified_seq: str) -> Optional[float]:
     return mass
 
 
+@lru_cache(maxsize=16384)
 def compute_precursor_mz(modified_seq: str, charge: int) -> Optional[float]:
     """Compute theoretical precursor m/z for a modified peptide.
 

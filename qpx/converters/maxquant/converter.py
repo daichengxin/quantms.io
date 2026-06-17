@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 class MaxQuantConverter(BaseOrchestrator):
     """Orchestrate full MaxQuant conversion to QPX format."""
 
-    def __init__(self, memory_limit_gb=None, compression: str = "zstd"):
-        self._memory = f"{int(memory_limit_gb)}GB" if memory_limit_gb else "16GB"
+    def __init__(self, max_memory=None, max_cpus=None, compression: str = "zstd"):
+        self._memory = max_memory or "16GB"
+        self._cpus = max_cpus or 4
         self._compression = compression
         self._resolved_mappings_by_view: dict[str, dict] = {}
 
@@ -77,7 +78,7 @@ class MaxQuantConverter(BaseOrchestrator):
                         corrupt.unlink()
                         logger.debug("Removed corrupt %s", corrupt)
 
-        duckdb_threads = n_workers if n_workers else 4
+        duckdb_threads = n_workers if n_workers else self._cpus
 
         if PSM in structures and msms_file:
             with MaxQuantPsmAdapter(

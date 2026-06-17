@@ -194,6 +194,33 @@ quantms:
       observed_mz: ["exp_mass_to_charge"]
       rt: ["retention_time"]
 
+cdap:
+  tool_name: "CDAP"
+  tool_versions: "CPTAC v1-v3"
+  rt_unit: "second"
+  column_mapping:
+    psm:
+      peptide_raw: ["PeptideSequence"]
+      charge: ["QueryCharge"]
+      run_file_name: ["FileName"]
+      scan: ["ScanNum"]
+      observed_mz: ["QueryPrecursorMz"]
+      original_mz: ["OriginalPrecursorMz"]
+      mass_error_ppm: ["PrecursorError(ppm)"]
+      rt: ["RTAtPrecursorHalfElution"]
+      protein: ["Protein"]
+      precursor_area: ["PrecursorArea"]
+      precursor_relative_abundance: ["PrecursorRelAb"]
+      precursor_purity: ["PrecursorPurity"]
+      hcd_collision_energy: ["HCDEnergy"]
+    feature:
+      peptide_raw: ["PeptideSequence"]
+      charge: ["QueryCharge"]
+      run_file_name: ["FileName"]
+      protein: ["Protein"]
+      rt: ["RTAtPrecursorHalfElution"]
+      precursor_area: ["PrecursorArea"]
+
 spectronaut:
   tool_name: "Spectronaut"
   tool_versions: "14+"

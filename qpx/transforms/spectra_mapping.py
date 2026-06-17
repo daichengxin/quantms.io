@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Union
 
@@ -163,7 +164,7 @@ class SpectraMappingTransform:
     """
 
     # Common mzML file extensions to try
-    MZML_EXTENSIONS = [".mzML", ".mzml", ".MZML"]
+    MZML_EXTENSIONS = [".mzML", ".mzml", ".MZML", ".mzML.gz", ".mzml.gz", ".MZML.gz"]
 
     def __init__(
         self,
@@ -364,11 +365,6 @@ class SpectraMappingTransform:
         Returns:
             Path to the written file.
         """
-        try:
-            import pyopenms as oms
-        except ImportError:
-            raise ImportError("pyopenms is required for mzML parsing. Install it with: pip install pyopenms")
-
         from qpx.writers.mz import MzWriter
 
         output_path = Path(output_path)
@@ -382,90 +378,160 @@ class SpectraMappingTransform:
         run_file_names = run_df["run_file_name"].tolist()
 
         total_spectra = 0
-
         with MzWriter(output_path) as writer:
             for run_name in run_file_names:
                 mzml_path = self._resolve_mzml_path(run_name)
                 if mzml_path is None:
-                    logger.warning(f"Skipping run {run_name}: mzML file not found")
+                    logger.warning("Skipping run %s: mzML file not found", run_name)
                     continue
+                total_spectra += self._write_mzml_spectra(mzml_path, run_name, writer, ms_levels)
 
-                logger.info(f"Processing mzML: {mzml_path}")
-                exp = oms.MSExperiment()
-                oms.MzMLFile().load(str(mzml_path), exp)
-
-                records = []
-                for i in range(exp.getNrSpectra()):
-                    spectrum = exp.getSpectrum(i)
-                    ms_level = spectrum.getMSLevel()
-
-                    if ms_levels is not None and ms_level not in ms_levels:
-                        continue
-
-                    mz_array, intensity_array = spectrum.get_peaks()
-
-                    # Build scan ID from native ID
-                    native_id = spectrum.getNativeID()
-                    scan_id = f"{run_name}:{native_id}" if native_id else f"{run_name}:index={i}"
-
-                    # Extract precursor info for MS2+ scans
-                    precursors = None
-                    if ms_level >= 2 and spectrum.getPrecursors():
-                        precursors = []
-                        for precursor in spectrum.getPrecursors():
-                            precursor_data = {
-                                "selected_ion_mz": float(precursor.getMZ()),
-                                "selected_ion_charge": (int(precursor.getCharge()) if precursor.getCharge() > 0 else None),
-                                "selected_ion_intensity": (
-                                    float(precursor.getIntensity()) if precursor.getIntensity() > 0 else None
-                                ),
-                                "isolation_window_target": float(precursor.getMZ()),
-                                "isolation_window_lower": (
-                                    float(precursor.getIsolationWindowLowerOffset())
-                                    if precursor.getIsolationWindowLowerOffset() > 0
-                                    else None
-                                ),
-                                "isolation_window_upper": (
-                                    float(precursor.getIsolationWindowUpperOffset())
-                                    if precursor.getIsolationWindowUpperOffset() > 0
-                                    else None
-                                ),
-                                "spectrum_ref": None,
-                            }
-                            precursors.append(precursor_data)
-
-                    record = {
-                        "id": scan_id,
-                        "ms_level": ms_level,
-                        "centroid": spectrum.getType() == oms.SpectrumSettings.SpectrumType.CENTROID,
-                        "scan_start_time": float(spectrum.getRT() / 60.0),  # Convert seconds to minutes
-                        "inverse_ion_mobility": None,
-                        "ion_injection_time": (
-                            float(spectrum.getInstrumentSettings().getMetaValue("ion injection time"))
-                            if spectrum.getInstrumentSettings().metaValueExists("ion injection time")
-                            else 0.0
-                        ),
-                        "total_ion_current": (float(sum(intensity_array)) if len(intensity_array) > 0 else 0.0),
-                        "precursors": precursors,
-                        "mz": mz_array.tolist(),
-                        "intensity": intensity_array.tolist(),
-                        "cv_params": None,
-                    }
-                    records.append(record)
-
-                    # Flush in batches
-                    if len(records) >= 10000:
-                        writer.write_batch(records)
-                        total_spectra += len(records)
-                        records = []
-
-                # Flush remaining records for this run
-                if records:
-                    writer.write_batch(records)
-                    total_spectra += len(records)
-
-        logger.info(f"Wrote {total_spectra} spectra from {len(run_file_names)} runs to {output_path}")
+        logger.info("Wrote %d spectra from %d runs to %s", total_spectra, len(run_file_names), output_path)
         return output_path
+
+    def write_mz_parquet_from_dir(
+        self,
+        output_path: Union[str, Path],
+        ms_levels: Optional[list[int]] = None,
+    ) -> Path:
+        """Write spectral data from every mzML in the configured directory.
+
+        Unlike :meth:`write_mz_parquet`, this does not require a Dataset with a
+        run view — it scans ``mzml_directory`` directly. Each ``run_file_name``
+        is the mzML filename without its (optionally gzipped) extension. This is
+        the entry point for converting downloaded raw spectra (e.g. CPTAC PDC
+        ``.mzML.gz`` files) into a standalone QPX ``mz.parquet``.
+
+        Args:
+            output_path: Path for the output ``.mz.parquet`` file.
+            ms_levels: Optional list of MS levels to include (e.g. ``[1, 2]``).
+                If ``None``, all MS levels are written.
+
+        Returns:
+            Path to the written file.
+        """
+        from qpx.writers.mz import MzWriter
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        mzml_paths = self._discover_mzml_files()
+        if not mzml_paths:
+            raise FileNotFoundError(f"No mzML files found in {self._mzml_dir}")
+
+        total_spectra = 0
+        with MzWriter(output_path) as writer:
+            for mzml_path in mzml_paths:
+                run_name = self._mzml_run_name(mzml_path)
+                total_spectra += self._write_mzml_spectra(mzml_path, run_name, writer, ms_levels)
+
+        logger.info("Wrote %d spectra from %d mzML files to %s", total_spectra, len(mzml_paths), output_path)
+        return output_path
+
+    def _discover_mzml_files(self) -> list[Path]:
+        """List all mzML files (including ``.gz``) in the configured directory."""
+        found: set[Path] = set()
+        for ext in self.MZML_EXTENSIONS:
+            found.update(self._mzml_dir.glob(f"*{ext}"))
+        return sorted(found)
+
+    @staticmethod
+    def _mzml_run_name(mzml_path: Path) -> str:
+        """Run name = filename with its mzML(.gz) extension stripped."""
+        name = mzml_path.name
+        for ext in (".mzML.gz", ".mzml.gz", ".MZML.gz", ".mzML", ".mzml", ".MZML"):
+            if name.endswith(ext):
+                return name[: -len(ext)]
+        return mzml_path.stem
+
+    def _write_mzml_spectra(self, mzml_path, run_name, writer, ms_levels) -> int:
+        """Load one mzML and write its spectra (optionally filtered by MS level).
+
+        Returns the number of spectra written.
+        """
+        try:
+            import pyopenms as oms
+        except ImportError:
+            raise ImportError("pyopenms is required for mzML parsing. Install it with: pip install pyopenms")
+
+        logger.info("Processing mzML: %s", mzml_path)
+        exp = oms.MSExperiment()
+        oms.MzMLFile().load(str(mzml_path), exp)
+
+        written = 0
+        records: list[dict] = []
+        for i in range(exp.getNrSpectra()):
+            spectrum = exp.getSpectrum(i)
+            ms_level = spectrum.getMSLevel()
+            if ms_levels is not None and ms_level not in ms_levels:
+                continue
+            records.append(self._build_mz_record(spectrum, run_name, i, oms))
+            if len(records) >= 10000:
+                writer.write_batch(records)
+                written += len(records)
+                records = []
+        if records:
+            writer.write_batch(records)
+            written += len(records)
+        return written
+
+    @staticmethod
+    def _build_mz_record(spectrum, run_name, index, oms) -> dict:
+        """Convert one pyopenms spectrum into a QPX mz record.
+
+        ``run_file_name`` and ``scan`` (parsed from the native ID) are emitted
+        so the spectrum can be linked back to PSM/feature records.
+        """
+        mz_array, intensity_array = spectrum.get_peaks()
+        native_id = spectrum.getNativeID()
+        scan_id = f"{run_name}:{native_id}" if native_id else f"{run_name}:index={index}"
+        scan_match = re.search(r"scan=(\d+)", native_id) if native_id else None
+        scan_num = int(scan_match.group(1)) if scan_match else None
+
+        ms_level = spectrum.getMSLevel()
+        precursors = None
+        if ms_level >= 2 and spectrum.getPrecursors():
+            precursors = []
+            for precursor in spectrum.getPrecursors():
+                precursors.append(
+                    {
+                        "selected_ion_mz": float(precursor.getMZ()),
+                        "selected_ion_charge": (int(precursor.getCharge()) if precursor.getCharge() > 0 else None),
+                        "selected_ion_intensity": (float(precursor.getIntensity()) if precursor.getIntensity() > 0 else None),
+                        "isolation_window_target": float(precursor.getMZ()),
+                        "isolation_window_lower": (
+                            float(precursor.getIsolationWindowLowerOffset())
+                            if precursor.getIsolationWindowLowerOffset() > 0
+                            else None
+                        ),
+                        "isolation_window_upper": (
+                            float(precursor.getIsolationWindowUpperOffset())
+                            if precursor.getIsolationWindowUpperOffset() > 0
+                            else None
+                        ),
+                        "spectrum_ref": None,
+                    }
+                )
+
+        return {
+            "id": scan_id,
+            "run_file_name": run_name,
+            "scan": scan_num,
+            "ms_level": ms_level,
+            "centroid": spectrum.getType() == oms.SpectrumSettings.SpectrumType.CENTROID,
+            "scan_start_time": float(spectrum.getRT() / 60.0),  # Convert seconds to minutes
+            "inverse_ion_mobility": None,
+            "ion_injection_time": (
+                float(spectrum.getInstrumentSettings().getMetaValue("ion injection time"))
+                if spectrum.getInstrumentSettings().metaValueExists("ion injection time")
+                else 0.0
+            ),
+            "total_ion_current": (float(sum(intensity_array)) if len(intensity_array) > 0 else 0.0),
+            "precursors": precursors,
+            "mz": mz_array.tolist(),
+            "intensity": intensity_array.tolist(),
+            "cv_params": None,
+        }
 
     def close(self):
         """Release cached mzML data to free memory."""

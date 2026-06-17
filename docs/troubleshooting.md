@@ -101,14 +101,14 @@ pip install venn pyopenms anndata
        --output-folder ./output
    ```
 
-4. For MaxQuant, use the `--batch-size` and `--memory-limit` options:
+4. For MaxQuant, use the `--batch-size` and `--max-memory` options:
 
    ```bash
    qpxc convert maxquant \
        --msms-file msms.txt \
        --output-folder ./output \
        --batch-size 50000 \
-       --memory-limit 8
+       --max-memory 8GB
    ```
 
 ### Invalid file format errors
@@ -279,13 +279,23 @@ qpxc convert sdrf \
 
 **Solutions**:
 
-1. Use `--duckdb-memory` to increase DuckDB memory:
+1. Use `--duckdb-memory` to increase DuckDB memory (query commands):
 
    ```bash
    qpxc query sql \
        --dataset-path ./PXD014414 \
        --sql "SELECT * FROM feature" \
        --duckdb-memory 32GB
+   ```
+
+   For convert commands, use `--max-memory` instead:
+
+   ```bash
+   qpxc convert diann \
+       --report-path report.tsv \
+       --sdrf-file data.sdrf.tsv \
+       --output-folder ./output \
+       --max-memory 32GB
    ```
 
 2. Use `--limit` or SQL `LIMIT` to restrict results

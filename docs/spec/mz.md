@@ -18,6 +18,8 @@ See the full YAML schema in [`mz.yaml`](schemas/mz.yaml).
 | Field | Description | Type | Required |
 |-------|-------------|------|----------|
 | `id` | Unique identifier for the scan or spectrum | `string` | Yes |
+| `run_file_name` | Run file containing this spectrum; links to PSM/feature `run_file_name` | `string` | No |
+| `scan` | Scan number parsed from the native ID; links to PSM/feature `scan` | `int` | No |
 | `ms_level` | The MS level (1 for MS1, 2 for MS2, etc.) | `int` | Yes |
 | `centroid` | Whether the data is centroided (`true`) or profile mode (`false`) | `boolean` | Yes |
 

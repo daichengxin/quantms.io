@@ -103,6 +103,8 @@ The `convert` command group provides converters for multiple proteomics software
 - [maxquant](#maxquant) - Convert MaxQuant output to QPX format
 - [fragpipe](#fragpipe) - Convert FragPipe output to QPX format
 - [mzidentml](#mzidentml) - Convert mzIdentML file to PSM format
+- [cdap](#cdap) - Convert CPTAC CDAP `.psm` files to QPX format
+- [mz](#mz) - Convert an mzML spectra directory to QPX `mz.parquet` (full spectra)
 - [sdrf](#sdrf) - Convert SDRF to sample and run parquet files
 
 ---
@@ -238,8 +240,8 @@ qpxc convert diann \
     --sdrf-file tests/examples/diann/full/PXD036609.sdrf.tsv \
     --output-folder ./output \
     --partitions run_file_name \
-    --duckdb-max-memory 8GB \
-    --duckdb-threads 4 \
+    --max-memory 8GB \
+    --max-cpus 4 \
     --verbose
 ```
 
@@ -253,8 +255,8 @@ qpxc convert diann \
     --pg-matrix-path tests/examples/diann/full/diann_report.pg_matrix.tsv \
     --sdrf-file tests/examples/diann/full/PXD036609.sdrf.tsv \
     --output-folder ./output \
-    --duckdb-max-memory 16GB \
-    --duckdb-threads 8 \
+    --max-memory 16GB \
+    --max-cpus 8 \
     --verbose
 ```
 
@@ -269,11 +271,11 @@ Output files generated:
 
 **Issue**: Out of memory errors with large files
 
-- **Solution**: Increase `--duckdb-max-memory` parameter (e.g., `8GB`, `16GB`)
+- **Solution**: Increase `--max-memory` parameter (e.g., `8GB`, `16GB`)
 
 **Issue**: Slow processing
 
-- **Solution**: Increase `--duckdb-threads` to utilize more CPU cores
+- **Solution**: Increase `--max-cpus` to utilize more CPU cores
 
 **Issue**: Missing mzML info files
 
@@ -334,8 +336,8 @@ qpxc convert spectronaut \
     --report-path large_report.tsv \
     --sdrf-file data.sdrf.tsv \
     --output-folder ./qpx_output \
-    --duckdb-max-memory 16GB \
-    --duckdb-threads 8 \
+    --max-memory 16GB \
+    --max-cpus 8 \
     --verbose
 ```
 
@@ -371,7 +373,7 @@ The converter auto-detects column names from the Spectronaut report, supporting 
 
 **Issue**: Out of memory with large reports
 
-- **Solution**: Increase `--duckdb-max-memory` (e.g., `16GB`) and `--duckdb-threads`
+- **Solution**: Increase `--max-memory` (e.g., `16GB`) and `--max-cpus`
 
 **Issue**: Missing modifications in output
 
@@ -382,7 +384,7 @@ The converter auto-detects column names from the Spectronaut report, supporting 
 - Export all required columns from Spectronaut (at minimum: `R.FileName`, `PEP.StrippedSequence`, `EG.ModifiedSequence`, `FG.Charge`, `FG.Quantity`, `PG.ProteinGroups`)
 - Provide SDRF file for complete sample and run metadata
 - Use Q-value threshold of 0.01 or 0.05 for high-confidence results
-- For large datasets (>10M rows), increase DuckDB memory and threads
+- For large datasets (>10M rows), increase `--max-memory` and `--max-cpus`
 
 ---
 
@@ -623,6 +625,118 @@ The converter supports multiple native ID formats for scan number extraction:
 **Issue**: Scan numbers not extracted correctly
 
 - **Solution**: Check if your native ID format is supported; the converter auto-detects common formats
+
+---
+
+## cdap
+
+Convert CPTAC CDAP `.psm` files to QPX format.
+
+### Description {#cdap-description}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_cdap_cmd
+print(generate_description(convert_cdap_cmd))
+```
+
+### Parameters {#cdap-parameters}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_cdap_cmd
+print(generate_params_table(convert_cdap_cmd))
+```
+
+### Usage Examples {#cdap-examples}
+
+#### Basic Example {#cdap-example-basic}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_cdap_cmd
+print(generate_example(convert_cdap_cmd, 'Convert one CPTAC CDAP study directory with default settings:'))
+```
+
+#### Select Output Structures {#cdap-example-structures}
+
+```bash
+qpxc convert cdap \
+    --psm-dir /data/CPTAC/PDC000440 \
+    --output-folder ./qpx_output/PDC000440 \
+    --project-accession PDC000440 \
+    --structures psm,feature
+```
+
+### Output Files {#cdap-output}
+
+Depending on `--structures`:
+
+- **PSM**: `{output-prefix}.psm.parquet`
+- **Feature**: `{output-prefix}.feature.parquet`
+- **Protein Group**: `{output-prefix}.pg.parquet`
+- **Ontology**: `{output-prefix}.ontology.parquet`
+- **Provenance**: `{output-prefix}.provenance.parquet`
+- **Dataset**: `{output-prefix}.dataset.parquet`
+
+### Best Practices {#cdap-best-practices}
+
+- Point `--psm-dir` to one CPTAC study directory containing `*.psm` files
+- Use `--structures` to skip views that are not needed
+- Increase `--max-memory` and `--max-cpus` for full-scale CPTAC studies
+- Use `--batch-size` to tune processing throughput for large study directories
+
+---
+
+## mz
+
+Convert a directory of mzML spectra to a QPX `mz.parquet` (full spectra).
+
+### Description {#mz-description}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_mz_cmd
+print(generate_description(convert_mz_cmd))
+```
+
+### Parameters {#mz-parameters}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_mz_cmd
+print(generate_params_table(convert_mz_cmd))
+```
+
+### Usage Examples {#mz-examples}
+
+#### All MS Levels (full spectra) {#mz-example-all}
+
+```bash
+qpxc convert mz \
+    --mzml-dir /data/CPTAC/PDC000109/mzml \
+    --output ./qpx_output/PDC000109.mz.parquet
+```
+
+#### MS2 Only {#mz-example-ms2}
+
+```bash
+qpxc convert mz \
+    --mzml-dir /data/CPTAC/PDC000109/mzml \
+    --output ./PDC000109.mz.parquet \
+    --ms-levels 2
+```
+
+### Output Files {#mz-output}
+
+A single `mz.parquet` with one row per spectrum:
+
+- `id`, `run_file_name`, `scan` — spectrum identity and linkage to PSM / feature
+- `ms_level`, `scan_start_time`, `total_ion_current`, `centroid`
+- `precursors` — precursor m/z, charge, isolation window (MS2+)
+- `mz`, `intensity` — full peak arrays
+
+### Best Practices {#mz-best-practices}
+
+- Reads `.mzML` and `.mzML.gz` directly (no manual decompression needed)
+- Omit `--ms-levels` (or use `1,2`) for full spectra; precursor-level LFQ
+  reanalysis (e.g. quantms) needs MS1 in addition to MS2
+- Each spectrum carries `run_file_name` + `scan` so it joins back to PSM / feature
 
 ---
 

@@ -25,6 +25,7 @@ dependencies = [
 ]
 [project.optional-dependencies]
 mzidentml = ["lxml>=4.9.0"]
+pdc = ["pridepy>=0.0.15"]
 transforms = ["biopython", "mygene>=1.0.0", "anndata>=0.9.0"]
 plotting = ["plotly>=5.0.0", "scikit-learn>=1.5.0"]
 quantify = ["mokume>=0.1.0", "directlfq"]
@@ -85,6 +86,13 @@ ignore = ["E501"]
 "__init__.py" = ["F401"]
 "tests/**" = ["S101", "E402"]
 "qpx/converters/base.py" = ["ARG002"]
+
+[tool.bandit]
+# Converter SQL interpolates *column names* (SQL identifiers, which cannot be
+# bound as parameters) from controlled resolve_columns() maps and literal column
+# constants, with identifier quoting -- never user input. B608 is a false
+# positive for this dynamic-identifier SQL construction.
+skips = ["B608"]
 
 [tool.pytest.ini_options]
 markers = [

@@ -721,6 +721,9 @@ class QuantmsFeatureAdapter(BaseConverter):
     def _detect_experiment_type(self) -> str:
         """Detect experiment type from MSstats Channel column."""
         try:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info('msstats')").fetchall()}
+            if "Channel" not in cols:
+                return "LFQ"
             channels = self._conn.execute('SELECT DISTINCT "Channel" FROM msstats LIMIT 20').fetchall()
             channel_vals = [str(c[0]).upper() for c in channels if c[0]]
             if any("TMT" in c for c in channel_vals):

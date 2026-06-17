@@ -11,6 +11,7 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | **DIA-NN** | No | Yes | Yes | No | If SDRF | If SDRF | Yes | If SDRF | No | No |
 | **Spectronaut** | No | Yes | Yes | No | If SDRF | If SDRF | Yes | Yes | Yes | No |
 | **quantms** | Yes | Yes | Yes | No | If SDRF | If SDRF | Yes | Yes | No | No |
+| **CDAP** | Yes | Yes | Yes | No | No | No | Yes | Yes | Yes | No |
 | **mzIdentML** | Yes | No | No | Yes | If SDRF | If SDRF | Yes | Yes | Yes | No |
 | **SDRF** | No | No | No | No | Yes | Yes | No | Optional | No | No |
 
@@ -27,6 +28,7 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | DIA-NN | `qpxc convert diann` |
 | Spectronaut | `qpxc convert spectronaut` |
 | quantms | `qpxc convert quantms` |
+| CDAP | `qpxc convert cdap` |
 | mzIdentML | `qpxc convert mzidentml` |
 | SDRF only | `qpxc convert sdrf` |
 
@@ -39,6 +41,7 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | DIA-NN | report (tsv), pg_matrix (optional) |
 | Spectronaut | report.tsv; optional SDRF |
 | quantms | mzTab; optional MSstats, optional SDRF |
+| CDAP | CPTAC CDAP `.psm` files in one study directory |
 | mzIdentML | .mzid / .mzid.gz; optional MGF or mzML (file/folder) for spectra; optional SDRF |
 | SDRF | Single SDRF TSV file |
 

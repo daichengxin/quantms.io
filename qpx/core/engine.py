@@ -148,6 +148,7 @@ def create_engine(**kwargs) -> DuckDBEngine:
 def create_converter_connection(
     memory_limit: str = "16GB",
     threads: int = 4,
+    temp_directory: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """Create a validated DuckDB in-memory connection for converter use.
 
@@ -163,4 +164,12 @@ def create_converter_connection(
     )
     conn.execute(sql_build("SET threads=$val", val=str(int(threads))))
     conn.execute("SET enable_progress_bar=true")
+    conn.execute("SET preserve_insertion_order=false")
+    if temp_directory:
+        conn.execute(
+            sql_build(
+                "SET temp_directory='$val'",
+                val=_validate_set_value(temp_directory, "temp_directory"),
+            )
+        )
     return conn

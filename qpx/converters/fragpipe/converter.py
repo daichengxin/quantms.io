@@ -17,8 +17,10 @@ logger = logging.getLogger(__name__)
 class FragPipeConverter(BaseOrchestrator):
     """Orchestrate full FragPipe conversion to QPX format."""
 
-    def __init__(self, output_directory=None, compression: str = "zstd"):
+    def __init__(self, output_directory=None, max_memory=None, max_cpus=None, compression: str = "zstd"):
         self._output_dir = Path(output_directory) if output_directory else None
+        self._memory = max_memory or "16GB"
+        self._cpus = max_cpus or 4
         self._compression = compression
         self._resolved_mappings_by_view: dict[str, dict] = {}
 
@@ -44,7 +46,9 @@ class FragPipeConverter(BaseOrchestrator):
         produced_structures: list[str] = []
 
         if psm_file:
-            with FragPipePsmAdapter(compression=self._compression) as adapter:
+            with FragPipePsmAdapter(
+                duckdb_memory=self._memory, duckdb_threads=self._cpus, compression=self._compression
+            ) as adapter:
                 adapter.convert(
                     psm_path=str(psm_file),
                     output_path=str(out / f"{prefix}.psm.parquet"),
@@ -59,7 +63,9 @@ class FragPipeConverter(BaseOrchestrator):
             from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
 
             feature_path = str(ion_file or peptide_file)
-            with FragPipeFeatureAdapter(compression=self._compression) as adapter:
+            with FragPipeFeatureAdapter(
+                duckdb_memory=self._memory, duckdb_threads=self._cpus, compression=self._compression
+            ) as adapter:
                 adapter.convert(
                     feature_path=feature_path,
                     output_path=str(out / f"{prefix}.feature.parquet"),
@@ -73,7 +79,9 @@ class FragPipeConverter(BaseOrchestrator):
             logger.info("FragPipe feature conversion complete")
 
         if pg_file:
-            with FragPipePgAdapter(compression=self._compression) as adapter:
+            with FragPipePgAdapter(
+                duckdb_memory=self._memory, duckdb_threads=self._cpus, compression=self._compression
+            ) as adapter:
                 adapter.convert(
                     protein_path=str(pg_file),
                     output_path=str(out / f"{prefix}.pg.parquet"),
