@@ -143,6 +143,38 @@ def build_proforma(sequence: str, mods: list[tuple[int, str]]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def strip_modifications(peptidoform: str) -> str:
+    """Return the bare amino-acid sequence of *peptidoform*.
+
+    Modification tags carry letters of their own -- ``[TMTpro]``,
+    ``(Carbamidomethyl)`` -- so they must be removed *before* upper-casing.
+    Upper-casing first and then keeping ``[A-Z]`` welds the tag's letters into
+    the sequence: ``[TMTpro]-AYAQGISR`` becomes ``TMTPROAYAQGISR``, which no
+    longer matches anything in a digested FASTA. Named modifications are the
+    only ones affected; numeric ones (``[+57.02]``) survive the naive form
+    because digits are not ``A-Z``, which is why this stayed hidden on
+    label-free data.
+
+    Both notations are accepted: ProForma uses square brackets, mzTab uses
+    parentheses (see :func:`_normalize_peptidoform`).
+
+    Nesting is counted rather than matched by regex, because reagent names
+    embed their own parentheses: ``Label:13C(6)15N(2)`` (heavy lysine) closes
+    twice before the tag itself ends, so a flat ``\\([^)]*\\)`` would stop at
+    the first ``)`` and leak ``15N`` into the sequence.
+    """
+    out: list[str] = []
+    depth = 0
+    for char in peptidoform:
+        if char in "[(":
+            depth += 1
+        elif char in "])":
+            depth = max(depth - 1, 0)
+        elif depth == 0 and char.isascii() and char.isalpha():
+            out.append(char)
+    return "".join(out).upper()
+
+
 def _normalize_peptidoform(peptidoform: str) -> str:
     """Normalise mzTab-style ``(ModName)`` to ProForma ``[ModName]``.
 

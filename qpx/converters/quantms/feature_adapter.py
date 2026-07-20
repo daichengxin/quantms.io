@@ -30,7 +30,7 @@ from qpx.converters.mztab import (
     load_msstats,
     load_mztab_sections,
 )
-from qpx.converters.ptm import from_proforma
+from qpx.converters.ptm import from_proforma, strip_modifications
 from qpx.converters.utils import (
     parse_scan_numbers,
     resolve_run_file,
@@ -495,7 +495,7 @@ class QuantmsFeatureAdapter(BaseConverter):
         for (peptidoform,) in distinct:
             if not peptidoform or peptidoform == "null":
                 continue
-            sequence = re.sub(r"[^A-Z]", "", peptidoform.upper())
+            sequence = strip_modifications(peptidoform)
             if peptidoform != sequence:
                 peptidoform_profoma, mods = from_proforma(
                     peptidoform,
@@ -1060,7 +1060,7 @@ class QuantmsFeatureAdapter(BaseConverter):
         int_arr = df[intensity_col].values
         rt_arr = df[rt_col].values if rt_col in df.columns else None
 
-        _sub = re.sub
+        _strip = strip_modifications
         _from_proforma = from_proforma
         _safe_float = safe_float
         mods_meta = self._modifications_meta
@@ -1076,7 +1076,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                 charge_raw = charge_arr[i]
                 charge = int(float(charge_raw)) if charge_raw is not None and charge_raw != "" and pd.notna(charge_raw) else 0
 
-                sequence = _sub(r"[^A-Z]", "", peptidoform.upper()) if peptidoform else ""
+                sequence = _strip(peptidoform) if peptidoform else ""
 
                 if peptidoform and peptidoform != sequence:
                     _cache_key = (peptidoform, sequence)
@@ -1193,7 +1193,7 @@ class QuantmsFeatureAdapter(BaseConverter):
 
         grouping = [pf_col, prot_col, ref_col, charge_col]
 
-        _sub = re.sub
+        _strip = strip_modifications
         _from_proforma = from_proforma
         _safe_float = safe_float
         _tmt_map = self._tmt_channel_map
@@ -1210,7 +1210,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                 run_file_name = str(run_file_name).split(".")[0] if run_file_name else ""
                 charge = int(float(charge)) if charge not in (None, "", "null") else 0
 
-                sequence = _sub(r"[^A-Z]", "", peptidoform.upper()) if peptidoform else ""
+                sequence = _strip(peptidoform) if peptidoform else ""
 
                 if peptidoform and peptidoform != sequence:
                     _cache_key = (peptidoform, sequence)
