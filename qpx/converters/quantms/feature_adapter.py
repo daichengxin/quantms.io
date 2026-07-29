@@ -63,6 +63,8 @@ class QuantmsFeatureAdapter(BaseConverter):
         """Initialize adapter with an empty peptide-protein map."""
         super().__init__(**kwargs)
         self._pep_protein_map: dict[str, str] = {}
+        # Plex-aware TMT channel labels; convert() refines channel 10 for TMT10 runs.
+        self._tmt_channel_map: dict[int, str] = self._TMT_CHANNEL_MAP
 
     def convert(
         self,
@@ -112,6 +114,7 @@ class QuantmsFeatureAdapter(BaseConverter):
             )
         else:
             # Isobaric path uses the original dict-based approach
+            self._tmt_channel_map = self._resolve_tmt_channel_map()
             psm_lookup = self._build_psm_lookup(ms_runs)
             protein_qvalue_map = self._build_protein_qvalue_map()
             protein_gene_map = self._build_protein_gene_map()
@@ -705,7 +708,7 @@ class QuantmsFeatureAdapter(BaseConverter):
         7: "TMT129C",
         8: "TMT130N",
         9: "TMT130C",
-        10: "TMT131N",
+        10: "TMT131N",  # TMT10plex uses "TMT131" here; _resolve_tmt_channel_map handles it
         11: "TMT131C",
         # TMT16plex extensions
         12: "TMT132N",
@@ -741,6 +744,22 @@ class QuantmsFeatureAdapter(BaseConverter):
         except Exception:
             self.logger.debug("Failed to detect labeling type from msstats channels", exc_info=True)
         return "LFQ"
+
+    def _resolve_tmt_channel_map(self) -> dict[int, str]:
+        """Return the channel-index -> reporter-label map for this run's plex.
+
+        ``_TMT_CHANNEL_MAP`` follows the TMT11+ convention, where channel 10 is
+        ``TMT131N`` (paired with ``TMT131C`` at channel 11). A TMT10plex run has
+        no ``131C``, so its 10th reporter is the standard ``TMT131`` -- matching
+        the CDAP converter (``CHANNEL_DEFS["TMT10"]``) and OpenMS/SDRF. Detect the
+        plex from the max numeric channel and relabel channel 10 for a TMT10 run.
+        Non-numeric (already-labelled) channels leave the map unchanged.
+        """
+        channel_map = dict(self._TMT_CHANNEL_MAP)
+        max_channel = self._conn.execute('SELECT MAX(TRY_CAST("Channel" AS INTEGER)) FROM msstats').fetchone()[0]
+        if max_channel == 10:
+            channel_map[10] = "TMT131"
+        return channel_map
 
     def _build_psm_lookup(self, ms_runs: dict[int, str]) -> dict[tuple, dict]:
         """Build a lookup from (run_file_name, peptidoform, charge) -> PSM info.
@@ -1177,7 +1196,7 @@ class QuantmsFeatureAdapter(BaseConverter):
         _sub = re.sub
         _from_proforma = from_proforma
         _safe_float = safe_float
-        _tmt_map = self._TMT_CHANNEL_MAP
+        _tmt_map = self._tmt_channel_map
         mods_meta = self._modifications_meta
         is_tmt = experiment_type == "TMT"
         _proforma_cache: dict[tuple[str, str], list | None] = {}

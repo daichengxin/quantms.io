@@ -12,7 +12,7 @@ from qpx.converters.cdap.pg_adapter import CdapPgAdapter
 from qpx.converters.cdap.psm_adapter import CdapPsmAdapter
 from qpx.converters.mappings import get_tool_meta
 from qpx.converters.orchestrator import BaseOrchestrator
-from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
+from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM
 from qpx.core.engine import create_converter_connection
 from qpx.core.scores import field_ontology_entries, score_ontology_entries
 
@@ -205,7 +205,9 @@ class CdapConverter(BaseOrchestrator):
                 "tool_uri": None,
                 "parameters": None,
                 "config": None,
-                "output_views": records + [SAMPLE, RUN, ONTOLOGY],
+                # CDAP itself produces psm/feature/pg + ontology; sample/run come
+                # from PDC metadata in pdc2qpx, not from this converter.
+                "output_views": records + [ONTOLOGY],
             },
         ]
         super()._write_provenance(output_folder, prefix, prov_records)

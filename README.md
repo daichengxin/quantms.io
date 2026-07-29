@@ -177,15 +177,17 @@ Commands:
 
 ### pdc2qpx
 
-One-shot download + conversion of a PDC/CPTAC study (requires `pip install qpx[pdc]`):
+One-shot download + conversion of PDC/CPTAC studies (requires `pip install qpx[pdc]`). `-a/--accession` takes a single ID, comma-separated IDs, or a CSV with a `pdc_study_id`/`pdc_id` column:
 
 ```bash
 # Entire QPX including full spectra (for quantms reanalysis)
-qpxc pdc2qpx \
-    --study PDC000109 \
+qpxc pdc2qpx -a PDC000109 \
     --download-dir ./downloads \
     --output-folder ./qpx/PDC000109 \
     --include-spectra --max-cpus 24
+
+# Many studies from a CSV (each -> ./qpx/<study>/)
+qpxc pdc2qpx -a cptac_lfq.csv --download-dir ./downloads --output-folder ./qpx
 ```
 
 ### Convert

@@ -14,8 +14,9 @@
 FROM python:3.11-slim-bookworm
 
 # Runtime system deps required by pyOpenMS (see environment.yml).
+# hadolint ignore=DL3008
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libglib2.0-0=2.74.6-2+deb12u8 procps=2:4.0.2-3 \
+ && apt-get install -y --no-install-recommends libglib2.0-0 procps \
  && rm -rf /var/lib/apt/lists/*
 
 # hatch-vcs derives the version from git history; when the build context lacks

@@ -10,7 +10,12 @@ import click
 
 
 @click.command("pdc2qpx")
-@click.option("--study", required=True, help="PDC study accession (e.g. PDC000109)")
+@click.option(
+    "-a",
+    "--accession",
+    required=True,
+    help="PDC study accession(s): a single ID, comma-separated IDs, or a CSV with a pdc_study_id/pdc_id column",
+)
 @click.option(
     "--download-dir",
     required=True,
@@ -21,13 +26,19 @@ import click
     "--output-folder",
     required=True,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Directory for generated QPX parquet files",
+    help="QPX output dir. One study writes here; multiple studies write to <output-folder>/<study>/",
 )
 @click.option(
     "--include-spectra",
     is_flag=True,
     default=False,
     help="Also download mzML and produce a full-spectra <study>.mz.parquet",
+)
+@click.option(
+    "--no-metadata",
+    is_flag=True,
+    default=False,
+    help="Skip building sample/run views from PDC metadata (built by default)",
 )
 @click.option(
     "--ms-levels",
@@ -48,60 +59,77 @@ import click
     default=False,
     help="Use files already present under <download-dir>/<study>/ (skip downloading)",
 )
+@click.option(
+    "--stop-on-error",
+    is_flag=True,
+    default=False,
+    help="With multiple studies, abort on the first failure (default: continue and report)",
+)
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 def pdc2qpx_cmd(
-    study: str,
+    accession: str,
     download_dir: Path,
     output_folder: Path,
     include_spectra: bool,
+    no_metadata: bool,
     ms_levels: Optional[str],
     max_cpus: int,
     max_memory: str,
     download_threads: int,
     skip_download: bool,
+    stop_on_error: bool,
     verbose: bool,
 ):
-    """Download a PDC/CPTAC study and convert it to a QPX dataset.
+    """Download PDC/CPTAC studies and convert them to QPX datasets.
 
-    Downloads the CDAP ``.psm`` files (and, with ``--include-spectra``, the mzML
-    spectra) for one PDC study, then converts them: ``.psm`` to psm/feature/pg/...
-    views and mzML to a full-spectra ``mz.parquet``. Requires the ``pdc`` extra
-    (``pip install qpx[pdc]``) for the pridepy download layer.
+    ``--accession`` accepts a single ID, comma-separated IDs, or a CSV with a
+    ``pdc_study_id``/``pdc_id`` column (same input forms as ``pridepy``). Each
+    study's CDAP ``.psm`` (and, with ``--include-spectra``, mzML) is converted to
+    psm/feature/pg/sample/run/... views. With several studies the batch
+    continues past a failed study (e.g. one with no ``.psm``) unless
+    ``--stop-on-error`` is set. Requires the ``pdc`` extra (``pip install
+    qpx[pdc]``) for the pridepy download/parse layer.
 
     \b
     Examples:
-        # Base QPX (psm/feature/pg) only
-        qpxc pdc2qpx \\
-            --study PDC000109 \\
-            --download-dir ./downloads \\
-            --output-folder ./qpx/PDC000109
+        # One study (full spectra for quantms reanalysis)
+        qpxc pdc2qpx -a PDC000109 \\
+            --download-dir ./downloads --output-folder ./qpx/PDC000109 \\
+            --include-spectra
 
-        # Entire QPX including full spectra (for quantms reanalysis)
-        qpxc pdc2qpx \\
-            --study PDC000109 \\
-            --download-dir ./downloads \\
-            --output-folder ./qpx/PDC000109 \\
-            --include-spectra --max-cpus 24
+        # Many studies from a CSV (each -> ./qpx/<study>/)
+        qpxc pdc2qpx -a cptac_lfq.csv \\
+            --download-dir ./downloads --output-folder ./qpx --max-cpus 24
     """
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
     levels = [int(x.strip()) for x in ms_levels.split(",")] if ms_levels else None
 
-    from qpx.pipeline.pdc2qpx import run_pdc2qpx
+    from qpx.pipeline.pdc2qpx import parse_accessions, run_pdc2qpx, run_pdc2qpx_batch
 
-    outputs = run_pdc2qpx(
-        study=study,
-        download_dir=download_dir,
-        output_folder=output_folder,
-        include_spectra=include_spectra,
-        ms_levels=levels,
-        max_cpus=max_cpus,
-        max_memory=max_memory,
-        download_threads=download_threads,
-        skip_download=skip_download,
-    )
+    studies = parse_accessions(accession)
 
-    click.echo(f"pdc2qpx complete for {study}. Output: {output_folder}")
-    if "mz" in outputs:
-        click.echo(f"Full spectra: {outputs['mz']}")
+    common = {
+        "include_spectra": include_spectra,
+        "include_metadata": not no_metadata,
+        "ms_levels": levels,
+        "max_cpus": max_cpus,
+        "max_memory": max_memory,
+        "download_threads": download_threads,
+        "skip_download": skip_download,
+    }
+
+    if len(studies) == 1:
+        outputs = run_pdc2qpx(studies[0], download_dir, output_folder, **common)
+        click.echo(f"pdc2qpx complete for {studies[0]}. Output: {output_folder}")
+        if "mz" in outputs:
+            click.echo(f"Full spectra: {outputs['mz']}")
+        return
+
+    results = run_pdc2qpx_batch(studies, download_dir, output_folder, continue_on_error=not stop_on_error, **common)
+    n_ok = sum(1 for record in results.values() if record["status"] == "ok")
+    click.echo(f"\npdc2qpx: {n_ok}/{len(results)} studies ok (output under {output_folder}/<study>/)")
+    for study, record in results.items():
+        suffix = f" ({record['error']})" if record["error"] else ""
+        click.echo(f"  {record['status']:6s} {study}{suffix}")

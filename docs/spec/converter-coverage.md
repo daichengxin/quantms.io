@@ -11,13 +11,16 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | **DIA-NN** | No | Yes | Yes | No | If SDRF | If SDRF | Yes | If SDRF | No | No |
 | **Spectronaut** | No | Yes | Yes | No | If SDRF | If SDRF | Yes | Yes | Yes | No |
 | **quantms** | Yes | Yes | Yes | No | If SDRF | If SDRF | Yes | Yes | No | No |
-| **CDAP** | Yes | Yes | Yes | No | No | No | Yes | Yes | Yes | No |
+| **CDAP** | Yes | Yes | Yes | No | If PDC | If PDC | Yes | Yes | Yes | No |
 | **mzIdentML** | Yes | No | No | Yes | If SDRF | If SDRF | Yes | Yes | Yes | No |
 | **SDRF** | No | No | No | No | Yes | Yes | No | Optional | No | No |
 
 - **Yes** — the converter produces this view.
 - **No** — the converter does not produce this view (e.g. DIA-NN has no PSM view; mzIdentML has no Feature/PG).
 - **If SDRF** — the view is produced only when an SDRF file is provided (sample and run metadata). SDRF is optional for all converters.
+- **If PDC** — CPTAC/PDC studies ship no SDRF, and CDAP `.psm` files carry no sample metadata. When run through `qpxc pdc2qpx` (default), the sample/run views are built from PDC GraphQL metadata, which also recovers the TMT/iTRAQ channel → biological-sample mapping. Disable with `--no-metadata`.
+
+> The `mz` (full-spectra) view is produced by the standalone `qpxc convert mz` command, or automatically by `qpxc pdc2qpx --include-spectra`; it is not emitted by the per-tool converters above.
 
 ## CLI commands
 

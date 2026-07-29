@@ -52,7 +52,7 @@ def test_pdc2qpx_base(tmp_path):
     download_dir = _stage_study(tmp_path, study)
     out = tmp_path / "qpx"
 
-    result = run_pdc2qpx(study, download_dir, out, skip_download=True)
+    result = run_pdc2qpx(study, download_dir, out, skip_download=True, include_metadata=False)
 
     assert "mz" not in result
     feature = out / f"{study}.feature.parquet"
@@ -67,7 +67,7 @@ def test_pdc2qpx_with_spectra(tmp_path):
     download_dir = _stage_study(tmp_path, study, with_mzml=True)
     out = tmp_path / "qpx"
 
-    result = run_pdc2qpx(study, download_dir, out, include_spectra=True, skip_download=True)
+    result = run_pdc2qpx(study, download_dir, out, include_spectra=True, skip_download=True, include_metadata=False)
 
     assert result["mz"] == out / f"{study}.mz.parquet"
     mz = pq.read_table(str(result["mz"]))
@@ -95,3 +95,136 @@ def test_pdc2qpx_non_cdap_psm_raises(tmp_path):
 
     with pytest.raises(ValueError, match="not a CDAP-format"):
         run_pdc2qpx(study, tmp_path / "downloads", tmp_path / "qpx", skip_download=True)
+
+
+def test_assert_cdap_psm_accepts_crlf(tmp_path):
+    """A valid CDAP .psm with Windows CRLF line endings passes pre-check."""
+    from qpx.pipeline.pdc2qpx import _assert_cdap_psm
+
+    study_dir = tmp_path / "study"
+    study_dir.mkdir()
+    header = "FileName\tScanNum\tPeptideSequence\tProtein\tCharge\r\n"
+    row = "run1.raw\t100\tPEPTIDE\tNP_000001.1\t2\r\n"
+    (study_dir / "valid_crlf.psm").write_bytes((header + row).encode("utf-8"))
+
+    _assert_cdap_psm(study_dir)
+
+
+def _stage_psm_only(download_dir, study):
+    """Stage download_dir/<study>/ with the fixture .psm files."""
+    study_dir = download_dir / study
+    study_dir.mkdir(parents=True)
+    for psm in _FIXTURE_CDAP.glob("*.psm"):
+        shutil.copy(psm, study_dir / psm.name)
+
+
+def test_run_pdc2qpx_batch_isolates_failures(tmp_path):
+    """One bad study (no .psm) is recorded as failed; the batch still finishes."""
+    from qpx.pipeline.pdc2qpx import run_pdc2qpx_batch
+
+    download_dir = tmp_path / "downloads"
+    _stage_psm_only(download_dir, "PDC_GOOD")
+    (download_dir / "PDC_BAD").mkdir(parents=True)  # empty -> no .psm
+    out_root = tmp_path / "qpx"
+
+    results = run_pdc2qpx_batch(["PDC_GOOD", "PDC_BAD"], download_dir, out_root, skip_download=True, include_metadata=False)
+
+    assert results["PDC_GOOD"]["status"] == "ok"
+    assert results["PDC_BAD"]["status"] == "failed"
+    assert results["PDC_BAD"]["error"]
+    assert (out_root / "PDC_GOOD" / "PDC_GOOD.feature.parquet").exists()
+    assert sum(1 for r in results.values() if r["status"] == "ok") == 1
+
+
+def test_run_pdc2qpx_batch_stop_on_error(tmp_path):
+    """With continue_on_error=False the first failure propagates."""
+    from qpx.pipeline.pdc2qpx import run_pdc2qpx_batch
+
+    download_dir = tmp_path / "downloads"
+    (download_dir / "PDC_BAD").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError):
+        run_pdc2qpx_batch(
+            ["PDC_BAD"],
+            download_dir,
+            tmp_path / "qpx",
+            skip_download=True,
+            include_metadata=False,
+            continue_on_error=False,
+        )
+
+
+def test_pdc2qpx_cli_comma_accessions_runs_batch(tmp_path):
+    """`-a PDC_A,PDC_B` resolves to multiple studies and writes one folder each."""
+    from click.testing import CliRunner
+
+    from qpx.cli.pdc2qpx import pdc2qpx_cmd
+
+    download_dir = tmp_path / "downloads"
+    _stage_psm_only(download_dir, "PDC_A")
+    _stage_psm_only(download_dir, "PDC_B")
+    out = tmp_path / "qpx"
+
+    result = CliRunner().invoke(
+        pdc2qpx_cmd,
+        [
+            "-a",
+            "PDC_A,PDC_B",
+            "--download-dir",
+            str(download_dir),
+            "--output-folder",
+            str(out),
+            "--skip-download",
+            "--no-metadata",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "2/2 studies ok" in result.output
+    assert (out / "PDC_A" / "PDC_A.feature.parquet").exists()
+    assert (out / "PDC_B" / "PDC_B.feature.parquet").exists()
+
+
+def test_parse_accessions(tmp_path):
+    from qpx.pipeline.pdc2qpx import parse_accessions
+
+    # single / comma+whitespace / dedup / ignore comments
+    assert parse_accessions("PDC000109") == ["PDC000109"]
+    assert parse_accessions("PDC1, PDC2 PDC1 #c") == ["PDC1", "PDC2"]
+    # CSV with a pdc_study_id column
+    csvf = tmp_path / "list.csv"
+    csvf.write_text("pdc_study_id,quant_method\nPDC5,TMT10\nPDC6,Label Free\n", encoding="utf-8")
+    assert parse_accessions(str(csvf)) == ["PDC5", "PDC6"]
+
+
+def test_pdc2qpx_cli_does_not_require_pridepy_when_skipping(tmp_path, monkeypatch):
+    """The parse + skip-download + no-metadata path must work without the pridepy extra.
+
+    Regression guard: pridepy is an optional extra (absent in CI), so accession
+    parsing and the offline conversion path must not import it.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_pridepy(name, *args, **kwargs):
+        if name == "pridepy" or name.startswith("pridepy."):
+            raise ImportError("pridepy blocked for this test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_pridepy)
+
+    from click.testing import CliRunner
+
+    from qpx.cli.pdc2qpx import pdc2qpx_cmd
+
+    download_dir = tmp_path / "downloads"
+    _stage_psm_only(download_dir, "PDC_X")
+    out = tmp_path / "qpx"
+
+    result = CliRunner().invoke(
+        pdc2qpx_cmd,
+        ["-a", "PDC_X", "--download-dir", str(download_dir), "--output-folder", str(out), "--skip-download", "--no-metadata"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (out / "PDC_X.feature.parquet").exists()

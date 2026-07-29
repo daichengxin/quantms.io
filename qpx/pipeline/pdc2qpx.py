@@ -57,7 +57,7 @@ def _assert_cdap_psm(study_dir: Path) -> None:
             f"No .psm files found in {study_dir}. pdc2qpx needs CDAP .psm output; this PDC study may not provide harmonized PSMs."
         )
     with open(psm_files[0], encoding="utf-8") as handle:
-        header = handle.readline().rstrip("\n").split("\t")
+        header = handle.readline().rstrip("\r\n").split("\t")
     missing = [col for col in _CDAP_SIGNATURE_COLUMNS if col not in header]
     if missing:
         raise ValueError(
@@ -72,6 +72,7 @@ def run_pdc2qpx(
     output_folder: Path,
     *,
     include_spectra: bool = False,
+    include_metadata: bool = True,
     ms_levels: Optional[list[int]] = None,
     max_cpus: int = 24,
     max_memory: str = "16GB",
@@ -87,6 +88,10 @@ def run_pdc2qpx(
         output_folder: Directory for generated QPX parquet files.
         include_spectra: Also download mzML and produce a full-spectra
             ``<study>.mz.parquet``.
+        include_metadata: Build ``<study>.sample.parquet`` and
+            ``<study>.run.parquet`` from PDC GraphQL metadata (channel ->
+            biological-sample mapping). On by default; metadata failures are
+            logged and skipped without breaking the conversion.
         ms_levels: MS levels for the mz view (``None`` = all). Precursor-level
             LFQ reanalysis needs MS1 as well as MS2.
         max_cpus: Threads for the CDAP conversion.
@@ -124,7 +129,22 @@ def run_pdc2qpx(
     )
     outputs: dict[str, Path] = {"base": output_folder}
 
-    # 2. Optional full-spectra mz.parquet from mzML files.
+    # 2. Optional sample/run views from PDC metadata (channel -> sample mapping).
+    if include_metadata:
+        try:
+            from qpx.converters.cdap.pdc_sample_run import build_sample_run_from_pdc
+
+            built = build_sample_run_from_pdc(study, output_folder, prefix=study, threads=download_threads)
+            if built:
+                outputs.update(built)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            # Best-effort: network (OSError/URLError), GraphQL (RuntimeError), or
+            # data-shape failures must not break the main conversion. The builder
+            # writes via temp files + atomic rename, so a failure here never
+            # clobbers a previously-good sample/run parquet.
+            logger.warning("PDC metadata sample/run build skipped for %s: %s", study, exc)
+
+    # 3. Optional full-spectra mz.parquet from mzML files.
     if include_spectra:
         if not skip_download:
             _download(study, "mzml", download_dir, download_threads)
@@ -140,3 +160,81 @@ def run_pdc2qpx(
 
     logger.info("pdc2qpx complete for %s -> %s", study, output_folder)
     return outputs
+
+
+def parse_accessions(accession: str) -> list[str]:
+    """Resolve PDC study accessions from a single ``-a`` argument.
+
+    Accepts a single ID, comma/newline-separated IDs, or a path to a CSV with a
+    ``pdc_study_id``/``pdc_id`` column. Mirrors the input forms of pridepy's
+    ``parse_accessions`` so ``pdc2qpx`` and ``pridepy download-pdc-files`` take
+    the same ``-a`` argument -- but keeps parsing dependency-free (pridepy is an
+    optional extra). Blank lines and ``#`` comments are ignored; order is
+    preserved and duplicates dropped.
+    """
+    source = Path(accession).expanduser()
+    if source.is_file() and source.suffix.lower() == ".csv":
+        import csv
+
+        with source.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            column = next((c for c in ("pdc_study_id", "pdc_id") if c in (reader.fieldnames or [])), None)
+            if column is None:
+                raise ValueError(f"CSV must contain a pdc_study_id or pdc_id column: {source}")
+            raw = [str(row.get(column) or "") for row in reader]
+    else:
+        raw = accession.replace(",", "\n").split()
+    cleaned = [item.strip() for item in raw if item.strip() and not item.strip().startswith("#")]
+    if not cleaned:
+        raise ValueError(f"No PDC study accession found in: {accession!r}")
+    return list(dict.fromkeys(cleaned))
+
+
+def run_pdc2qpx_batch(
+    studies: list[str],
+    download_dir: Path,
+    output_root: Path,
+    *,
+    include_spectra: bool = False,
+    include_metadata: bool = True,
+    ms_levels: Optional[list[int]] = None,
+    max_cpus: int = 24,
+    max_memory: str = "16GB",
+    download_threads: int = 24,
+    skip_download: bool = False,
+    continue_on_error: bool = True,
+) -> dict[str, dict]:
+    """Run :func:`run_pdc2qpx` for each study into ``output_root/<study>/``.
+
+    Returns ``{study: {"status": "ok"|"failed", "outputs": dict|None,
+    "error": str|None}}``. With *continue_on_error* (default) a study's expected
+    failure (missing/non-CDAP ``.psm``, network) is recorded and the batch
+    continues; set it ``False`` to abort on the first failure.
+    """
+    output_root = Path(output_root)
+    results: dict[str, dict] = {}
+    for index, study in enumerate(studies, start=1):
+        logger.info("pdc2qpx %d/%d: %s", index, len(studies), study)
+        try:
+            outputs = run_pdc2qpx(
+                study,
+                download_dir,
+                output_root / study,
+                include_spectra=include_spectra,
+                include_metadata=include_metadata,
+                ms_levels=ms_levels,
+                max_cpus=max_cpus,
+                max_memory=max_memory,
+                download_threads=download_threads,
+                skip_download=skip_download,
+            )
+            results[study] = {"status": "ok", "outputs": outputs, "error": None}
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            if not continue_on_error:
+                raise
+            logger.warning("pdc2qpx: study %s failed: %s", study, exc)
+            results[study] = {"status": "failed", "outputs": None, "error": str(exc)}
+
+    n_ok = sum(1 for record in results.values() if record["status"] == "ok")
+    logger.info("pdc2qpx batch complete: %d/%d studies ok", n_ok, len(studies))
+    return results

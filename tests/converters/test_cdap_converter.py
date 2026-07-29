@@ -240,6 +240,14 @@ class TestCdapMetadata:
         table = pq.read_table(str(path))
         assert table.num_rows > 0
 
+    def test_provenance_does_not_claim_sample_run(self, converted_output):
+        """CDAP does not write sample/run, so provenance must not claim them."""
+        path = converted_output / f"{_PREFIX}.provenance.parquet"
+        table = pq.read_table(str(path))
+        all_views = {view for views in table.column("output_views").to_pylist() for view in (views or [])}
+        assert "sample" not in all_views
+        assert "run" not in all_views
+
     def test_dataset_exists(self, converted_output):
         path = converted_output / f"{_PREFIX}.dataset.parquet"
         assert path.exists()
