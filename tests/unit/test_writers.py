@@ -4,7 +4,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from qpx.core.data import FeatureSchema
+from qpx.core.data import FeatureSchema, PsmSchema
 from qpx.core.parquet_io import parquet_row_count, read_parquet_metadata
 from qpx.writers import (
     DatasetWriter,
@@ -97,6 +97,33 @@ def test_writer_schema_validation(tmp_path):
     with writer:
         writer.write_table(table)
     assert parquet_row_count(path2) == 1
+
+
+def test_writers_support_de_novo_records_without_database_fields(tmp_path):
+    """PSM and feature writers accept records from a database-free workflow."""
+    psm_record = make_psm_record(sequence="DENOVO", peptidoform="DENOVO")
+    psm_record["protein_accessions"] = None
+
+    psm_path = tmp_path / "denovo.psm.parquet"
+    with PsmWriter(psm_path) as writer:
+        writer.write_batch([psm_record])
+    psm_table = pq.read_table(psm_path)
+    assert psm_table.column("is_decoy").to_pylist() == [False]
+    assert psm_table.column("protein_accessions").to_pylist() == [None]
+    assert PsmSchema.validate(psm_table) == []
+
+    feature_record = make_feature_record(sequence="DENOVO", peptidoform="DENOVO")
+    feature_record["anchor_protein"] = None
+    feature_record["pg_accessions"] = None
+    feature_record["unique"] = None
+
+    feature_path = tmp_path / "denovo.feature.parquet"
+    with FeatureWriter(feature_path) as writer:
+        writer.write_batch([feature_record])
+    feature_table = pq.read_table(feature_path)
+    assert feature_table.column("is_decoy").to_pylist() == [False]
+    assert feature_table.column("anchor_protein").to_pylist() == [None]
+    assert FeatureSchema.validate(feature_table) == []
 
 
 def test_writer_batching(tmp_path):

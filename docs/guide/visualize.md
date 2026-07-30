@@ -18,9 +18,9 @@ ds = qpx.Dataset("path/to/dataset/")
 
 # View-based plotting
 ds.identifications.plot()  # Identification summary plot
-ds.runs.plot()             # Run-level QC plot
-ds.modifications.plot()    # Modification distribution plot
-ds.qc.plot()              # Quality control dashboard
+ds.runs.plot()  # Run-level QC plot
+ds.modifications.plot()  # Modification distribution plot
+ds.qc.plot()  # Quality control dashboard
 ```
 
 ## Available Visualizations
@@ -38,7 +38,7 @@ ds = qpx.Dataset("./output/")
 fig = ds.identifications.plot()
 
 # Save to file
-fig.savefig("./plots/identifications.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/identifications.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -66,7 +66,7 @@ ds = qpx.Dataset("./output/")
 fig = ds.runs.plot()
 
 # Save to file
-fig.savefig("./plots/run_summary.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/run_summary.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -95,7 +95,7 @@ ds = qpx.Dataset("./output/")
 fig = ds.modifications.plot()
 
 # Save to file
-fig.savefig("./plots/modifications.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/modifications.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -123,7 +123,7 @@ ds = qpx.Dataset("./output/")
 fig = ds.qc.plot()
 
 # Save to file
-fig.savefig("./plots/qc_dashboard.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/qc_dashboard.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -153,20 +153,19 @@ import matplotlib.pyplot as plt
 ds = qpx.Dataset("./output/")
 
 # Get intensity columns
-intensity_cols = [col for col in ds.feature.data.columns
-                 if col.startswith('sample_')]
+intensity_cols = [col for col in ds.feature.data.columns if col.startswith("sample_")]
 
 # Create box plot
 fig, ax = plt.subplots(figsize=(12, 6))
-ds.feature.data[intensity_cols].apply(lambda x: x[x > 0].apply('log10')).boxplot(ax=ax)
-ax.set_xlabel('Sample')
-ax.set_ylabel('log10(Intensity)')
-ax.set_title('Intensity Distribution Across Samples')
-plt.xticks(rotation=45, ha='right')
+ds.feature.data[intensity_cols].apply(lambda x: x[x > 0].apply("log10")).boxplot(ax=ax)
+ax.set_xlabel("Sample")
+ax.set_ylabel("log10(Intensity)")
+ax.set_title("Intensity Distribution Across Samples")
+plt.xticks(rotation=45, ha="right")
 plt.tight_layout()
 
 # Save
-fig.savefig("./plots/intensity_boxplot.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/intensity_boxplot.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -196,8 +195,7 @@ import numpy as np
 ds = qpx.Dataset("./output/")
 
 # Get intensity columns (limit to first 10 samples for readability)
-intensity_cols = [col for col in ds.feature.data.columns
-                 if col.startswith('sample_')][:10]
+intensity_cols = [col for col in ds.feature.data.columns if col.startswith("sample_")][:10]
 
 # Create KDE plot
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -207,14 +205,14 @@ for col in intensity_cols:
         log_intensities = np.log10(intensities[intensities > 0])
         log_intensities.plot.kde(ax=ax, label=col)
 
-ax.set_xlabel('log10(Intensity)')
-ax.set_ylabel('Density')
-ax.set_title('Intensity Distribution (KDE)')
-ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+ax.set_xlabel("log10(Intensity)")
+ax.set_ylabel("Density")
+ax.set_title("Intensity Distribution (KDE)")
+ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 plt.tight_layout()
 
 # Save
-fig.savefig("./plots/intensity_kde.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/intensity_kde.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -243,20 +241,20 @@ import matplotlib.pyplot as plt
 ds = qpx.Dataset("./output/")
 
 # Count peptides per protein
-peptides_per_protein = ds.psm.data.groupby('protein_accessions')['sequence'].nunique()
+peptides_per_protein = ds.psm.data.groupby("protein_accessions")["sequence"].nunique()
 top_proteins = peptides_per_protein.nlargest(20)
 
 # Create bar plot
 fig, ax = plt.subplots(figsize=(12, 6))
 top_proteins.plot.bar(ax=ax)
-ax.set_xlabel('Protein')
-ax.set_ylabel('Number of Peptides')
-ax.set_title('Peptide Distribution Across Top 20 Proteins')
-plt.xticks(rotation=45, ha='right')
+ax.set_xlabel("Protein")
+ax.set_ylabel("Number of Peptides")
+ax.set_title("Peptide Distribution Across Top 20 Proteins")
+plt.xticks(rotation=45, ha="right")
 plt.tight_layout()
 
 # Save
-fig.savefig("./plots/peptides_per_protein.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/peptides_per_protein.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -284,20 +282,20 @@ ds = qpx.Dataset("./output/")
 
 # Assuming 'condition' column exists in PSM data or can be derived from sample metadata
 # This is a simplified example - adapt based on your metadata structure
-if 'condition' in ds.psm.data.columns:
-    peptides_by_condition = ds.psm.data.groupby('condition')['sequence'].nunique()
+if "condition" in ds.psm.data.columns:
+    peptides_by_condition = ds.psm.data.groupby("condition")["sequence"].nunique()
 
     # Create bar plot
     fig, ax = plt.subplots(figsize=(10, 6))
     peptides_by_condition.plot.bar(ax=ax)
-    ax.set_xlabel('Condition')
-    ax.set_ylabel('Number of Peptides')
-    ax.set_title('Peptides Identified by Condition')
-    plt.xticks(rotation=45, ha='right')
+    ax.set_xlabel("Condition")
+    ax.set_ylabel("Number of Peptides")
+    ax.set_title("Peptides Identified by Condition")
+    plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
 
     # Save
-    fig.savefig("./plots/peptides_by_condition.svg", format='svg', bbox_inches='tight')
+    fig.savefig("./plots/peptides_by_condition.svg", format="svg", bbox_inches="tight")
 ```
 
 **Interpretation**:
@@ -318,8 +316,7 @@ import numpy as np
 ds = qpx.Dataset("./output/")
 
 # Assuming iBAQ columns exist in protein group data
-ibaq_cols = [col for col in ds.pg.data.columns
-            if 'ibaq' in col.lower() and col.startswith('sample_')]
+ibaq_cols = [col for col in ds.pg.data.columns if "ibaq" in col.lower() and col.startswith("sample_")]
 
 if ibaq_cols:
     # Plot first sample as example
@@ -330,17 +327,17 @@ if ibaq_cols:
         # Create histogram with KDE
         fig, ax = plt.subplots(figsize=(10, 6))
         log_ibaq = np.log10(ibaq_values[ibaq_values > 0])
-        log_ibaq.plot.hist(bins=50, alpha=0.6, ax=ax, label='Histogram')
-        log_ibaq.plot.kde(ax=ax, label='KDE', linewidth=2)
+        log_ibaq.plot.hist(bins=50, alpha=0.6, ax=ax, label="Histogram")
+        log_ibaq.plot.kde(ax=ax, label="KDE", linewidth=2)
 
-        ax.set_xlabel('log10(iBAQ Intensity)')
-        ax.set_ylabel('Frequency / Density')
-        ax.set_title(f'iBAQ Distribution - {sample_col}')
+        ax.set_xlabel("log10(iBAQ Intensity)")
+        ax.set_ylabel("Frequency / Density")
+        ax.set_title(f"iBAQ Distribution - {sample_col}")
         ax.legend()
         plt.tight_layout()
 
         # Save
-        fig.savefig("./plots/ibaq_distribution.svg", format='svg', bbox_inches='tight')
+        fig.savefig("./plots/ibaq_distribution.svg", format="svg", bbox_inches="tight")
 ```
 
 **Output**:
@@ -368,25 +365,24 @@ import seaborn as sns
 ds = qpx.Dataset("./output/")
 
 # Get intensity columns
-intensity_cols = [col for col in ds.feature.data.columns
-                 if col.startswith('sample_')]
+intensity_cols = [col for col in ds.feature.data.columns if col.startswith("sample_")]
 
 # Calculate missing value percentages
 missing_pct = ds.feature.data[intensity_cols].isna().mean() * 100
 
 # Create bar plot
 fig, ax = plt.subplots(figsize=(12, 6))
-missing_pct.plot.bar(ax=ax, color='coral')
-ax.set_xlabel('Sample')
-ax.set_ylabel('Missing Values (%)')
-ax.set_title('Missing Value Percentage by Sample')
-ax.axhline(y=30, color='r', linestyle='--', label='30% threshold')
-plt.xticks(rotation=45, ha='right')
+missing_pct.plot.bar(ax=ax, color="coral")
+ax.set_xlabel("Sample")
+ax.set_ylabel("Missing Values (%)")
+ax.set_title("Missing Value Percentage by Sample")
+ax.axhline(y=30, color="r", linestyle="--", label="30% threshold")
+plt.xticks(rotation=45, ha="right")
 plt.legend()
 plt.tight_layout()
 
 # Save
-fig.savefig("./plots/missing_values.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/missing_values.svg", format="svg", bbox_inches="tight")
 ```
 
 **Interpretation**:
@@ -406,11 +402,11 @@ import qpx
 import matplotlib.pyplot as plt
 
 # Set publication style
-plt.style.use('seaborn-v0_8-paper')
-plt.rcParams['figure.dpi'] = 300
-plt.rcParams['font.size'] = 12
-plt.rcParams['axes.labelsize'] = 14
-plt.rcParams['axes.titlesize'] = 16
+plt.style.use("seaborn-v0_8-paper")
+plt.rcParams["figure.dpi"] = 300
+plt.rcParams["font.size"] = 12
+plt.rcParams["axes.labelsize"] = 14
+plt.rcParams["axes.titlesize"] = 16
 
 ds = qpx.Dataset("./output/")
 
@@ -418,9 +414,9 @@ ds = qpx.Dataset("./output/")
 fig = ds.identifications.plot()
 
 # Save in multiple formats
-fig.savefig("./plots/identifications.svg", format='svg', bbox_inches='tight', dpi=300)
-fig.savefig("./plots/identifications.pdf", format='pdf', bbox_inches='tight', dpi=300)
-fig.savefig("./plots/identifications.png", format='png', bbox_inches='tight', dpi=300)
+fig.savefig("./plots/identifications.svg", format="svg", bbox_inches="tight", dpi=300)
+fig.savefig("./plots/identifications.pdf", format="pdf", bbox_inches="tight", dpi=300)
+fig.savefig("./plots/identifications.png", format="png", bbox_inches="tight", dpi=300)
 ```
 
 ### Multi-Panel Figures
@@ -439,46 +435,45 @@ fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 # Panel 1: Identifications
 ax1 = axes[0, 0]
 stats = {
-    'Proteins': ds.psm.data['protein_accessions'].nunique(),
-    'Peptides': ds.psm.data['sequence'].nunique(),
-    'PSMs': ds.psm.count()
+    "Proteins": ds.psm.data["protein_accessions"].nunique(),
+    "Peptides": ds.psm.data["sequence"].nunique(),
+    "PSMs": ds.psm.count(),
 }
 ax1.bar(stats.keys(), stats.values())
-ax1.set_ylabel('Count')
-ax1.set_title('A. Identifications')
+ax1.set_ylabel("Count")
+ax1.set_title("A. Identifications")
 
 # Panel 2: Runs
 ax2 = axes[0, 1]
-run_psms = ds.psm.data.groupby('run_file_name').size()
+run_psms = ds.psm.data.groupby("run_file_name").size()
 ax2.bar(range(len(run_psms)), run_psms.values)
-ax2.set_xlabel('Run')
-ax2.set_ylabel('PSM Count')
-ax2.set_title('B. PSMs per Run')
+ax2.set_xlabel("Run")
+ax2.set_ylabel("PSM Count")
+ax2.set_title("B. PSMs per Run")
 
 # Panel 3: Modifications
 ax3 = axes[1, 0]
-if 'modifications' in ds.psm.data.columns:
-    mod_counts = ds.psm.data['modifications'].value_counts().head(10)
+if "modifications" in ds.psm.data.columns:
+    mod_counts = ds.psm.data["modifications"].value_counts().head(10)
     mod_counts.plot.barh(ax=ax3)
-    ax3.set_xlabel('Count')
-    ax3.set_title('C. Top 10 Modifications')
+    ax3.set_xlabel("Count")
+    ax3.set_title("C. Top 10 Modifications")
 
 # Panel 4: Intensity distribution (if feature data available)
 ax4 = axes[1, 1]
-if hasattr(ds, 'feature') and ds.feature.count() > 0:
-    intensity_cols = [col for col in ds.feature.data.columns
-                     if col.startswith('sample_')][:5]
+if hasattr(ds, "feature") and ds.feature.count() > 0:
+    intensity_cols = [col for col in ds.feature.data.columns if col.startswith("sample_")][:5]
     for col in intensity_cols:
         intensities = ds.feature.data[col].dropna()
         if len(intensities) > 0:
-            intensities[intensities > 0].apply('log10').plot.kde(ax=ax4, label=col)
-    ax4.set_xlabel('log10(Intensity)')
-    ax4.set_ylabel('Density')
-    ax4.set_title('D. Intensity Distribution')
+            intensities[intensities > 0].apply("log10").plot.kde(ax=ax4, label=col)
+    ax4.set_xlabel("log10(Intensity)")
+    ax4.set_ylabel("Density")
+    ax4.set_title("D. Intensity Distribution")
     ax4.legend()
 
 plt.tight_layout()
-fig.savefig("./plots/comprehensive_qc.svg", format='svg', bbox_inches='tight', dpi=300)
+fig.savefig("./plots/comprehensive_qc.svg", format="svg", bbox_inches="tight", dpi=300)
 ```
 
 ## General Plotting Tips
@@ -517,25 +512,26 @@ Combine statistics and visualization:
 import qpx
 import matplotlib.pyplot as plt
 
+
 def comprehensive_qc_workflow(dataset_path, output_dir):
     """Generate comprehensive QC report with plots."""
     ds = qpx.Dataset(dataset_path)
 
     # Generate all plots
     plots = {
-        'identifications': ds.identifications.plot(),
-        'runs': ds.runs.plot(),
-        'modifications': ds.modifications.plot(),
-        'qc': ds.qc.plot()
+        "identifications": ds.identifications.plot(),
+        "runs": ds.runs.plot(),
+        "modifications": ds.modifications.plot(),
+        "qc": ds.qc.plot(),
     }
 
     # Save plots
     for name, fig in plots.items():
-        fig.savefig(f"{output_dir}/{name}.svg", format='svg', bbox_inches='tight')
+        fig.savefig(f"{output_dir}/{name}.svg", format="svg", bbox_inches="tight")
         plt.close(fig)
 
     # Generate statistics summary
-    with open(f"{output_dir}/statistics.txt", 'w') as f:
+    with open(f"{output_dir}/statistics.txt", "w") as f:
         f.write("QPX Quality Control Report\n")
         f.write("=" * 50 + "\n\n")
         f.write(f"Proteins: {ds.psm.data['protein_accessions'].nunique():,}\n")
@@ -544,6 +540,7 @@ def comprehensive_qc_workflow(dataset_path, output_dir):
         f.write(f"Runs: {ds.psm.data['run_file_name'].nunique()}\n")
 
     print(f"QC report generated in: {output_dir}")
+
 
 # Usage
 comprehensive_qc_workflow("./output/", "./qc_report/")
@@ -568,12 +565,12 @@ pg_df = ds.pg.data
 # Create custom visualizations using matplotlib, seaborn, plotly, etc.
 # Example: Custom scatter plot
 fig, ax = plt.subplots(figsize=(10, 6))
-ax.scatter(psm_df['rt'], psm_df['observed_mz'], alpha=0.5, s=10)
-ax.set_xlabel('Retention Time (seconds)')
-ax.set_ylabel('Observed m/z')
-ax.set_title('PSM Distribution in RT-m/z Space')
+ax.scatter(psm_df["rt"], psm_df["observed_mz"], alpha=0.5, s=10)
+ax.set_xlabel("Retention Time (seconds)")
+ax.set_ylabel("Observed m/z")
+ax.set_title("PSM Distribution in RT-m/z Space")
 plt.tight_layout()
-fig.savefig("./plots/custom_scatter.svg", format='svg', bbox_inches='tight')
+fig.savefig("./plots/custom_scatter.svg", format="svg", bbox_inches="tight")
 ```
 
 ## Related Documentation

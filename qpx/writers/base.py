@@ -65,6 +65,22 @@ def _schema_leaf_paths(schema: pa.Schema) -> list[str]:
     return leaves
 
 
+def parquet_write_options(schema: pa.Schema, compression: str) -> dict:
+    """Build QPX ParquetWriter options for *schema* and *compression*."""
+    options: dict = {"compression": compression}
+    level = _COMPRESSION_LEVELS.get(str(compression).lower())
+    if level is not None:
+        options["compression_level"] = level
+
+    leaves = _schema_leaf_paths(schema)
+    bss = {leaf: "BYTE_STREAM_SPLIT" for leaf in _BYTE_STREAM_SPLIT_LEAVES if leaf in leaves}
+    if bss:
+        options["column_encoding"] = bss
+        options["use_dictionary"] = [leaf for leaf in leaves if leaf not in bss]
+        options["version"] = "2.6"
+    return options
+
+
 class BaseWriter:
     """
     Batched Parquet writer with schema validation.
@@ -175,19 +191,7 @@ class BaseWriter:
         values are untouched, so existing readers (pyarrow, DuckDB) read the
         output unchanged.
         """
-        options: dict = {"compression": self._compression}
-        level = _COMPRESSION_LEVELS.get(str(self._compression).lower())
-        if level is not None:
-            options["compression_level"] = level
-
-        leaves = _schema_leaf_paths(self.arrow_schema)
-        bss = {leaf: "BYTE_STREAM_SPLIT" for leaf in _BYTE_STREAM_SPLIT_LEAVES if leaf in leaves}
-        if bss:
-            options["column_encoding"] = bss
-            # Dictionary stays on for everything except the BSS leaves.
-            options["use_dictionary"] = [leaf for leaf in leaves if leaf not in bss]
-            options["version"] = "2.6"  # BYTE_STREAM_SPLIT requires format v2.6+
-        return options
+        return parquet_write_options(self.arrow_schema, self._compression)
 
     @staticmethod
     def write_partitioned(

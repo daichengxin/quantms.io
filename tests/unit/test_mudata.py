@@ -18,11 +18,17 @@ import pytest
 mudata = pytest.importorskip("mudata")
 anndata = pytest.importorskip("anndata")
 
+from qpx.converters.orchestrator import BaseOrchestrator  # noqa: E402
+from qpx.dataset import Dataset  # noqa: E402
 from qpx.mudata import (  # noqa: E402
     _LABEL_FIELD_QUERIES,
     _attach_uns_metadata,
     _detect_intensity_label,
+    _detect_label_field,
+    build_mudata,
 )
+from qpx.writers import FeatureWriter, PgWriter, RunWriter  # noqa: E402
+from tests.conftest import make_feature_record, make_pg_record, make_run_record  # noqa: E402
 
 
 class _FakeResult:
@@ -162,3 +168,276 @@ def test_detect_intensity_label_per_table():
     engine = _TableAwareEngine({"feature": "raw", "pg": "LFQ"})
     assert _detect_intensity_label(engine, "feature") == "raw"
     assert _detect_intensity_label(engine, "pg") == "LFQ"
+
+
+def _write_quant_bundle(tmp_path, prefix, feature_intensities, protein_intensities):
+    with FeatureWriter(tmp_path / f"{prefix}.feature.parquet") as writer:
+        writer.write_batch([make_feature_record(intensities=feature_intensities)])
+    with PgWriter(tmp_path / f"{prefix}.pg.parquet") as writer:
+        writer.write_batch([make_pg_record(intensities=protein_intensities)])
+
+    run = make_run_record()
+    run["samples"] = [
+        {
+            "sample_accession": f"{prefix}_{entry['label']}",
+            "label": entry["label"],
+            "biological_replicate": index,
+            "technical_replicate": 1,
+        }
+        for index, entry in enumerate(feature_intensities, start=1)
+    ]
+    with RunWriter(tmp_path / f"{prefix}.run.parquet") as writer:
+        writer.write_batch([run])
+
+
+def test_orchestrator_mudata_exports_all_channels_from_requested_prefix(tmp_path):
+    """Automatic MuData export must include every channel and never mix prefixes."""
+    _write_quant_bundle(
+        tmp_path,
+        "a",
+        [{"label": "TMT126", "intensity": 900.0}],
+        [{"label": "TMT126", "intensity": 9000.0}],
+    )
+    _write_quant_bundle(
+        tmp_path,
+        "z",
+        [
+            {"label": "TMT126", "intensity": 100.0},
+            {"label": "TMT127N", "intensity": 200.0},
+        ],
+        [
+            {"label": "TMT126", "intensity": 1000.0},
+            {"label": "TMT127N", "intensity": 2000.0},
+        ],
+    )
+
+    output = BaseOrchestrator()._write_mudata(tmp_path, "z")
+    assert output == tmp_path / "z.h5mu"
+
+    mdata = mudata.read_h5mu(output)
+    precursor = mdata.mod["precursors"]
+    protein = mdata.mod["proteins"]
+    assert list(precursor.obs_names) == ["run_01|TMT126", "run_01|TMT127N"]
+    assert list(precursor.obs["sample_accession"]) == ["z_TMT126", "z_TMT127N"]
+    np.testing.assert_allclose(precursor.X.toarray()[:, 0], [100.0, 200.0])
+    np.testing.assert_allclose(protein.X.toarray()[:, 0], [1000.0, 2000.0])
+
+
+def test_orchestrator_mudata_expected_failure_is_best_effort(tmp_path, monkeypatch):
+    """Expected assembly failures must not fail the primary conversion."""
+    closed = []
+
+    class FakeDataset:
+        def __init__(self, path, file_prefix=None):  # noqa: ARG002
+            pass
+
+        def close(self):
+            closed.append(True)
+
+    def fail_build(dataset, all_intensity_labels=False):  # noqa: ARG001
+        raise ValueError("invalid MuData input")
+
+    monkeypatch.setattr("qpx.dataset.Dataset", FakeDataset)
+    monkeypatch.setattr("qpx.mudata.build_mudata", fail_build)
+
+    output = BaseOrchestrator()._write_mudata(tmp_path, "broken")
+
+    assert output is None
+    assert closed == [True]
+
+
+def test_build_mudata_explicit_label_keeps_run_level_contract(tmp_path):
+    """Explicit single-label export keeps run observations and matches sample metadata."""
+    _write_quant_bundle(
+        tmp_path,
+        "z",
+        [
+            {"label": "TMT126", "intensity": 100.0},
+            {"label": "TMT127N", "intensity": 200.0},
+        ],
+        [
+            {"label": "TMT126", "intensity": 1000.0},
+            {"label": "TMT127N", "intensity": 2000.0},
+        ],
+    )
+
+    dataset = Dataset(tmp_path, file_prefix="z")
+    try:
+        mdata = build_mudata(
+            dataset,
+            intensity_label="TMT127N",
+            modalities=["precursors"],
+        )
+    finally:
+        dataset.close()
+
+    precursor = mdata.mod["precursors"]
+    assert list(precursor.obs_names) == ["run_01"]
+    assert list(precursor.obs["sample_accession"]) == ["z_TMT127N"]
+    np.testing.assert_allclose(precursor.X.toarray()[:, 0], [200.0])
+
+
+def _write_multi_run_bundle(tmp_path, prefix, runs, sample_label=None):
+    """Write feature/pg/run parquet for arbitrary run x channel layouts.
+
+    Parameters
+    ----------
+    runs : list of (run_file_name, [(label, feature_intensity, protein_intensity), ...])
+        One entry per MS run, each carrying one or more channels.
+    sample_label : str, optional
+        Force the ``run.samples[].label`` to this value (used to reproduce the
+        label-free case where the intensity label "LFQ" does not equal the SDRF
+        sample label "label free sample"). Defaults to the channel label.
+    """
+    features, pgs, run_records = [], [], []
+    for run_name, channels in runs:
+        feat_int = [{"label": lab, "intensity": fi} for lab, fi, _ in channels]
+        prot_int = [{"label": lab, "intensity": pi} for lab, _, pi in channels]
+        features.append(make_feature_record(run_file_name=run_name, intensities=feat_int))
+        pgs.append(make_pg_record(run_file_name=run_name, intensities=prot_int))
+        samples = [
+            {
+                "sample_accession": f"{prefix}-{run_name}-{lab}",
+                "label": sample_label if sample_label is not None else lab,
+                "biological_replicate": idx,
+                "technical_replicate": 1,
+            }
+            for idx, (lab, _, _) in enumerate(channels, start=1)
+        ]
+        record = make_run_record(run_accession=f"assay_{run_name}", run_file_name=run_name)
+        record["samples"] = samples
+        run_records.append(record)
+
+    with FeatureWriter(tmp_path / f"{prefix}.feature.parquet") as writer:
+        writer.write_batch(features)
+    with PgWriter(tmp_path / f"{prefix}.pg.parquet") as writer:
+        writer.write_batch(pgs)
+    with RunWriter(tmp_path / f"{prefix}.run.parquet") as writer:
+        writer.write_batch(run_records)
+
+
+def test_build_mudata_tmt_default_expands_all_channels(tmp_path):
+    """Multiplexed (TMT) data must expand obs over run x channel by default.
+
+    Regression: build_mudata auto-detected ONE label (e.g. TMT126), collapsing
+    an 11-plex run to a single channel with every sample mapped to Sample-1.
+    """
+    _write_multi_run_bundle(
+        tmp_path,
+        "tmt",
+        runs=[
+            ("run_01", [("TMT126", 100.0, 1000.0), ("TMT127N", 200.0, 2000.0), ("TMT128N", 300.0, 3000.0)]),
+            ("run_02", [("TMT126", 400.0, 4000.0), ("TMT127N", 500.0, 5000.0), ("TMT128N", 600.0, 6000.0)]),
+        ],
+    )
+
+    dataset = Dataset(tmp_path, file_prefix="tmt")
+    try:
+        mdata = build_mudata(dataset, modalities=["precursors", "proteins"])
+    finally:
+        dataset.close()
+
+    precursor = mdata.mod["precursors"]
+    protein = mdata.mod["proteins"]
+
+    # obs = runs x channels = 2 x 3 = 6, not 2 collapsed runs.
+    assert precursor.n_obs == 6
+    assert protein.n_obs == 6
+    assert set(precursor.obs["intensity_label"]) == {"TMT126", "TMT127N", "TMT128N"}
+    assert set(protein.obs["intensity_label"]) == {"TMT126", "TMT127N", "TMT128N"}
+
+    # Each (run, channel) maps to its own real sample_accession (not all Sample-1).
+    assert precursor.obs["sample_accession"].nunique() == 6
+    expected = {
+        ("run_01", "TMT126"): "tmt-run_01-TMT126",
+        ("run_01", "TMT127N"): "tmt-run_01-TMT127N",
+        ("run_02", "TMT128N"): "tmt-run_02-TMT128N",
+    }
+    lookup = {
+        (r, lab): acc
+        for r, lab, acc in zip(
+            precursor.obs["run_file_name"],
+            precursor.obs["intensity_label"],
+            precursor.obs["sample_accession"],
+        )
+    }
+    for key, acc in expected.items():
+        assert lookup[key] == acc
+
+
+def test_build_mudata_lfq_default_stays_run_level(tmp_path):
+    """Label-free data must stay obs = runs with a single LFQ label.
+
+    The intensity label "LFQ" intentionally differs from the SDRF sample label
+    "label free sample"; sample_accession must still resolve per run.
+    """
+    _write_multi_run_bundle(
+        tmp_path,
+        "lfq",
+        runs=[
+            ("run_01", [("LFQ", 100.0, 1000.0)]),
+            ("run_02", [("LFQ", 200.0, 2000.0)]),
+        ],
+        sample_label="label free sample",
+    )
+
+    dataset = Dataset(tmp_path, file_prefix="lfq")
+    try:
+        mdata = build_mudata(dataset, modalities=["precursors", "proteins"])
+    finally:
+        dataset.close()
+
+    precursor = mdata.mod["precursors"]
+    assert precursor.n_obs == 2
+    assert list(precursor.obs_names) == ["run_01", "run_02"]
+    assert list(precursor.obs["sample_accession"]) == ["lfq-run_01-LFQ", "lfq-run_02-LFQ"]
+
+
+def test_build_mudata_lfq_all_labels_keeps_sample_accession(tmp_path):
+    """all_intensity_labels=True (orchestrator path) must not drop LFQ metadata.
+
+    Regression: the intensity label "LFQ" never matches the sample label
+    "label free sample", so the all-labels branch produced obs without any
+    sample_accession/run_accession columns.
+    """
+    _write_multi_run_bundle(
+        tmp_path,
+        "lfq",
+        runs=[
+            ("run_01", [("LFQ", 100.0, 1000.0)]),
+            ("run_02", [("LFQ", 200.0, 2000.0)]),
+        ],
+        sample_label="label free sample",
+    )
+
+    dataset = Dataset(tmp_path, file_prefix="lfq")
+    try:
+        mdata = build_mudata(dataset, all_intensity_labels=True, modalities=["precursors"])
+    finally:
+        dataset.close()
+
+    precursor = mdata.mod["precursors"]
+    assert "sample_accession" in precursor.obs.columns
+    assert list(precursor.obs["sample_accession"]) == ["lfq-run_01-LFQ", "lfq-run_02-LFQ"]
+
+
+def test_detect_label_field_uses_label_for_current_schema(tmp_path):
+    """The current intensities struct is {label, intensity}; queries must use i.label.
+
+    Guards the schema drift where some paths hardcoded i.channel.
+    """
+    _write_multi_run_bundle(
+        tmp_path,
+        "tmt",
+        runs=[("run_01", [("TMT126", 100.0, 1000.0), ("TMT127N", 200.0, 2000.0)])],
+    )
+
+    dataset = Dataset(tmp_path, file_prefix="tmt")
+    try:
+        assert _detect_label_field(dataset._engine, "feature") == "label"
+        assert _detect_label_field(dataset._engine, "pg") == "label"
+        # The label queries must actually match rows (non-empty intensity matrix).
+        mdata = build_mudata(dataset, modalities=["precursors"])
+        assert mdata.mod["precursors"].X.nnz > 0
+    finally:
+        dataset.close()

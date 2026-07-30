@@ -26,10 +26,16 @@ QPX datasets can be exported to [MuData](https://mudata.readthedocs.io/) — the
 ![QPX MuData Structure](docs/images/mudata-architecture.svg)
 
 ```python
+from qpx import Dataset
+from qpx.mudata import build_mudata
+
 ds = Dataset("path/to/PXD000000/")
-mdata = ds.to_mudata()              # auto-detects label & available modalities
-mdata.write("PXD000000.h5mu")       # serialize to HDF5
+mdata = build_mudata(ds)  # auto-detects label & available modalities
+mdata.write("PXD000000.h5mu")  # serialize to HDF5
 ```
+
+Use `build_mudata(ds, all_intensity_labels=True)` to represent every TMT/iTRAQ
+channel as a separate `run|label` observation.
 
 > Requires the optional `mudata` dependency: `pip install "qpx[mudata]"`
 

@@ -227,8 +227,9 @@ with qpx.open_dataset("./PXD014414") as ds:
 
    ```python
    import pandas as pd
-   sdrf = pd.read_csv('experiment.sdrf.tsv', sep='\t')
-   print(sdrf['source name'].unique())
+
+   sdrf = pd.read_csv("experiment.sdrf.tsv", sep="\t")
+   print(sdrf["source name"].unique())
    ```
 
 ### Missing factor values

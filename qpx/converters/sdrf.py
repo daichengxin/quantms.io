@@ -13,6 +13,7 @@ import re
 import pandas as pd
 
 from qpx.converters.base import BaseConverter
+from qpx.converters.channel_labels import normalize_label
 from qpx.writers.run import RunWriter
 from qpx.writers.sample import SampleWriter
 
@@ -99,6 +100,23 @@ def _normalize_char_name(sdrf_col: str) -> str:
     # Convert to snake_case
     name = re.sub(r"[^a-z0-9]+", "_", name.lower().strip())
     return name.strip("_")
+
+
+def _add_unique_run_label(
+    seen_labels: dict[str, tuple[str, str]],
+    run_file: str,
+    label: str,
+    sample_acc: str,
+    label_raw: object,
+) -> None:
+    """Register a run label, rejecting duplicate canonical join keys."""
+    if label in seen_labels:
+        previous_sample, previous_label = seen_labels[label]
+        raise ValueError(
+            f"SDRF run {run_file!r} maps canonical label {label!r} more than once: "
+            f"{previous_sample!r} ({previous_label!r}) and {sample_acc!r} ({label_raw!r})"
+        )
+    seen_labels[label] = (sample_acc, str(label_raw))
 
 
 class SdrfConverter(BaseConverter):
@@ -286,11 +304,16 @@ class SdrfConverter(BaseConverter):
 
             # Build per-run samples list
             samples = []
+            seen_labels: dict[str, tuple[str, str]] = {}
             for row in group.to_dict("records"):
                 label_raw = row.get(_COL_LABEL, "")
-                label = _extract_nt(label_raw) if pd.notna(label_raw) else ""
+                # Normalize to the canonical channel label (e.g. the SDRF ontology
+                # form "label free sample" -> "LFQ") so run.samples[].label is the
+                # same join key that feature/pg intensities[].label carry.
+                label = normalize_label(_extract_nt(label_raw)) if pd.notna(label_raw) else ""
 
                 sample_acc = str(row.get(_COL_SOURCE_NAME, ""))
+                _add_unique_run_label(seen_labels, run_file, label, sample_acc, label_raw)
 
                 bio_rep = None
                 if _COL_BIO_REP in row and pd.notna(row[_COL_BIO_REP]):

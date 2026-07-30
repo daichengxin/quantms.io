@@ -90,32 +90,42 @@ import numpy as np
 import pandas as pd
 
 # Sample metadata (obs)
-obs = pd.DataFrame({
-    "organism": ["Homo sapiens", "Homo sapiens"],
-    "organism_part": ["heart", "liver"],
-    "disease": ["normal", "normal"],
-    "biological_replicate": [1, 1],
-}, index=["PXD000000-Sample-1", "PXD000000-Sample-2"])
+obs = pd.DataFrame(
+    {
+        "organism": ["Homo sapiens", "Homo sapiens"],
+        "organism_part": ["heart", "liver"],
+        "disease": ["normal", "normal"],
+        "biological_replicate": [1, 1],
+    },
+    index=["PXD000000-Sample-1", "PXD000000-Sample-2"],
+)
 
 # Protein metadata (var)
-var = pd.DataFrame({
-    "gene_name": ["A1BG", "HBB", "TP53"],
-}, index=["P04217", "P68871", "P04637"])
+var = pd.DataFrame(
+    {
+        "gene_name": ["A1BG", "HBB", "TP53"],
+    },
+    index=["P04217", "P68871", "P04637"],
+)
 
 # Primary matrix: ibaq_log (samples x proteins)
-X = np.array([
-    [8.48, 6.23, 7.91],   # Sample-1
-    [7.12, 9.45, 8.03],   # Sample-2
-])
+X = np.array(
+    [
+        [8.48, 6.23, 7.91],  # Sample-1
+        [7.12, 9.45, 8.03],  # Sample-2
+    ]
+)
 
 # Create AnnData
 adata = ad.AnnData(X=X, obs=obs, var=var)
 
 # Add alternative quantifications as layers
-adata.layers["ibaq_raw"] = np.array([
-    [5678.9, 234.5, 2345.6],
-    [1234.5, 6789.0, 3456.7],
-])
+adata.layers["ibaq_raw"] = np.array(
+    [
+        [5678.9, 234.5, 2345.6],
+        [1234.5, 6789.0, 3456.7],
+    ]
+)
 
 # Add file-level metadata
 adata.uns["qpx_version"] = "2.0"

@@ -126,7 +126,7 @@ def load_schema(name: str) -> ViewSchema:
         arrow_type = _resolve_type(fdef["type"], custom_types)
         required = fdef.get("required", False)
         optional = fdef.get("optional", False)
-        nullable = not required
+        nullable = fdef.get("nullable", not required)
         doc = fdef.get("doc", "")
         fields[fname] = FieldDef(fname, arrow_type, nullable=nullable, optional=optional, doc=doc)
 

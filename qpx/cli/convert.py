@@ -822,6 +822,15 @@ def convert_mzidentml_cmd(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
+    "--consensusxml",
+    "consensusxml_path",
+    help="OpenMS .consensusXML (the -out_cxml companion of -out_qpx); its "
+    "ColumnHeaders give the authoritative channel count/order for relabeling.",
+    required=False,
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
     "--output-folder",
     help="Output directory for the full QPX dataset",
     required=True,
@@ -887,6 +896,7 @@ def convert_openms_cmd(**kwargs):
     converter = OpenMSConverter(
         qpx_dir=qpx_dir,
         sdrf_path=sdrf_file,
+        consensusxml_path=kwargs.get("consensusxml_path"),
         compression=compression,
     )
     converter.convert(

@@ -164,10 +164,7 @@ with qpx.open_dataset("./output") as ds:
         print(f"{name}: {result.summary}")
 
     # Query with SQL
-    top_proteins = ds.sql(
-        "SELECT anchor_protein, COUNT(*) AS n "
-        "FROM feature GROUP BY 1 ORDER BY n DESC LIMIT 10"
-    )
+    top_proteins = ds.sql("SELECT anchor_protein, COUNT(*) AS n FROM feature GROUP BY 1 ORDER BY n DESC LIMIT 10")
     print(top_proteins)
 
     # Access data views as DataFrames

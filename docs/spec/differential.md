@@ -33,18 +33,18 @@ DE results are stored in `uns["de_results"]` as a dictionary keyed by contrast i
 ```python
 adata.uns["de_results"] = {
     "cancer_vs_normal": {
-        "names": np.array(["P04217", "P68871", ...]),           # protein accessions
-        "gene_names": np.array(["A1BG", "HBB", ...]),          # gene symbols
-        "logfoldchanges": np.array([-1.542, 0.891, ...]),       # log2 fold change
-        "scores": np.array([-8.567, 4.321, ...]),               # t-value / test statistic
-        "pvals": np.array([0.0001, 0.002, ...]),                # raw p-values
-        "pvals_adj": np.array([0.005, 0.045, ...]),             # adjusted p-values (BH)
-        "se": np.array([0.18, 0.206, ...]),                     # standard error
-        "df": np.array([37, 35, ...]),                          # degrees of freedom
-        "is_significant": np.array([True, True, ...]),          # pre-computed significance
-        "issue": np.array([None, None, ...]),                   # inference issues
-        "condition_test": "squamous cell carcinoma",            # test condition
-        "condition_reference": "normal",                        # reference condition
+        "names": np.array(["P04217", "P68871", ...]),  # protein accessions
+        "gene_names": np.array(["A1BG", "HBB", ...]),  # gene symbols
+        "logfoldchanges": np.array([-1.542, 0.891, ...]),  # log2 fold change
+        "scores": np.array([-8.567, 4.321, ...]),  # t-value / test statistic
+        "pvals": np.array([0.0001, 0.002, ...]),  # raw p-values
+        "pvals_adj": np.array([0.005, 0.045, ...]),  # adjusted p-values (BH)
+        "se": np.array([0.18, 0.206, ...]),  # standard error
+        "df": np.array([37, 35, ...]),  # degrees of freedom
+        "is_significant": np.array([True, True, ...]),  # pre-computed significance
+        "issue": np.array([None, None, ...]),  # inference issues
+        "condition_test": "squamous cell carcinoma",  # test condition
+        "condition_reference": "normal",  # reference condition
     }
 }
 ```
@@ -105,9 +105,12 @@ import numpy as np
 import pandas as pd
 
 # Protein metadata
-var = pd.DataFrame({
-    "gene_name": ["A1BG", "HBB", "TP53"],
-}, index=["P04217", "P68871", "P04637"])
+var = pd.DataFrame(
+    {
+        "gene_name": ["A1BG", "HBB", "TP53"],
+    },
+    index=["P04217", "P68871", "P04637"],
+)
 
 # Sample metadata (optional — can be empty if only storing DE results)
 obs = pd.DataFrame(index=["Sample-1", "Sample-2", "Sample-3", "Sample-4"])
@@ -180,14 +183,16 @@ adata = ad.read_h5ad("PXD000000.de.h5ad")
 
 # Get significant up-regulated proteins in a contrast
 contrast = adata.uns["de_results"]["cancer_vs_normal"]
-de_df = pd.DataFrame({
-    "protein": contrast["names"],
-    "gene_name": contrast["gene_names"],
-    "log2fc": contrast["logfoldchanges"],
-    "pvalue": contrast["pvals"],
-    "adj_pvalue": contrast["pvals_adj"],
-    "significant": contrast["is_significant"],
-})
+de_df = pd.DataFrame(
+    {
+        "protein": contrast["names"],
+        "gene_name": contrast["gene_names"],
+        "log2fc": contrast["logfoldchanges"],
+        "pvalue": contrast["pvals"],
+        "adj_pvalue": contrast["pvals_adj"],
+        "significant": contrast["is_significant"],
+    }
+)
 
 # Filter: significant and up-regulated
 up_regulated = de_df[(de_df["significant"]) & (de_df["log2fc"] > 1.0)]
