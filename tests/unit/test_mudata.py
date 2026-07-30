@@ -11,6 +11,9 @@ These tests ensure all scalar NA flavors are skipped while normal values
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -83,6 +86,24 @@ class _TableAwareEngine:
 
 def _make_empty_mdata() -> "mudata.MuData":
     return mudata.MuData({"precursors": anndata.AnnData(X=np.zeros((1, 1)))})
+
+
+def _patch_export_dataset(monkeypatch, *, feature, pg):
+    """Install a minimal Dataset double and return its close tracker."""
+    closed = []
+    dataset = SimpleNamespace(
+        psm=object(),
+        feature=feature,
+        pg=pg,
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setattr("qpx.dataset.Dataset", lambda *_args, **_kwargs: dataset)
+    return closed
+
+
+def _write_mudata(tmp_path, prefix):
+    """Invoke the automatic MuData export under test."""
+    return BaseOrchestrator()._write_mudata(tmp_path, prefix)
 
 
 def test_attach_uns_metadata_skips_all_na_flavors():
@@ -211,7 +232,7 @@ def test_orchestrator_mudata_exports_all_channels_from_requested_prefix(tmp_path
         ],
     )
 
-    output = BaseOrchestrator()._write_mudata(tmp_path, "z")
+    output = _write_mudata(tmp_path, "z")
     assert output == tmp_path / "z.h5mu"
 
     mdata = mudata.read_h5mu(output)
@@ -221,28 +242,77 @@ def test_orchestrator_mudata_exports_all_channels_from_requested_prefix(tmp_path
     assert list(precursor.obs["sample_accession"]) == ["z_TMT126", "z_TMT127N"]
     np.testing.assert_allclose(precursor.X.toarray()[:, 0], [100.0, 200.0])
     np.testing.assert_allclose(protein.X.toarray()[:, 0], [1000.0, 2000.0])
+    assert not (tmp_path / "z.tmp.h5mu").exists()
 
 
 def test_orchestrator_mudata_expected_failure_is_best_effort(tmp_path, monkeypatch):
     """Expected assembly failures must not fail the primary conversion."""
-    closed = []
+    closed = _patch_export_dataset(monkeypatch, feature=object(), pg=None)
 
-    class FakeDataset:
-        def __init__(self, path, file_prefix=None):  # noqa: ARG002
-            pass
-
-        def close(self):
-            closed.append(True)
-
-    def fail_build(dataset, all_intensity_labels=False):  # noqa: ARG001
+    def fail_build(dataset, modalities=None, all_intensity_labels=False):
+        _ = dataset, modalities, all_intensity_labels
         raise ValueError("invalid MuData input")
 
-    monkeypatch.setattr("qpx.dataset.Dataset", FakeDataset)
     monkeypatch.setattr("qpx.mudata.build_mudata", fail_build)
 
-    output = BaseOrchestrator()._write_mudata(tmp_path, "broken")
+    output = _write_mudata(tmp_path, "broken")
 
     assert output is None
+    assert closed == [True]
+
+
+def test_orchestrator_mudata_write_failure_leaves_no_artifact(tmp_path, monkeypatch):
+    """An interrupted HDF5 write must leave neither a final nor temporary file."""
+    closed = _patch_export_dataset(monkeypatch, feature=object(), pg=None)
+
+    def partial_write(path):
+        """Write a partial file before simulating an HDF5 failure."""
+        Path(path).write_bytes(b"partial")
+        raise OSError("simulated write failure")
+
+    partial_mdata = SimpleNamespace(
+        mod={"precursors": object()},
+        write=partial_write,
+    )
+    monkeypatch.setattr("qpx.mudata.build_mudata", lambda *_args, **_kwargs: partial_mdata)
+    (tmp_path / "broken.h5mu").write_bytes(b"stale")
+
+    output = _write_mudata(tmp_path, "broken")
+
+    assert output is None
+    assert not (tmp_path / "broken.h5mu").exists()
+    assert not (tmp_path / "broken.tmp.h5mu").exists()
+    assert closed == [True]
+
+
+def test_orchestrator_mudata_skips_psm_only_dataset(tmp_path, monkeypatch):
+    """Automatic export must not create an empty MuData for PSM-only output."""
+    closed = _patch_export_dataset(monkeypatch, feature=None, pg=None)
+
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail("build_mudata must not run without feature or pg input")
+
+    monkeypatch.setattr("qpx.mudata.build_mudata", fail_if_called)
+
+    output = _write_mudata(tmp_path, "psm-only")
+
+    assert output is None
+    assert not (tmp_path / "psm-only.h5mu").exists()
+    assert closed == [True]
+
+
+def test_orchestrator_mudata_rejects_missing_required_modality(tmp_path, monkeypatch):
+    """A failed core modality must not produce a partial MuData artifact."""
+    closed = _patch_export_dataset(monkeypatch, feature=object(), pg=object())
+
+    incomplete_mdata = SimpleNamespace(mod={"proteins": object()})
+    monkeypatch.setattr("qpx.mudata.build_mudata", lambda *_args, **_kwargs: incomplete_mdata)
+
+    output = _write_mudata(tmp_path, "incomplete")
+
+    assert output is None
+    assert not (tmp_path / "incomplete.h5mu").exists()
+    assert not (tmp_path / "incomplete.tmp.h5mu").exists()
     assert closed == [True]
 
 
