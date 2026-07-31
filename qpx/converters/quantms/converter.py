@@ -122,6 +122,7 @@ class QuantMSConverter(BaseOrchestrator):
                         mztab_path=self.mztab_path,
                         msstats_path=self.msstats_file,
                         output_path=str(output_folder / f"{output_prefix}.feature.parquet"),
+                        sdrf_path=self.sdrf_file,
                         enzyme_name=enzyme_name,
                     )
                     ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=FEATURE))
@@ -175,6 +176,7 @@ class QuantMSConverter(BaseOrchestrator):
             software_version="quantms",
             provenance_records=provenance_records,
         )
+        self._write_mudata(output_folder, output_prefix)
 
     # ------------------------------------------------------------------
     # Provenance extraction from mzTab metadata

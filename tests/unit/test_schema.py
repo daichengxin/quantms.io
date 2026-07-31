@@ -102,6 +102,13 @@ def test_view_schema_basic():
     assert FeatureSchema._is_optional("nonexistent_field") is False
 
 
+def test_de_novo_fields_are_nullable():
+    """De novo workflows have no target-decoy search or protein mapping."""
+    assert PsmSchema.get_arrow_schema().field("is_decoy").nullable is False
+    assert FeatureSchema.get_arrow_schema().field("is_decoy").nullable is False
+    assert FeatureSchema.get_arrow_schema().field("anchor_protein").nullable is True
+
+
 def test_schema_validation():
     """Validation: valid table, missing required, type mismatch, optional absent."""
     schema = FeatureSchema.get_arrow_schema()
@@ -133,6 +140,13 @@ def test_schema_validation():
     table = pa.table(arrays, schema=pa.schema(fields_to_keep))
     errors = FeatureSchema.validate(table)
     assert not any("pg_global_qvalue" in e for e in errors)
+
+    # Required but nullable columns must be present even when their values are null.
+    fields_to_keep = [f for f in schema if f.name != "anchor_protein"]
+    arrays = {f.name: pa.nulls(1, type=f.type) for f in fields_to_keep}
+    table = pa.table(arrays, schema=pa.schema(fields_to_keep))
+    errors = FeatureSchema.validate(table)
+    assert any("anchor_protein" in e for e in errors)
 
 
 def test_all_schemas_have_valid_primary_keys():

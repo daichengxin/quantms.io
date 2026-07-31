@@ -12,11 +12,19 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
+from typing import Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from qpx._version import __version__
+from qpx.converters.channel_labels import (
+    channel_labels_from_consensusxml,
+    experiment_type_from_labels,
+    read_sdrf_labels,
+    relabel_intensities_parquet,
+    resolve_channel_labels,
+)
 from qpx.converters.orchestrator import BaseOrchestrator
 from qpx.converters.sdrf import SdrfConverter
 from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
@@ -90,12 +98,43 @@ def _copy_core(
     discovered: dict[str, Path],
     output_folder: Path,
     output_prefix: str,
+    channel_labels: Optional[dict[int, str]] = None,
+    is_lfq: bool | None = None,
+    compression: str = "zstd",
 ) -> dict[str, Path]:
-    """Copy core parquet files to output directory, skipping same-location."""
+    """
+    Copy core parquet files to the output directory.
+
+    ``feature`` and ``pg`` carry ``intensities[].label`` — OpenMS ``-out_qpx``
+    writes the run filename (feature) or a bare channel index (pg) there, so
+    those two are rewritten with canonical channel labels while copying when
+    the experiment type is known. ``is_lfq=None`` preserves their source labels
+    because no SDRF evidence is available. The rest pass through untouched.
+    """
     output_paths: dict[str, Path] = {}
     for view, src_path in discovered.items():
         dst = output_folder / f"{output_prefix}.{view}.parquet"
-        if src_path.resolve() != dst.resolve():
+        if view in (FEATURE, PG) and is_lfq is not None:
+            if src_path.resolve() == dst.resolve():
+                tmp = dst.with_suffix(".relabel.tmp")
+                relabel_intensities_parquet(
+                    str(src_path),
+                    str(tmp),
+                    channel_labels or {},
+                    is_lfq,
+                    compression=compression,
+                )
+                tmp.replace(dst)
+            else:
+                relabel_intensities_parquet(
+                    str(src_path),
+                    str(dst),
+                    channel_labels or {},
+                    is_lfq,
+                    compression=compression,
+                )
+            logger.info("Relabeled channel labels in %s -> %s", src_path.name, dst.name)
+        elif src_path.resolve() != dst.resolve():
             shutil.copy2(str(src_path), str(dst))
             logger.info("Copied %s -> %s", src_path.name, dst.name)
         else:
@@ -123,6 +162,7 @@ class OpenMSConverter(BaseOrchestrator):
         self,
         qpx_dir: str | Path,
         sdrf_path: str | Path | None = None,
+        consensusxml_path: str | Path | None = None,
         compression: str = "zstd",
     ):
         """Initialize the OpenMS QPX converter.
@@ -133,12 +173,18 @@ class OpenMSConverter(BaseOrchestrator):
             Directory containing OpenMS ``-out_qpx`` parquet files.
         sdrf_path : str, Path or None
             Optional SDRF metadata file for sample/run generation.
+        consensusxml_path : str, Path or None
+            Optional OpenMS ``.consensusXML`` (the ``-out_cxml`` companion of
+            ``-out_qpx``). When given, its ColumnHeaders provide the
+            authoritative channel count/order for relabeling isobaric channels;
+            otherwise the plex is resolved from the SDRF + data indices.
         compression : str
             Parquet compression codec (default ``zstd``).
 
         """
         self.qpx_dir = Path(qpx_dir)
         self.sdrf_path = str(sdrf_path) if sdrf_path else None
+        self.consensusxml_path = str(consensusxml_path) if consensusxml_path else None
         self._compression = compression
 
     def convert(
@@ -159,23 +205,49 @@ class OpenMSConverter(BaseOrchestrator):
         output_folder.mkdir(parents=True, exist_ok=True)
 
         discovered = self.discover_and_validate()
-        output_paths = _copy_core(discovered, output_folder, output_prefix)
+
+        # Resolve canonical channel labels so the OpenMS -out_qpx run-filename /
+        # bare-index labels become TMT126.. / LFQ, consistent with the mzTab and
+        # DIA-NN (quantmsdiann) QPX paths. Prefer the consensusXML ColumnHeaders
+        # (authoritative channel count/order) when available; otherwise resolve
+        # from the SDRF-declared plex.
+        sdrf_labels = read_sdrf_labels(self.sdrf_path)
+        experiment_type = experiment_type_from_labels(sdrf_labels) if sdrf_labels else None
+        channel_labels = {}
+        if self.consensusxml_path and experiment_type:
+            channel_labels = channel_labels_from_consensusxml(self.consensusxml_path, experiment_type, sdrf_labels)
+            if channel_labels:
+                logger.info("Resolved %d channels from consensusXML", len(channel_labels))
+        if not channel_labels and experiment_type:
+            channel_labels = resolve_channel_labels(experiment_type, sdrf_labels)
+        is_lfq = experiment_type == "LFQ" if experiment_type else None
+        if experiment_type is None:
+            logger.info("No SDRF channel labels available; preserving OpenMS intensity labels")
+        output_paths = _copy_core(
+            discovered,
+            output_folder,
+            output_prefix,
+            channel_labels,
+            is_lfq,
+            self._compression,
+        )
 
         ontology_entries = self._convert_sdrf(output_folder, output_prefix)
         ontology_entries.extend(self._collect_ontology(output_paths))
 
         self._write_ontology(output_folder, output_prefix, ontology_entries)
         structures = list(discovered.keys())
-        provenance_records = self._build_provenance(structures)
+        provenance_records = self._build_provenance(structures, experiment_type)
         self._write_provenance(output_folder, output_prefix, provenance_records)
         self._write_dataset(
             output_folder,
             output_prefix,
             project_accession,
-            software_name="OpenMS/ProteomicsLFQ",
+            software_name=provenance_records[0]["tool_name"],
             software_version=None,
             provenance_records=provenance_records,
         )
+        self._write_mudata(output_folder, output_prefix)
         logger.info("OpenMS QPX enrichment complete -> %s", output_folder)
 
     def discover_and_validate(self) -> dict[str, Path]:
@@ -231,14 +303,17 @@ class OpenMSConverter(BaseOrchestrator):
         return entries
 
     @staticmethod
-    def _build_provenance(structures: list[str]) -> list[dict]:
+    def _build_provenance(structures: list[str], experiment_type: str | None = None) -> list[dict]:
         """Build provenance records for OpenMS + QPX conversion."""
+        is_isobaric = experiment_type in {"TMT", "iTRAQ"}
+        step_name = "isobaric_quantification" if is_isobaric else "label_free_quantification"
+        tool_name = "OpenMS/IsobaricWorkflow" if is_isobaric else "OpenMS/ProteomicsLFQ"
         return [
             {
                 "step_order": 1,
                 "step_category": "quantification",
-                "step_name": "label_free_quantification",
-                "tool_name": "OpenMS/ProteomicsLFQ",
+                "step_name": step_name,
+                "tool_name": tool_name,
                 "tool_version": None,
                 "tool_uri": None,
                 "parameters": None,

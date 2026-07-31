@@ -2,6 +2,11 @@
 
 The feature view captures quantified peptide information at the MS run level. Each row represents a peptide feature -- a quantified peptidoform in a specific run file -- including its intensity across labels and protein group mappings.
 
+For a de novo workflow without a database search, set `is_decoy` to `false` and
+record a `de_novo_peptide_sequencing` step in `provenance.parquet`. Protein-mapping
+fields may be null. When `anchor_protein` is null, a feature is identified by
+`sequence`, `charge`, and `run_file_name`.
+
 ## Use Cases
 
 - **Quantified peptide information**: Stores peptide intensities linked to sample metadata, enabling downstream quantitative analysis and integration with SDRF annotations.
@@ -21,7 +26,7 @@ These fields are shared with the PSM view and describe the peptide identificatio
 | `modifications` | Structured list of modifications with name, accession, position, and localization scores | array[struct], null | no |
 | `charge` | Charge of the quantified analyte | int16 | yes |
 | `posterior_error_probability` | Posterior error probability (PEP) for the peptide match | float64, null | no |
-| `is_decoy` | Whether the peptide is a decoy match (`true`) or a target match (`false`) | bool | yes |
+| `is_decoy` | Whether the peptide is a decoy match (`true`) or a target match (`false`); use `false` when no target-decoy search was used | bool | yes |
 | `calculated_mz` | Theoretical peptide mass-to-charge ratio based on identified sequence and modifications | float32 | yes |
 | `observed_mz` | Experimental observed peptide mass-to-charge ratio | float32 | yes |
 | `mass_error_ppm` | Mass error in ppm: 1e6 × (observed_mz − calculated_mz) / calculated_mz | float32, null | no |
@@ -52,7 +57,7 @@ These fields are shared with the PSM view and describe the peptide identificatio
 | Field | Description | Type | Required |
 |-------|-------------|------|----------|
 | `pg_accessions` | Protein group accessions of all proteins that the peptide maps to | array[string], null | no |
-| `anchor_protein` | One protein accession that represents the protein group | string | yes |
+| `anchor_protein` | One protein accession that represents the protein group; null when no protein mapping was performed | string, null | yes |
 | `unique` | Whether the peptide maps uniquely to a single protein group | bool, null | no |
 | `pg_positions` | Peptide start and end positions within each protein in the protein group | array[struct], null | no |
 | `pg_global_qvalue` | Global q-value of the protein group at the experiment level | float64, null | optional |

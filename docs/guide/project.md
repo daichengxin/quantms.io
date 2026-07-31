@@ -21,11 +21,11 @@ ds = qpx.Dataset("path/to/dataset/")
 print(ds.dataset_meta)
 
 # Access specific metadata fields
-if hasattr(ds.dataset_meta, 'name'):
+if hasattr(ds.dataset_meta, "name"):
     print(f"Dataset name: {ds.dataset_meta.name}")
-if hasattr(ds.dataset_meta, 'description'):
+if hasattr(ds.dataset_meta, "description"):
     print(f"Description: {ds.dataset_meta.description}")
-if hasattr(ds.dataset_meta, 'version'):
+if hasattr(ds.dataset_meta, "version"):
     print(f"Version: {ds.dataset_meta.version}")
 ```
 
@@ -63,12 +63,12 @@ import qpx
 ds = qpx.Dataset("./output/")
 
 # Sample metadata is stored in sample.parquet
-if hasattr(ds, 'sample'):
+if hasattr(ds, "sample"):
     sample_data = ds.sample.data
     print(sample_data.head())
 
     # Access specific sample information
-    sample_ids = sample_data['sample_accession'].unique()
+    sample_ids = sample_data["sample_accession"].unique()
     print(f"Number of samples: {len(sample_ids)}")
 
     # Sample metadata includes:
@@ -90,12 +90,12 @@ import qpx
 ds = qpx.Dataset("./output/")
 
 # Run metadata is stored in run.parquet
-if hasattr(ds, 'run'):
+if hasattr(ds, "run"):
     run_data = ds.run.data
     print(run_data.head())
 
     # Access specific run information
-    run_ids = run_data['run_accession'].unique()
+    run_ids = run_data["run_accession"].unique()
     print(f"Number of runs: {len(run_ids)}")
 
     # Run metadata includes:
@@ -113,6 +113,7 @@ Generate a comprehensive metadata summary:
 ```python
 import qpx
 
+
 def print_dataset_summary(dataset_path):
     """Print comprehensive dataset metadata summary."""
     ds = qpx.Dataset(dataset_path)
@@ -124,33 +125,33 @@ def print_dataset_summary(dataset_path):
 
     # Dataset-level metadata
     print("Dataset Information:")
-    if hasattr(ds, 'dataset_meta'):
-        if hasattr(ds.dataset_meta, 'name'):
+    if hasattr(ds, "dataset_meta"):
+        if hasattr(ds.dataset_meta, "name"):
             print(f"  Name: {ds.dataset_meta.name}")
-        if hasattr(ds.dataset_meta, 'version'):
+        if hasattr(ds.dataset_meta, "version"):
             print(f"  Version: {ds.dataset_meta.version}")
-        if hasattr(ds.dataset_meta, 'description'):
+        if hasattr(ds.dataset_meta, "description"):
             print(f"  Description: {ds.dataset_meta.description}")
     print()
 
     # Sample information
-    if hasattr(ds, 'sample') and ds.sample.count() > 0:
+    if hasattr(ds, "sample") and ds.sample.count() > 0:
         print("Sample Information:")
         print(f"  Total samples: {ds.sample.count()}")
-        if 'organism' in ds.sample.data.columns:
-            organisms = ds.sample.data['organism'].unique()
+        if "organism" in ds.sample.data.columns:
+            organisms = ds.sample.data["organism"].unique()
             print(f"  Organisms: {', '.join(organisms)}")
-        if 'condition' in ds.sample.data.columns:
-            conditions = ds.sample.data['condition'].unique()
+        if "condition" in ds.sample.data.columns:
+            conditions = ds.sample.data["condition"].unique()
             print(f"  Conditions: {', '.join(map(str, conditions))}")
     print()
 
     # Run information
-    if hasattr(ds, 'run') and ds.run.count() > 0:
+    if hasattr(ds, "run") and ds.run.count() > 0:
         print("Run Information:")
         print(f"  Total runs: {ds.run.count()}")
-        if 'instrument' in ds.run.data.columns:
-            instruments = ds.run.data['instrument'].unique()
+        if "instrument" in ds.run.data.columns:
+            instruments = ds.run.data["instrument"].unique()
             print(f"  Instruments: {', '.join(instruments)}")
     print()
 
@@ -162,6 +163,7 @@ def print_dataset_summary(dataset_path):
     print()
 
     print("=" * 60)
+
 
 # Usage
 print_dataset_summary("./output/")
@@ -200,7 +202,7 @@ import qpx
 ds = qpx.Dataset("./output/")
 
 # Provenance information is stored in provenance.parquet
-if hasattr(ds, 'provenance'):
+if hasattr(ds, "provenance"):
     prov_data = ds.provenance.data
     print("Processing Provenance:")
     print(prov_data)
@@ -264,6 +266,7 @@ Validate metadata completeness:
 ```python
 import qpx
 
+
 def validate_metadata(dataset_path):
     """Check for required metadata fields."""
     ds = qpx.Dataset(dataset_path)
@@ -271,17 +274,17 @@ def validate_metadata(dataset_path):
     issues = []
 
     # Check dataset-level metadata
-    if not hasattr(ds, 'dataset_meta'):
+    if not hasattr(ds, "dataset_meta"):
         issues.append("Missing dataset metadata")
-    elif not hasattr(ds.dataset_meta, 'name'):
+    elif not hasattr(ds.dataset_meta, "name"):
         issues.append("Missing dataset name")
 
     # Check sample metadata
-    if not hasattr(ds, 'sample') or ds.sample.count() == 0:
+    if not hasattr(ds, "sample") or ds.sample.count() == 0:
         issues.append("Missing sample metadata")
 
     # Check run metadata
-    if not hasattr(ds, 'run') or ds.run.count() == 0:
+    if not hasattr(ds, "run") or ds.run.count() == 0:
         issues.append("Missing run metadata")
 
     # Report
@@ -293,6 +296,7 @@ def validate_metadata(dataset_path):
     else:
         print("Metadata validation passed!")
         return True
+
 
 # Usage
 validate_metadata("./output/")
@@ -306,6 +310,7 @@ Export metadata for sharing:
 import qpx
 import json
 
+
 def export_metadata(dataset_path, output_file):
     """Export dataset metadata to JSON."""
     ds = qpx.Dataset(dataset_path)
@@ -313,32 +318,27 @@ def export_metadata(dataset_path, output_file):
     metadata = {}
 
     # Dataset-level metadata
-    if hasattr(ds, 'dataset_meta'):
-        metadata['dataset'] = {
-            'name': getattr(ds.dataset_meta, 'name', None),
-            'version': getattr(ds.dataset_meta, 'version', None),
-            'description': getattr(ds.dataset_meta, 'description', None)
+    if hasattr(ds, "dataset_meta"):
+        metadata["dataset"] = {
+            "name": getattr(ds.dataset_meta, "name", None),
+            "version": getattr(ds.dataset_meta, "version", None),
+            "description": getattr(ds.dataset_meta, "description", None),
         }
 
     # Sample summary
-    if hasattr(ds, 'sample') and ds.sample.count() > 0:
-        metadata['samples'] = {
-            'count': ds.sample.count(),
-            'sample_ids': ds.sample.data['sample_accession'].tolist()
-        }
+    if hasattr(ds, "sample") and ds.sample.count() > 0:
+        metadata["samples"] = {"count": ds.sample.count(), "sample_ids": ds.sample.data["sample_accession"].tolist()}
 
     # Run summary
-    if hasattr(ds, 'run') and ds.run.count() > 0:
-        metadata['runs'] = {
-            'count': ds.run.count(),
-            'run_ids': ds.run.data['run_accession'].tolist()
-        }
+    if hasattr(ds, "run") and ds.run.count() > 0:
+        metadata["runs"] = {"count": ds.run.count(), "run_ids": ds.run.data["run_accession"].tolist()}
 
     # Save to file
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         json.dump(metadata, f, indent=2)
 
     print(f"Metadata exported to: {output_file}")
+
 
 # Usage
 export_metadata("./output/", "./metadata_export.json")

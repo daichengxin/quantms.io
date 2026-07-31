@@ -25,17 +25,19 @@ See the full YAML schema in [`ontology.yaml`](schemas/ontology.yaml).
 ```python
 import pyarrow as pa
 
-ontology_schema = pa.schema([
-    pa.field("field_name", pa.string()),          # snake_case QPX field name (e.g. "comet_xcorr")
-    pa.field("ontology_name", pa.string(), nullable=True),  # proper ontology term (e.g. "Comet:xcorr")
-    pa.field("ontology_accession", pa.string(), nullable=True),  # CV accession (e.g. "MS:1002252")
-    pa.field("ontology_source", pa.string(), nullable=True),  # ontology prefix (e.g. "MS", "UBERON", "UNIMOD")
-    pa.field("ontology_version", pa.string(), nullable=True),  # version of the ontology (e.g. "4.1.235")
-    pa.field("view", pa.string()),                # which view (e.g. "psm", "feature", "sample")
-    pa.field("description", pa.string(), nullable=True),  # human-readable description
-    pa.field("source_column_name", pa.string(), nullable=True),  # original column name in tool output
-    pa.field("source_tool", pa.string(), nullable=True),  # tool that produced this field
-])
+ontology_schema = pa.schema(
+    [
+        pa.field("field_name", pa.string()),  # snake_case QPX field name (e.g. "comet_xcorr")
+        pa.field("ontology_name", pa.string(), nullable=True),  # proper ontology term (e.g. "Comet:xcorr")
+        pa.field("ontology_accession", pa.string(), nullable=True),  # CV accession (e.g. "MS:1002252")
+        pa.field("ontology_source", pa.string(), nullable=True),  # ontology prefix (e.g. "MS", "UBERON", "UNIMOD")
+        pa.field("ontology_version", pa.string(), nullable=True),  # version of the ontology (e.g. "4.1.235")
+        pa.field("view", pa.string()),  # which view (e.g. "psm", "feature", "sample")
+        pa.field("description", pa.string(), nullable=True),  # human-readable description
+        pa.field("source_column_name", pa.string(), nullable=True),  # original column name in tool output
+        pa.field("source_tool", pa.string(), nullable=True),  # tool that produced this field
+    ]
+)
 ```
 
 ### Example rows

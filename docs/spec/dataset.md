@@ -20,27 +20,26 @@ See the full YAML schema in [`dataset.yaml`](schemas/dataset.yaml).
 ```python
 import pyarrow as pa
 
-dataset_schema = pa.schema([
-    # Project identity
-    pa.field("project_accession", pa.string()),
-    pa.field("project_title", pa.string(), nullable=True),
-    pa.field("project_description", pa.string(), nullable=True),
-    pa.field("pubmed_id", pa.string(), nullable=True),
-
-    # Software
-    pa.field("software_name", pa.string(), nullable=True),
-    pa.field("software_version", pa.string(), nullable=True),
-
-    # Provenance
-    pa.field("creation_date", pa.string()),
-
-    # Integrity / Packaging
-    pa.field("file_checksums", pa.map_(pa.string(), pa.string()), nullable=True),
-    pa.field("file_row_counts", pa.map_(pa.string(), pa.int64()), nullable=True),
-    pa.field("file_sizes_bytes", pa.map_(pa.string(), pa.int64()), nullable=True),
-    pa.field("total_structures", pa.int32(), nullable=True),
-    pa.field("packaged_at", pa.string(), nullable=True),
-])
+dataset_schema = pa.schema(
+    [
+        # Project identity
+        pa.field("project_accession", pa.string()),
+        pa.field("project_title", pa.string(), nullable=True),
+        pa.field("project_description", pa.string(), nullable=True),
+        pa.field("pubmed_id", pa.string(), nullable=True),
+        # Software
+        pa.field("software_name", pa.string(), nullable=True),
+        pa.field("software_version", pa.string(), nullable=True),
+        # Provenance
+        pa.field("creation_date", pa.string()),
+        # Integrity / Packaging
+        pa.field("file_checksums", pa.map_(pa.string(), pa.string()), nullable=True),
+        pa.field("file_row_counts", pa.map_(pa.string(), pa.int64()), nullable=True),
+        pa.field("file_sizes_bytes", pa.map_(pa.string(), pa.int64()), nullable=True),
+        pa.field("total_structures", pa.int32(), nullable=True),
+        pa.field("packaged_at", pa.string(), nullable=True),
+    ]
+)
 ```
 
 ### Field Reference
@@ -111,8 +110,8 @@ These fields enable dataset validation after packaging or transfer. They are pop
     dataset = pq.read_table("PXD014414.dataset.parquet")
     row = dataset.to_pydict()
 
-    print(row["project_accession"])   # ['PXD014414']
-    print(row["software_name"])       # ['quantms']
+    print(row["project_accession"])  # ['PXD014414']
+    print(row["software_name"])  # ['quantms']
     ```
 
 !!! tip "Reading dataset.parquet with DuckDB"

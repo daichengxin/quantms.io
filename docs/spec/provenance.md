@@ -14,31 +14,31 @@ See the full YAML schema in [`provenance.yaml`](schemas/provenance.yaml).
 ```python
 import pyarrow as pa
 
-PARAMETER = pa.struct([
-    pa.field("key", pa.string()),        # parameter name (snake_case)
-    pa.field("value", pa.string()),      # parameter value (as string)
-])
+PARAMETER = pa.struct(
+    [
+        pa.field("key", pa.string()),  # parameter name (snake_case)
+        pa.field("value", pa.string()),  # parameter value (as string)
+    ]
+)
 
-provenance_schema = pa.schema([
-    # Step identity
-    pa.field("step_order", pa.int32()),               # execution order (1, 2, 3...)
-    pa.field("step_category", pa.string()),           # broad category
-    pa.field("step_name", pa.string()),               # specific step name
-
-    # Tool
-    pa.field("tool_name", pa.string()),               # tool name (e.g. "comet", "percolator")
-    pa.field("tool_version", pa.string(), nullable=True),  # tool version
-    pa.field("tool_uri", pa.string(), nullable=True),      # container URI or tool URL
-
-    # Parameters -- curated summary of key settings
-    pa.field("parameters", pa.list_(PARAMETER), nullable=True),
-
-    # Full configuration -- raw JSON for complete reference
-    pa.field("config", pa.string(), nullable=True),
-
-    # What this step produced
-    pa.field("output_views", pa.list_(pa.string()), nullable=True),
-])
+provenance_schema = pa.schema(
+    [
+        # Step identity
+        pa.field("step_order", pa.int32()),  # execution order (1, 2, 3...)
+        pa.field("step_category", pa.string()),  # broad category
+        pa.field("step_name", pa.string()),  # specific step name
+        # Tool
+        pa.field("tool_name", pa.string()),  # tool name (e.g. "comet", "percolator")
+        pa.field("tool_version", pa.string(), nullable=True),  # tool version
+        pa.field("tool_uri", pa.string(), nullable=True),  # container URI or tool URL
+        # Parameters -- curated summary of key settings
+        pa.field("parameters", pa.list_(PARAMETER), nullable=True),
+        # Full configuration -- raw JSON for complete reference
+        pa.field("config", pa.string(), nullable=True),
+        # What this step produced
+        pa.field("output_views", pa.list_(pa.string()), nullable=True),
+    ]
+)
 ```
 
 ## Field Reference
@@ -69,6 +69,7 @@ Each processing step belongs to a category that groups steps by function.
 | `workflow` | Pipeline orchestrator | quantms, nf-core, Nextflow |
 | `raw_conversion` | Raw file conversion to open format | ThermoRawFileParser, msconvert |
 | `database_search` | Sequence database search | Comet, MSGF+, MaxQuant, Sage, DIA-NN |
+| `de_novo_peptide_sequencing` | Peptide sequence prediction without a sequence database search | Casanovo, InstaNovo, π-PrimeNovo |
 | `rescoring` | PSM rescoring and validation | Percolator, PeptideProphet, mokapot |
 | `fdr_filtering` | FDR threshold application | OpenMS, custom scripts |
 | `quantification` | Peptide/protein quantification | FlashLFQ, DIA-NN, IonQuant |

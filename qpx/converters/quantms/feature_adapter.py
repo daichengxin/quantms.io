@@ -23,6 +23,12 @@ from typing import Optional
 import pandas as pd
 
 from qpx.converters.base import BaseConverter, resolve_columns
+from qpx.converters.channel_labels import (
+    experiment_type_from_labels,
+    normalize_label,
+    read_sdrf_labels,
+    resolve_channel_labels,
+)
 from qpx.converters.mappings import get_field_mappings
 from qpx.converters.mztab import (
     extract_modifications,
@@ -63,8 +69,7 @@ class QuantmsFeatureAdapter(BaseConverter):
         """Initialize adapter with an empty peptide-protein map."""
         super().__init__(**kwargs)
         self._pep_protein_map: dict[str, str] = {}
-        # Plex-aware TMT channel labels; convert() refines channel 10 for TMT10 runs.
-        self._tmt_channel_map: dict[int, str] = self._TMT_CHANNEL_MAP
+        self._sdrf_labels: Optional[set[str]] = None
 
     def convert(
         self,
@@ -101,8 +106,10 @@ class QuantmsFeatureAdapter(BaseConverter):
         ms_runs = extract_ms_runs(self._conn)
         self._modifications_meta = extract_modifications(self._conn)
 
-        # Step 3: Determine experiment type (LFQ or TMT)
-        experiment_type = self._detect_experiment_type()
+        # Step 3: Determine experiment type (LFQ or TMT) and the SDRF-declared
+        # channel labels (ground truth for the plex, used to label channels).
+        self._sdrf_labels = read_sdrf_labels(sdrf_path)
+        experiment_type = self._resolve_experiment_type(self._sdrf_labels)
 
         # Step 4: For LFQ, use optimized SQL-first path
         if experiment_type == "LFQ":
@@ -114,7 +121,6 @@ class QuantmsFeatureAdapter(BaseConverter):
             )
         else:
             # Isobaric path uses the original dict-based approach
-            self._tmt_channel_map = self._resolve_tmt_channel_map()
             psm_lookup = self._build_psm_lookup(ms_runs)
             protein_qvalue_map = self._build_protein_qvalue_map()
             protein_gene_map = self._build_protein_gene_map()
@@ -697,32 +703,14 @@ class QuantmsFeatureAdapter(BaseConverter):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    # Standard TMT channel index → label mappings
-    _TMT_CHANNEL_MAP: dict[int, str] = {
-        1: "TMT126",
-        2: "TMT127N",
-        3: "TMT127C",
-        4: "TMT128N",
-        5: "TMT128C",
-        6: "TMT129N",
-        7: "TMT129C",
-        8: "TMT130N",
-        9: "TMT130C",
-        10: "TMT131N",  # TMT10plex uses "TMT131" here; _resolve_tmt_channel_map handles it
-        11: "TMT131C",
-        # TMT16plex extensions
-        12: "TMT132N",
-        13: "TMT132C",
-        14: "TMT133N",
-        15: "TMT133C",
-        16: "TMT134N",
-        # TMT18plex extensions
-        17: "TMT134C",
-        18: "TMT135N",
-    }
+    def _resolve_experiment_type(self, sdrf_labels: Optional[set[str]]) -> str:
+        """Prefer the SDRF-declared label family over MSstats heuristics."""
+        if sdrf_labels:
+            return experiment_type_from_labels(sdrf_labels)
+        return self._detect_experiment_type()
 
     def _detect_experiment_type(self) -> str:
-        """Detect experiment type from MSstats Channel column."""
+        """Detect experiment type from the MSstats Channel column."""
         try:
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info('msstats')").fetchall()}
             if "Channel" not in cols:
@@ -744,22 +732,6 @@ class QuantmsFeatureAdapter(BaseConverter):
         except Exception:
             self.logger.debug("Failed to detect labeling type from msstats channels", exc_info=True)
         return "LFQ"
-
-    def _resolve_tmt_channel_map(self) -> dict[int, str]:
-        """Return the channel-index -> reporter-label map for this run's plex.
-
-        ``_TMT_CHANNEL_MAP`` follows the TMT11+ convention, where channel 10 is
-        ``TMT131N`` (paired with ``TMT131C`` at channel 11). A TMT10plex run has
-        no ``131C``, so its 10th reporter is the standard ``TMT131`` -- matching
-        the CDAP converter (``CHANNEL_DEFS["TMT10"]``) and OpenMS/SDRF. Detect the
-        plex from the max numeric channel and relabel channel 10 for a TMT10 run.
-        Non-numeric (already-labelled) channels leave the map unchanged.
-        """
-        channel_map = dict(self._TMT_CHANNEL_MAP)
-        max_channel = self._conn.execute('SELECT MAX(TRY_CAST("Channel" AS INTEGER)) FROM msstats').fetchone()[0]
-        if max_channel == 10:
-            channel_map[10] = "TMT131"
-        return channel_map
 
     def _build_psm_lookup(self, ms_runs: dict[int, str]) -> dict[tuple, dict]:
         """Build a lookup from (run_file_name, peptidoform, charge) -> PSM info.
@@ -1196,9 +1168,19 @@ class QuantmsFeatureAdapter(BaseConverter):
         _sub = re.sub
         _from_proforma = from_proforma
         _safe_float = safe_float
-        _tmt_map = self._tmt_channel_map
+        # Plex-aware index -> canonical label map (from the shared sdrf-pipelines
+        # vocabulary), resolved PER RUN from that run's own channel indices. This
+        # keeps labels correct when a batch (file_batch_size) combines runs of
+        # different plex -- e.g. a TMT10 run (ch10 = TMT131) next to a TMT11 run
+        # (ch10 = TMT131N) -- which a single batch-wide resolution would conflate.
+        sdrf_labels = getattr(self, "_sdrf_labels", None)
+        labels_by_run: dict[str, dict] = {}
+        if channel_col in df.columns:
+            for _run_name, _run_df in df.groupby(ref_col, dropna=False):
+                _run_key = str(_run_name).split(".")[0] if _run_name else ""
+                labels_by_run[_run_key] = resolve_channel_labels(experiment_type, sdrf_labels, _run_df[channel_col].values)
+        _empty_labels: dict = {}
         mods_meta = self._modifications_meta
-        is_tmt = experiment_type == "TMT"
         _proforma_cache: dict[tuple[str, str], list | None] = {}
 
         for group_key, group_data in df.groupby(grouping, dropna=False):
@@ -1229,16 +1211,20 @@ class QuantmsFeatureAdapter(BaseConverter):
                 # Build intensities from channel values (no to_dict)
                 ch_vals = group_data[channel_col].values
                 int_vals = group_data[intensity_col].values
+                run_channel_labels = labels_by_run.get(run_file_name, _empty_labels)
                 intensities = []
                 for j in range(len(ch_vals)):
                     ch_raw = ch_vals[j]
-                    if is_tmt and ch_raw is not None and pd.notna(ch_raw) and ch_raw != "":
+                    if ch_raw is not None and pd.notna(ch_raw) and ch_raw != "":
+                        # Numeric channel index -> plex-aware canonical label;
+                        # a label that is already a string is normalized (e.g.
+                        # "label free sample" -> "LFQ") and otherwise passed through.
                         try:
-                            label = _tmt_map.get(int(float(ch_raw)), str(ch_raw))
+                            label = run_channel_labels.get(int(float(ch_raw)), normalize_label(str(ch_raw)))
                         except (ValueError, TypeError):
-                            label = str(ch_raw)
+                            label = normalize_label(str(ch_raw))
                     else:
-                        label = str(ch_raw) if ch_raw is not None and pd.notna(ch_raw) and ch_raw != "" else "LFQ"
+                        label = "LFQ"
                     iv = _safe_float(int_vals[j]) or 0.0
                     intensities.append({"label": label, "intensity": float(iv)})
 

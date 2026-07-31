@@ -14,29 +14,28 @@ See the full YAML schema in [`sample.yaml`](schemas/sample.yaml).
 ```python
 import pyarrow as pa
 
-sample_schema = pa.schema([
-    # Identity -- maps to SDRF "source name"
-    pa.field("sample_accession", pa.string()),          # PK, required
-
-    # Mandatory biological properties
-    pa.field("organism", pa.string()),                   # required
-    pa.field("organism_part", pa.string()),              # required
-
-    # Optional standard properties
-    pa.field("disease", pa.string(), nullable=True),
-    pa.field("cell_line", pa.string(), nullable=True),
-    pa.field("cell_type", pa.string(), nullable=True),
-    pa.field("sex", pa.string(), nullable=True),
-    pa.field("age", pa.string(), nullable=True),
-    pa.field("developmental_stage", pa.string(), nullable=True),
-    pa.field("ancestry", pa.string(), nullable=True),
-    pa.field("individual", pa.string(), nullable=True),
-    pa.field("sample_description", pa.string(), nullable=True),
-
-    # Extra columns from SDRF characteristics are added dynamically
-    # e.g. pa.field("biological_replicate", pa.string(), nullable=True),
-    # e.g. pa.field("bmi", pa.string(), nullable=True),
-])
+sample_schema = pa.schema(
+    [
+        # Identity -- maps to SDRF "source name"
+        pa.field("sample_accession", pa.string()),  # PK, required
+        # Mandatory biological properties
+        pa.field("organism", pa.string()),  # required
+        pa.field("organism_part", pa.string()),  # required
+        # Optional standard properties
+        pa.field("disease", pa.string(), nullable=True),
+        pa.field("cell_line", pa.string(), nullable=True),
+        pa.field("cell_type", pa.string(), nullable=True),
+        pa.field("sex", pa.string(), nullable=True),
+        pa.field("age", pa.string(), nullable=True),
+        pa.field("developmental_stage", pa.string(), nullable=True),
+        pa.field("ancestry", pa.string(), nullable=True),
+        pa.field("individual", pa.string(), nullable=True),
+        pa.field("sample_description", pa.string(), nullable=True),
+        # Extra columns from SDRF characteristics are added dynamically
+        # e.g. pa.field("biological_replicate", pa.string(), nullable=True),
+        # e.g. pa.field("bmi", pa.string(), nullable=True),
+    ]
+)
 ```
 
 ## Field Reference
@@ -89,6 +88,7 @@ Any non-standard SDRF `characteristics[X]` column becomes its own string column 
 
     # Get unique organisms
     import pyarrow.compute as pc
+
     organisms = pc.unique(samples.column("organism")).to_pylist()
     print(organisms)  # ['Homo sapiens', 'Homo sapiens; Saccharomyces cerevisiae']
     ```

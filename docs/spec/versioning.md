@@ -24,7 +24,7 @@ All QPX views (PSM, Feature, PG, Peptide, Protein, MZ, and others serialized as 
 import pyarrow.parquet as pq
 
 # Writing a file with version metadata
-metadata = {'qpx_version': '1.0'}
+metadata = {"qpx_version": "1.0"}
 ```
 
 !!! tip "Reading the version from a file"
@@ -33,7 +33,7 @@ metadata = {'qpx_version': '1.0'}
 
     parquet_file = pq.ParquetFile("experiment.psm.parquet")
     schema_metadata = parquet_file.schema_arrow.metadata
-    qpx_version = schema_metadata.get(b'qpx_version', b'unknown').decode()
+    qpx_version = schema_metadata.get(b"qpx_version", b"unknown").decode()
     print(f"QPX version: {qpx_version}")
     ```
 

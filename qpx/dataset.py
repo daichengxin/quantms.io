@@ -66,9 +66,11 @@ class Dataset:
         duckdb_memory: str = "16GB",
         duckdb_threads: int = 4,
         s3_config: dict | None = None,
+        file_prefix: str | None = None,
     ):
         self._is_s3 = isinstance(path, str) and path.startswith("s3://")
         self.path = path if self._is_s3 else Path(path)
+        self._file_prefix = file_prefix
         self._engine = DuckDBEngine(
             memory_limit=duckdb_memory,
             threads=duckdb_threads,
@@ -95,7 +97,8 @@ class Dataset:
         for name, (cls, suffix) in self._STRUCTURE_REGISTRY.items():
             if requested and name not in requested:
                 continue
-            s3_glob = f"{self.path.rstrip('/')}/*{suffix}"
+            file_name = f"{self._file_prefix}{suffix}" if self._file_prefix else f"*{suffix}"
+            s3_glob = f"{self.path.rstrip('/')}/{file_name}"
             try:
                 self._engine.register_s3_parquet(name, s3_glob)
                 self._structures[name] = cls(
@@ -114,12 +117,13 @@ class Dataset:
             if requested and name not in requested:
                 continue
             # Check for single file first
-            matches = sorted(self.path.glob(f"*{suffix}"))
+            pattern = f"{self._file_prefix}{suffix}" if self._file_prefix else f"*{suffix}"
+            matches = sorted(self.path.glob(pattern))
             if matches:
                 if len(matches) > 1:
                     _log.warning(
-                        "Multiple files match '*%s': %s — using first: %s",
-                        suffix,
+                        "Multiple files match '%s': %s — using first: %s",
+                        pattern,
                         [m.name for m in matches],
                         matches[0].name,
                     )
@@ -130,7 +134,7 @@ class Dataset:
                     table_name=name,
                     file_path=file_path,
                 )
-            else:
+            elif self._file_prefix is None:
                 # Check for Hive-partitioned directory
                 part_dir = self.path / name
                 if part_dir.is_dir() and list(part_dir.glob("**/*.parquet")):
