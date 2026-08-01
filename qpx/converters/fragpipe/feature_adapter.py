@@ -153,6 +153,8 @@ class FragPipeFeatureAdapter(BaseConverter):
         """Detect per-experiment intensity columns.
 
         FragPipe feature files have columns like ``<experiment> Intensity``.
+        ``<experiment> MaxLFQ Intensity`` is a derived value for the same
+        experiment, not a separate experiment.
         """
         cols = self._conn.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_name='fragpipe_features'"
@@ -161,7 +163,7 @@ class FragPipeFeatureAdapter(BaseConverter):
 
         experiments = set()
         for col in col_names:
-            if col.endswith(" Intensity"):
+            if col.endswith(" Intensity") and not col.endswith(" MaxLFQ Intensity"):
                 experiments.add(col[: -len(" Intensity")])
 
         return sorted(experiments)

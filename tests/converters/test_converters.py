@@ -147,8 +147,12 @@ class TestFragPipeFeatureAdapter:
         """Write a minimal combined_peptide.tsv."""
         tsv = tmp_path / "combined_peptide.tsv"
         lines = [
-            "Peptide Sequence\tModified Peptide\tCharges\tProtein\tProtein ID\tGene\texperiment_1 Intensity\texperiment_2 Intensity",
-            "PEPTIDEK\tPEPTIDEK\t2,3\tsp|P12345|PROT_HUMAN\tP12345\tBRCA1\t1000.0\t2000.0",
+            (
+                "Peptide Sequence\tModified Peptide\tCharges\tProtein\tProtein ID\tGene\t"
+                "experiment_1 Intensity\texperiment_1 MaxLFQ Intensity\t"
+                "experiment_2 Intensity\texperiment_2 MaxLFQ Intensity"
+            ),
+            "PEPTIDEK\tPEPTIDEK\t2,3\tsp|P12345|PROT_HUMAN\tP12345\tBRCA1\t1000.0\t900.0\t2000.0\t1800.0",
         ]
         tsv.write_text("\n".join(lines) + "\n")
         return tsv
@@ -178,6 +182,8 @@ class TestFragPipeFeatureAdapter:
         table = pq.read_table(output)
         # 1 peptide x 2 experiments x 2 charges = 4 rows
         assert table.num_rows == 4
+        assert set(table.column("run_file_name").to_pylist()) == {"experiment_1", "experiment_2"}
+        assert {values[0]["intensity"] for values in table.column("intensities").to_pylist()} == {1000.0, 2000.0}
         assert "sequence" in table.schema.names
 
     def test_ion_modifications_parsed(self, tmp_path):
