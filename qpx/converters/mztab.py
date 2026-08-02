@@ -15,11 +15,11 @@ import os
 import re
 import tempfile
 import typing
-from pathlib import Path
 
 import duckdb
 import pandas as pd
 
+from qpx.core.files import run_file_stem
 from qpx.core.sql import escape_path, sql_build, validate_identifier, validate_table
 
 logger = logging.getLogger(__name__)
@@ -279,7 +279,7 @@ def extract_ms_runs(conn: duckdb.DuckDBPyConnection) -> dict[int, str]:
         m = re.search(r"\[(\d+)\]", key)
         if m:
             idx = int(m.group(1))
-            ms_runs[idx] = Path(value).stem
+            ms_runs[idx] = run_file_stem(value)
     return ms_runs
 
 

@@ -25,6 +25,43 @@ _MSSTATS = EXAMPLES_DIR / "PXD007683-LFQ.sdrf_openms_design_msstats_in.csv.gz"
 _PREFIX = "quantms_test"
 
 
+def test_protein_annotations_deduplicate_across_quantms_paths():
+    """Repeated mzTab protein rows produce one deterministic annotation."""
+    from qpx.converters.quantms.feature_adapter import QuantmsFeatureAdapter
+    from qpx.converters.quantms.psm_adapter import QuantmsPsmAdapter
+
+    connection = duckdb.connect(":memory:")
+    connection.execute("PRAGMA threads=24")
+    connection.execute(
+        """
+        CREATE TABLE proteins (
+            accession VARCHAR,
+            "best_search_engine_score[1]" DOUBLE,
+            description VARCHAR
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO proteins VALUES
+            ('P1', 0.05, 'Protein GN=ZZZ'),
+            ('P1', 0.01, 'Protein GN=AAA'),
+            ('P2', 0.02, 'Protein GN=BBB')
+        """
+    )
+
+    with QuantmsFeatureAdapter(conn=connection) as adapter:
+        qvalues = adapter._build_protein_qvalue_map()
+        genes = adapter._build_protein_gene_map()
+    with QuantmsPsmAdapter(conn=connection) as adapter:
+        psm_qvalues = adapter._build_protein_qvalue_map()
+    connection.close()
+
+    assert qvalues == {"P1": pytest.approx(0.01), "P2": pytest.approx(0.02)}
+    assert psm_qvalues == qvalues
+    assert genes == {"P1": ["AAA"], "P2": ["BBB"]}
+
+
 def test_lfq_join_stream_is_executed_once(tmp_path):
     """Streaming must not re-execute an unordered join for every output batch."""
     from qpx.converters.quantms.feature_adapter import QuantmsFeatureAdapter
@@ -52,7 +89,7 @@ def test_lfq_join_stream_is_executed_once(tmp_path):
         SELECT
             'PEPTIDE' AS PeptideSequence,
             'P12345' AS ProteinName,
-            'run_' || range || '.raw' AS Reference,
+            'file:///data/run.part.' || range || '.mzML.gz' AS Reference,
             2 AS Charge,
             CAST(range + 1 AS DOUBLE) AS Intensity,
             CAST(range + 10 AS DOUBLE) AS RetentionTime
@@ -76,7 +113,7 @@ def test_lfq_join_stream_is_executed_once(tmp_path):
     table = pq.read_table(output, columns=["run_file_name"])
     run_names = table.column("run_file_name").to_pylist()
     assert len(run_names) == 100
-    assert len(set(run_names)) == 100
+    assert set(run_names) == {f"run.part.{index}" for index in range(100)}
 
 
 def test_tmt_groups_features_by_rt_not_protein_annotation(tmp_path):

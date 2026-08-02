@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Optional
 
 import pandas as pd
@@ -43,6 +42,7 @@ from qpx.converters.utils import (
     safe_float,
 )
 from qpx.core.cleavage import count_missed_cleavages
+from qpx.core.files import run_file_stem
 from qpx.core.sql import sql_build, validate_identifier, validate_table
 from qpx.writers.feature import FeatureWriter
 
@@ -209,6 +209,13 @@ class QuantmsFeatureAdapter(BaseConverter):
         q_chg = validate_identifier(charge_col)
         q_int = validate_identifier(intensity_col)
         q_prot = validate_identifier(prot_col)
+        run_expr = sql_build(
+            r"""regexp_replace(
+                regexp_replace(CAST(m.$ref AS VARCHAR), '^.*[/\\]', ''),
+                '\.(?:mzml(?:\.gz)?|raw|d|wiff|mgf)$', '', 'i'
+            )""",
+            ref=q_ref,
+        )
 
         sql = sql_build(
             """
@@ -220,7 +227,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                     '',
                     'g'
                 ) AS sequence,
-                split_part(CAST(m.$ref_col AS VARCHAR), '.', 1) AS run_file_name,
+                $run_expr AS run_file_name,
                 COALESCE(TRY_CAST(m.$chg_col AS INTEGER), 0) AS charge,
                 COALESCE(TRY_CAST(m.$int_col AS DOUBLE), 0.0) AS intensity,
                 $rt_expr AS msstats_rt,
@@ -241,7 +248,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                 pf.modifications_json AS modifications_json
             FROM msstats m
             LEFT JOIN _psm_lookup p
-                ON split_part(CAST(m.$ref_col AS VARCHAR), '.', 1) = p.run_file_name
+                ON $run_expr = p.run_file_name
                 AND CAST(m.$pf_col AS VARCHAR) = p.peptidoform
                 AND CAST(COALESCE(TRY_CAST(m.$chg_col AS INTEGER), 0) AS VARCHAR) = p.charge
             LEFT JOIN _protein_qvalues pq
@@ -257,6 +264,7 @@ class QuantmsFeatureAdapter(BaseConverter):
             int_col=q_int,
             prot_col=q_prot,
             rt_expr=rt_expr,
+            run_expr=run_expr,
         )
 
         # Step 5: Stream results and build feature records
@@ -390,7 +398,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                 ) = r.idx
             )
             SELECT
-                split_part(COALESCE(r.file_stem, ''), '.', 1) AS run_file_name,
+                COALESCE(r.file_stem, '') AS run_file_name,
                 peptidoform,
                 charge,
                 pep,
@@ -399,7 +407,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                 CASE WHEN TRIM(is_decoy_raw) = '1' THEN TRUE ELSE FALSE END AS is_decoy,
                 accession,
                 scan_number AS scan,
-                split_part(COALESCE(r.file_stem, ''), '.', 1) AS id_run_file_name,
+                COALESCE(r.file_stem, '') AS id_run_file_name,
                 rt
             FROM psm_enriched pe
             LEFT JOIN _ms_runs r ON pe.ms_run_idx = r.idx
@@ -844,7 +852,7 @@ class QuantmsFeatureAdapter(BaseConverter):
             ) in rows:
                 spectra_ref = str(spectra_ref) if spectra_ref else ""
                 run_file_raw = resolve_run_file(spectra_ref, ms_runs) or ""
-                run_file = run_file_raw.split(".")[0] if run_file_raw else ""
+                run_file = run_file_stem(run_file_raw) if run_file_raw else ""
                 peptidoform = str(peptidoform) if peptidoform else ""
                 charge = str(charge) if charge else "0"
 
@@ -869,37 +877,28 @@ class QuantmsFeatureAdapter(BaseConverter):
 
     def _build_protein_qvalue_map(self) -> dict[str, float]:
         """Build protein accession -> global q-value."""
-        try:
-            # Detect the actual score column name (may contain brackets)
-            cols = {
-                c[0]
-                for c in self._conn.execute(
-                    "SELECT column_name FROM information_schema.columns WHERE table_name='proteins'"
-                ).fetchall()
-            }
-            score_col = None
-            for candidate in [
-                "best_search_engine_score[1]",
-                "best_search_engine_score_1",
-            ]:
-                if candidate in cols:
-                    score_col = candidate
-                    break
-            if not score_col:
-                return {}
-            q_sc = validate_identifier(score_col)
-            rows = self._conn.execute(
-                sql_build(
-                    """SELECT accession, $sc
+        score_col = next(
+            (
+                candidate
+                for candidate in ("best_search_engine_score[1]", "best_search_engine_score_1")
+                if candidate in self.get_table_columns("proteins")
+            ),
+            None,
+        )
+        if score_col is None:
+            return {}
+        rows = self._conn.execute(
+            sql_build(
+                """SELECT CAST(accession AS VARCHAR),
+                          MIN(TRY_CAST($sc AS DOUBLE))
                 FROM proteins
                 WHERE accession IS NOT NULL
-                  AND $sc IS NOT NULL""",
-                    sc=q_sc,
-                )
-            ).fetchall()
-            return {str(acc): float(qval) for acc, qval in rows}
-        except Exception:
-            return {}
+                  AND $sc IS NOT NULL
+                GROUP BY CAST(accession AS VARCHAR)""",
+                sc=validate_identifier(score_col),
+            )
+        ).fetchall()
+        return {str(acc): float(qval) for acc, qval in rows if qval is not None}
 
     def _build_protein_gene_map(self) -> dict[str, list[str]]:
         """Build protein accession -> gene symbol(s) from mzTab proteins table.
@@ -908,20 +907,21 @@ class QuantmsFeatureAdapter(BaseConverter):
         the ``GN=`` tag, mirroring the logic in
         ``QuantmsPgAdapter._parse_protein_row``.
         """
-        gene_map: dict[str, list[str]] = {}
-        try:
-            rows = self._conn.execute("SELECT accession, description FROM proteins WHERE accession IS NOT NULL").fetchall()
-            for acc, desc in rows:
-                acc_str = str(acc).strip()
-                if not acc_str or acc_str == "null":
-                    continue
-                if desc and str(desc) != "null":
-                    gn = re.search(r"GN=([^\s]+)", str(desc))
-                    if gn:
-                        gene_map[acc_str] = [gn.group(1)]
-        except Exception:
-            self.logger.debug("Failed to extract gene map from proteins table", exc_info=True)
-        return gene_map
+        if "description" not in self.get_table_columns("proteins"):
+            return {}
+        rows = self._conn.execute(
+            """
+            SELECT CAST(accession AS VARCHAR),
+                   MIN(regexp_extract(CAST(description AS VARCHAR), 'GN=([^\\s]+)', 1))
+            FROM proteins
+            WHERE accession IS NOT NULL
+              AND description IS NOT NULL
+              AND CAST(description AS VARCHAR) != 'null'
+              AND regexp_extract(CAST(description AS VARCHAR), 'GN=([^\\s]+)', 1) != ''
+            GROUP BY CAST(accession AS VARCHAR)
+            """
+        ).fetchall()
+        return {str(accession): [str(gene)] for accession, gene in rows}
 
     def _iter_feature_batches(self, file_batch_size: int):
         """Yield DataFrames of MSstats data grouped by reference files."""
@@ -1043,7 +1043,7 @@ class QuantmsFeatureAdapter(BaseConverter):
             try:
                 peptidoform = str(pf_arr[i]) if pf_arr[i] is not None and pd.notna(pf_arr[i]) else ""
                 protein_name = str(prot_arr[i]) if prot_arr[i] is not None and pd.notna(prot_arr[i]) else ""
-                run_file_name = str(ref_arr[i]).split(".")[0] if ref_arr[i] is not None and pd.notna(ref_arr[i]) else ""
+                run_file_name = run_file_stem(ref_arr[i]) if ref_arr[i] is not None and pd.notna(ref_arr[i]) else ""
 
                 charge_raw = charge_arr[i]
                 charge = int(float(charge_raw)) if charge_raw is not None and charge_raw != "" and pd.notna(charge_raw) else 0
@@ -1179,7 +1179,7 @@ class QuantmsFeatureAdapter(BaseConverter):
         labels_by_run: dict[str, dict] = {}
         if channel_col in df.columns:
             for _run_name, _run_df in df.groupby(ref_col, dropna=False):
-                _run_key = str(_run_name).split(".")[0] if _run_name else ""
+                _run_key = run_file_stem(_run_name) if _run_name else ""
                 labels_by_run[_run_key] = resolve_channel_labels(experiment_type, sdrf_labels, _run_df[channel_col].values)
         _empty_labels: dict = {}
         mods_meta = self._modifications_meta
@@ -1191,7 +1191,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                 group_rt = next(iter(rt_values), None)
 
                 peptidoform = str(peptidoform) if peptidoform else ""
-                run_file_name = str(run_file_name).split(".")[0] if run_file_name else ""
+                run_file_name = run_file_stem(run_file_name) if run_file_name else ""
                 charge = int(float(charge)) if charge not in (None, "", "null") else 0
 
                 sequence = _strip(peptidoform) if peptidoform else ""

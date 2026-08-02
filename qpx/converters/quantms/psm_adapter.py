@@ -35,7 +35,7 @@ from qpx.converters.utils import (
 from qpx.core.cleavage import count_missed_cleavages
 from qpx.core.cv_terms import CV_DECOY_PEPTIDE, CV_PEPTIDOFORM_SEQUENCE
 from qpx.core.scores import is_higher_better, normalize_score_name
-from qpx.core.sql import sql_build
+from qpx.core.sql import sql_build, validate_identifier
 from qpx.writers.psm import PsmWriter
 
 logger = logging.getLogger(__name__)
@@ -157,16 +157,26 @@ class QuantmsPsmAdapter(BaseConverter):
 
     def _build_protein_qvalue_map(self) -> dict[str, float]:
         """Build accession -> global q-value mapping from protein table."""
-        try:
-            rows = self._conn.execute("""
-                SELECT accession, best_search_engine_score_1
+        columns = self.get_table_columns("proteins")
+        score_col = next(
+            (candidate for candidate in ("best_search_engine_score[1]", "best_search_engine_score_1") if candidate in columns),
+            None,
+        )
+        if score_col is None:
+            return {}
+        score = validate_identifier(score_col)
+        rows = self._conn.execute(
+            sql_build(
+                """SELECT CAST(accession AS VARCHAR),
+                          MIN(TRY_CAST($score AS DOUBLE))
                 FROM proteins
                 WHERE accession IS NOT NULL
-                  AND best_search_engine_score_1 IS NOT NULL
-                """).fetchall()
-            return {acc: float(qval) for acc, qval in rows}
-        except Exception:
-            return {}
+                  AND $score IS NOT NULL
+                GROUP BY CAST(accession AS VARCHAR)""",
+                score=score,
+            )
+        ).fetchall()
+        return {str(accession): float(qvalue) for accession, qvalue in rows if qvalue is not None}
 
     def _iter_psm_batches(self, chunksize: int):
         """Yield batches from the ``psms`` table."""

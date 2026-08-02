@@ -11,10 +11,10 @@ the QPX feature schema. Protein-level quantity is not produced here.
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
 from typing import Optional
 
 from qpx.converters.channel_labels import normalize_label
+from qpx.core.files import run_file_stem as _run_stem
 
 # OpenMS isobaric channel labels look like ``tmt6plex_126`` / ``itraq4plex_114``.
 _CHANNEL_RE = re.compile(r"(tmt|itraq)\d*plex?_(\d+[NC]?)", re.IGNORECASE)
@@ -34,12 +34,6 @@ def _canonical_channel(label: Optional[str]) -> str:
         family = "TMT" if m.group(1).lower() == "tmt" else "ITRAQ"
         return normalize_label(f"{family}{m.group(2).upper()}")
     return normalize_label(str(label))
-
-
-def _run_stem(filename: str) -> str:
-    """Run file name = basename with the final extension stripped."""
-    name = PurePosixPath(str(filename).replace("\\", "/")).name
-    return re.sub(r"(?i)\.(mzml|mzml\.gz|raw|d|wiff|mgf)$", "", name)
 
 
 def to_proforma(aa_sequence) -> str:

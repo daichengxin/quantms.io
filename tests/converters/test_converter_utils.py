@@ -13,6 +13,21 @@ from qpx.converters.base import BaseConverter
 from qpx.converters.maxquant.feature_adapter import MaxQuantFeatureAdapter
 from qpx.converters.maxquant.pg_adapter import MaxQuantPgAdapter
 from qpx.converters.utils import parse_uniprot_id, strip_uniprot_prefix
+from qpx.core.files import run_file_stem
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("run.part.1.raw", "run.part.1"),
+        ("file:///data/run.part.1.mzML.gz", "run.part.1"),
+        (r"C:\data\run.part.1.wiff", "run.part.1"),
+        ("run.part.1", "run.part.1"),
+    ],
+)
+def test_run_file_stem_preserves_meaningful_dots(value, expected):
+    assert run_file_stem(value) == expected
+
 
 # ---------------------------------------------------------------------------
 # BaseConverter._escape_path
