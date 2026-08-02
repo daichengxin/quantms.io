@@ -180,7 +180,8 @@ def _pg_referential_issues(
         double = con.execute(
             """
             WITH exploded AS (
-                SELECT anchor_protein, label, UNNEST(grouped_runs) AS run
+                SELECT anchor_protein, label,
+                       UNNEST(list_distinct(grouped_runs)) AS run
                 FROM pg_validate
             ),
             repeated AS (

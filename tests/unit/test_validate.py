@@ -80,6 +80,17 @@ def test_strict_null_in_required_pg():
     assert lenient.is_valid
 
 
+def test_duplicate_run_within_one_group_is_not_reported_as_cross_row_double_count():
+    """One malformed grouped_runs list should produce only its dedicated issue."""
+    result = PgSchema.validate_full(
+        _pg_table(anchor=["P1"], grouped_runs=[["r1", "r1"]]),
+        strict=True,
+    )
+
+    assert any(issue.check == "duplicate_grouped_run" for issue in result.issues)
+    assert not any(issue.check == "run_double_count" for issue in result.issues)
+
+
 def test_validation_result_dataclass():
     """ValidationResult: is_valid, warnings-only, errors, errors/warnings properties."""
     # No issues = valid

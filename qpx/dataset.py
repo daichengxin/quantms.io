@@ -25,7 +25,7 @@ from qpx.core.data import (
 )
 from qpx.core.data.schema import ValidationIssue, ValidationResult
 from qpx.core.engine import DuckDBEngine
-from qpx.core.sql import escape_path, sql_build
+from qpx.core.sql import escape_path, sql_build, validate_table
 from qpx.version import (
     QPX_SPEC_VERSION,
     QpxVersionError,
@@ -122,6 +122,12 @@ class Dataset:
                 # One incompatible/old structure file must not abort the whole
                 # dataset — skip it with a warning so the other structures stay
                 # usable. (A direct read_pg()/PG.from_file() still raises.)
+                self._engine.execute(
+                    sql_build(
+                        "DROP VIEW IF EXISTS $view",
+                        view=validate_table(name),
+                    )
+                )
                 _log.warning("Skipping incompatible structure '%s': %s", name, exc)
             except (FileNotFoundError, duckdb.IOException):
                 pass  # Structure not present in S3
@@ -515,12 +521,12 @@ class Dataset:
         # real run.run_file_name. A grouped run that names no acquisition run is
         # dropped by every sample-joined view, so flag it as an error on pg.
         if "pg" in results and self.pg is not None and self.run is not None:
-            self._check_grouped_runs_referential(results["pg"])
-            self._check_grouped_runs_sample_mapping(results["pg"])
+            self._check_grouped_runs_referential(results["pg"], strict=strict)
+            self._check_grouped_runs_sample_mapping(results["pg"], strict=strict)
 
         return results
 
-    def _check_grouped_runs_referential(self, pg_result: ValidationResult) -> None:
+    def _check_grouped_runs_referential(self, pg_result: ValidationResult, *, strict: bool) -> None:
         """Flag pg.grouped_runs values that are not present in run.run_file_name.
 
         Appends an ``error`` issue to *pg_result* for each dangling grouped-run
@@ -546,7 +552,7 @@ class Dataset:
                 ValidationIssue(
                     structure="pg",
                     check="referential_check_skipped",
-                    severity="warning",
+                    severity="error" if strict else "warning",
                     column=None,
                     message=f"grouped_runs referential check could not run (possible schema drift): {exc}",
                 )
@@ -568,7 +574,7 @@ class Dataset:
                 )
             )
 
-    def _check_grouped_runs_sample_mapping(self, pg_result: ValidationResult) -> None:
+    def _check_grouped_runs_sample_mapping(self, pg_result: ValidationResult, *, strict: bool) -> None:
         """Require each PG intensity label to resolve to exactly one sample."""
         try:
             rows = self._engine.execute(
@@ -622,7 +628,7 @@ class Dataset:
                 ValidationIssue(
                     structure="pg",
                     check="sample_mapping_check_skipped",
-                    severity="warning",
+                    severity="error" if strict else "warning",
                     column=None,
                     message=f"grouped_runs sample-mapping check could not run (possible schema drift): {exc}",
                 )
