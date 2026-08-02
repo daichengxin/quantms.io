@@ -19,6 +19,31 @@ _SDRF = EXAMPLES_DIR / "sdrf.tsv"
 _PREFIX = "maxquant_test"
 
 
+def test_feature_deduplication_prefers_identified_evidence(tmp_path):
+    """An identified row must win over its duplicate MBR evidence row."""
+    from qpx.converters.maxquant.feature_adapter import MaxQuantFeatureAdapter
+
+    evidence = tmp_path / "evidence.txt"
+    evidence.write_text(
+        "Sequence\tModified sequence\tCharge\tRaw file\tType\tMS/MS scan number\tm/z\t"
+        "Calibrated retention time\tPEP\tLeading razor protein\tLeading proteins\tIntensity\tMass\tid\n"
+        "PEPTIDEK\t_PEPTIDEK_\t2\trun1\tMULTI-MSMS\t100\t450.25\t30.0\t0.01\tP1\tP1\t1000\t898.5\t1\n"
+        "PEPTIDEK\t_PEPTIDEK_\t2\trun1\tMULTI-MATCH\t\t450.25\t30.0\t\tP1\tP1\t1000\t898.5\t2\n"
+        "PEPTIDEK\t_PEPTIDEK_\t2\trun1\tMULTI-MSMS\t101\t450.25\t31.0\t0.02\tP1\tP1\t2000\t898.5\t3\n"
+    )
+    output = tmp_path / "feature.parquet"
+
+    with MaxQuantFeatureAdapter() as adapter:
+        adapter.convert(str(evidence), str(output), chunksize=1)
+
+    rows = pq.read_table(output).to_pylist()
+    by_rt = {row["rt"]: row for row in rows}
+    assert set(by_rt) == {1800.0, 1860.0}
+    assert by_rt[1800.0]["scan"] == [100]
+    assert by_rt[1800.0]["posterior_error_probability"] == pytest.approx(0.01)
+    assert by_rt[1800.0]["id_run_file_name"] == "run1"
+
+
 # ---------------------------------------------------------------------------
 # Module-scoped fixture: run conversion once, share outputs across tests
 # ---------------------------------------------------------------------------
