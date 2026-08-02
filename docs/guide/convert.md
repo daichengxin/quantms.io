@@ -827,9 +827,10 @@ metadata and the `grouped_runs` quantification units.
 !!! warning "Protein intensity is not emitted (interim)"
     The consensusXML has no protein-level abundance — that quantity lived only in
     the mzTab (`protein_abundance_assay`, from ProteinQuantifier). So the **pg view
-    is identification-only**: `label` and `intensity` are null until OpenMS
-    `-out_qpx` provides the authoritative protein quant. The **feature view keeps**
-    its per-run/channel peptide intensities (read directly from the consensusXML).
+    is identification-only**: `label` identifies the channel (`LFQ`, `TMT126`,
+    etc.), while `intensity` is null until OpenMS `-out_qpx` provides the
+    authoritative protein quant. The **feature view keeps** its per-run/channel
+    peptide intensities (read directly from the consensusXML).
 
 ### Parameters {#openms-consensus-parameters}
 
@@ -855,7 +856,7 @@ qpxc convert openms-consensus \
 
 - `<prefix>.feature.parquet` — one row per `(peptidoform, charge, run, rt)` with per-run/channel intensities.
 - `<prefix>.psm.parquet` — one row per spectrum match (scan, PEP, q-value, decoy).
-- `<prefix>.pg.parquet` — protein groups (`pg_accessions`, `grouped_runs`, peptide/feature counts, `global_qvalue`, decoy, genes); **no `intensity`** (interim, identification-only).
+- `<prefix>.pg.parquet` — protein groups (`pg_accessions`, `grouped_runs`, `label`, peptide/feature counts, `global_qvalue`, decoy, genes); `intensity` is null (interim, identification-only).
 - `<prefix>.run.parquet`, `<prefix>.sample.parquet` — from the SDRF (when provided).
 
 ---

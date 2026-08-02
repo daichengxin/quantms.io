@@ -86,7 +86,7 @@ erDiagram
     RUN ||--o{ FEATURE : "run_file_name"
     RUN ||--o{ MZ : "run_file_name"
     PG }o--|{ RUN : "grouped_runs[] contains run_file_name"
-    FEATURE }o--o| PG : "anchor_protein + run_file_name in grouped_runs"
+    FEATURE }o--o{ PG : "anchor_protein + run_file_name in grouped_runs + intensity label"
     PEPMAP ||--o{ PSM : "peptidoform"
     PEPMAP ||--o{ FEATURE : "peptidoform"
     PSM }o--o{ FEATURE : "peptidoform+charge+run_file_name"
@@ -145,7 +145,7 @@ The join keys, spelled out:
 
 | From | To | Join predicate |
 |------|----|----------------|
-| `feature` | `pg` | `feature.anchor_protein = pg.anchor_protein` **AND** `feature.run_file_name ∈ pg.grouped_runs` |
+| `feature` | `pg` | `feature.anchor_protein = pg.anchor_protein` **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** `feature.intensities[].label = pg.label`; one feature can therefore match several PG label rows |
 | `feature` / `pg` | `run` | `run_file_name = run.run_file_name` (for pg: any file in `grouped_runs`) |
 | `(file, label)` | `sample` | unnest `run.samples[]`, match `label`, take `sample_accession`; then `sample.sample_accession` |
 | `psm` ↔ `feature` | — | shared `peptidoform + charge + run_file_name` (feature also stores best PSM's `scan`, `id_run_file_name`) |
@@ -259,7 +259,7 @@ returned once per sample and label.
 | Derived intensity | `additional_intensities` | feature, pg |
 | Sample link | `run.samples[].sample_accession` → `sample.sample_accession` | run → sample |
 | Fraction | `run.fraction` | run |
-| Peptide identity | `peptidoform`, `charge` | psm, feature, pepmap |
+| Peptide identity | `peptidoform` (plus `charge` for PSM and feature) | psm, feature, pepmap |
 | Protein representative | `anchor_protein` | feature, pg |
 
 ## Related pages
