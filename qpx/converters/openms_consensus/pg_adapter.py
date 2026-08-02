@@ -24,6 +24,7 @@ from qpx.converters.openms_consensus.feature_adapter import (
     load_consensus_map,
     to_proforma,
 )
+from qpx.converters.openms_consensus.psm_adapter import _run_resolver
 
 _GENE_RE = re.compile(r"GN=([^\s]+)")
 
@@ -37,6 +38,7 @@ def _protein_maps(cm) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[st
     """
     headers = cm.getColumnHeaders()
     map_run = {i: _run_stem(headers[i].filename) for i in headers}
+    resolve_run = _run_resolver(cm)
     acc_to_pep: dict[str, set[str]] = defaultdict(set)
     acc_to_runs: dict[str, set[str]] = defaultdict(set)
     acc_to_feat: dict[str, set[tuple]] = defaultdict(set)
@@ -67,11 +69,7 @@ def _protein_maps(cm) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[st
             _collect(pid, cf_runs)
     # Unassigned IDs: the run comes from map_index / id_merge_index.
     for pid in cm.getUnassignedPeptideIdentifications():
-        run = None
-        for key in ("map_index", "id_merge_index"):
-            if pid.metaValueExists(key):
-                run = map_run.get(int(pid.getMetaValue(key)))
-                break
+        run = resolve_run(pid)
         _collect(pid, {run} if run else set())
     return acc_to_pep, acc_to_runs, acc_to_feat
 
@@ -193,7 +191,13 @@ def consensus_protein_groups_to_records(
                         "gg_names": genes,
                         "peptide_counts": {"unique_sequences": n_pep, "total_sequences": n_pep},
                         "feature_counts": {"unique_features": n_feat, "total_features": n_feat},
-                        "peptides": [{"protein_name": a, "peptide_count": n_pep} for a in accs],
+                        "peptides": [
+                            {
+                                "protein_name": accession,
+                                "peptide_count": len(acc_to_pep.get(accession, set())),
+                            }
+                            for accession in accs
+                        ],
                     }
                 )
     return records

@@ -20,6 +20,32 @@ from qpx.writers.psm import PsmWriter
 _STRUCTURE_ALL = ("feature", "psm", "pg", "run", "sample")
 
 
+def _write_sdrf_metadata(
+    output_folder: Path,
+    output_prefix: str,
+    sdrf_path: str,
+    requested: set[str],
+) -> dict[str, Path]:
+    """Write the requested SDRF-backed run/sample structures."""
+    metadata = requested.intersection({"run", "sample"})
+    if not metadata:
+        return {}
+
+    from qpx.converters.sdrf import SdrfConverter
+
+    paths = {
+        "sample": output_folder / f"{output_prefix}.sample.parquet",
+        "run": output_folder / f"{output_prefix}.run.parquet",
+    }
+    with SdrfConverter() as sdrf_converter:
+        sdrf_converter.convert(
+            sdrf_path=sdrf_path,
+            sample_output=str(paths["sample"]) if "sample" in metadata else None,
+            run_output=str(paths["run"]) if "run" in metadata else None,
+        )
+    return {name: paths[name] for name in metadata}
+
+
 class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
     """consensusXML + SDRF -> QPX views.
 
@@ -41,6 +67,14 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
         ``structures`` selects which of feature/psm/pg/run/sample to emit; pg is
         identification-only (null protein intensity) in this interim path.
         """
+        requested = set(structures)
+        unknown = requested.difference(_STRUCTURE_ALL)
+        if unknown:
+            raise ValueError(f"Unknown OpenMS consensus structure(s): {sorted(unknown)}")
+        metadata = requested.intersection({"run", "sample"})
+        if metadata and not sdrf_path:
+            raise ValueError(f"An SDRF is required to write {sorted(metadata)}")
+
         out = Path(output_folder)
         out.mkdir(parents=True, exist_ok=True)
         written: dict[str, Path] = {}
@@ -76,16 +110,6 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
                     w.write_batch(recs)
             written["pg"] = path
 
-        if sdrf_path and ("run" in structures or "sample" in structures):
-            from qpx.converters.sdrf import SdrfConverter
-
-            with SdrfConverter() as sdrf_conv:
-                sdrf_conv.convert(
-                    sdrf_path=sdrf_path,
-                    sample_output=str(out / f"{output_prefix}.sample.parquet"),
-                    run_output=str(out / f"{output_prefix}.run.parquet"),
-                )
-            written["run"] = out / f"{output_prefix}.run.parquet"
-            written["sample"] = out / f"{output_prefix}.sample.parquet"
+        written.update(_write_sdrf_metadata(out, output_prefix, sdrf_path, requested))
 
         return written

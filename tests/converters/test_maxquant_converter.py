@@ -19,6 +19,36 @@ _SDRF = EXAMPLES_DIR / "sdrf.tsv"
 _PREFIX = "maxquant_test"
 
 
+def test_pg_fails_before_writing_when_experiment_has_no_run_mapping(tmp_path):
+    """An unmapped MaxQuant Experiment must not be swallowed as skipped PG rows."""
+    from qpx.converters.maxquant.pg_adapter import MaxQuantPgAdapter
+
+    protein_groups = tmp_path / "proteinGroups.txt"
+    protein_groups.write_text("Protein IDs\tMajority protein IDs\tIntensity experiment_1\nP12345\tP12345\t1000\n")
+    output = tmp_path / "pg.parquet"
+
+    with MaxQuantPgAdapter() as adapter:
+        with pytest.raises(ValueError, match="experiment_1.*mapping"):
+            adapter.convert(str(protein_groups), str(output))
+
+    assert not output.exists()
+
+
+def test_pg_rejects_unassignable_total_intensity(tmp_path):
+    """A total-only intensity must not create grouped_runs=['unknown']."""
+    from qpx.converters.maxquant.pg_adapter import MaxQuantPgAdapter
+
+    protein_groups = tmp_path / "proteinGroups.txt"
+    protein_groups.write_text("Protein IDs\tMajority protein IDs\tIntensity\nP12345\tP12345\t1000\n")
+    output = tmp_path / "pg.parquet"
+
+    with MaxQuantPgAdapter() as adapter:
+        with pytest.raises(ValueError, match="total Intensity.*grouped_runs"):
+            adapter.convert(str(protein_groups), str(output))
+
+    assert not output.exists()
+
+
 def test_feature_deduplication_prefers_identified_evidence(tmp_path):
     """An identified row must win over its duplicate MBR evidence row."""
     from qpx.converters.maxquant.feature_adapter import MaxQuantFeatureAdapter

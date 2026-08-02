@@ -72,6 +72,113 @@ def _write_tmt_consensusxml(path):
     path.write_text(_TMT_CONSENSUSXML)
 
 
+def test_converter_rejects_invalid_structure_before_creating_output(tmp_path):
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="Unknown.*bogus"):
+        OpenMSConsensusConverter().convert(
+            str(tmp_path / "missing.consensusXML"),
+            str(out),
+            structures=("bogus",),
+        )
+    assert not out.exists()
+
+
+def test_converter_requires_sdrf_for_requested_metadata(tmp_path):
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="SDRF.*run"):
+        OpenMSConsensusConverter().convert(
+            str(tmp_path / "missing.consensusXML"),
+            str(out),
+            structures=("run",),
+        )
+    assert not out.exists()
+
+
+def test_converter_writes_only_requested_sdrf_structure(tmp_path):
+    sdrf = tmp_path / "test.sdrf.tsv"
+    sdrf.write_text(
+        "source name\tcharacteristics[organism]\tcharacteristics[organism part]\t"
+        "comment[data file]\tcomment[label]\n"
+        "S1\tHomo sapiens\tliver\trun_01.raw\tlabel free sample\n"
+    )
+    out = tmp_path / "out"
+    written = OpenMSConsensusConverter().convert(
+        str(tmp_path / "unused.consensusXML"),
+        str(out),
+        sdrf_path=str(sdrf),
+        structures=("run",),
+    )
+
+    assert set(written) == {"run"}
+    assert written["run"].exists()
+    assert not (out / "openms.sample.parquet").exists()
+
+
+def test_pg_peptide_counts_are_per_protein(monkeypatch):
+    from qpx.converters.openms_consensus import pg_adapter
+
+    class Header:
+        filename = "run_01.mzML"
+        label = ""
+
+    class ConsensusMap:
+        @staticmethod
+        def getColumnHeaders():
+            return {0: Header()}
+
+        @staticmethod
+        def getExperimentType():
+            return "label-free"
+
+        @staticmethod
+        def getProteinIdentifications():
+            return [object()]
+
+    monkeypatch.setattr(
+        pg_adapter,
+        "_protein_maps",
+        lambda _cm: (
+            {"P1": {"PEPA", "PEPB"}, "P2": {"PEPB"}},
+            {"P1": {"run_01"}, "P2": {"run_01"}},
+            {"P1": {("PEPA", 2), ("PEPB", 2)}, "P2": {("PEPB", 2)}},
+        ),
+    )
+    monkeypatch.setattr(pg_adapter, "_protein_hit_meta", lambda _prot: ({}, {}, {}))
+    monkeypatch.setattr(pg_adapter, "_build_groups", lambda _prot: [["P1", "P2"]])
+
+    records = pg_adapter.consensus_protein_groups_to_records(cm=ConsensusMap())
+
+    assert records[0]["peptide_counts"]["unique_sequences"] == 2
+    assert records[0]["peptides"] == [
+        {"protein_name": "P1", "peptide_count": 2},
+        {"protein_name": "P2", "peptide_count": 1},
+    ]
+
+
+def test_run_resolver_tries_id_merge_index_after_unmapped_map_index():
+    from qpx.converters.openms_consensus.psm_adapter import _run_resolver
+
+    class Header:
+        def __init__(self, filename):
+            self.filename = filename
+
+    class ConsensusMap:
+        @staticmethod
+        def getColumnHeaders():
+            return {0: Header("run_01.mzML"), 1: Header("run_02.mzML")}
+
+    class PeptideIdentification:
+        values = {"map_index": 99, "id_merge_index": 1}
+
+        def metaValueExists(self, key):
+            return key in self.values
+
+        def getMetaValue(self, key):
+            return self.values[key]
+
+    assert _run_resolver(ConsensusMap())(PeptideIdentification()) == "run_02"
+
+
 def test_consensusxml_to_qpx_feature_has_channels_pg_is_identification_only(tmp_path):
     cx = tmp_path / "test.consensusXML"
     _write_tmt_consensusxml(cx)

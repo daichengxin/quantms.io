@@ -99,6 +99,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
 
         # Step 4: Detect intensity columns in the data
         intensity_cols = self._detect_intensity_columns(experiment_type)
+        self._validate_experiment_run_mappings(intensity_cols)
 
         # Step 5: Stream and transform
         self.logger.info("Transforming MaxQuant protein groups ...")
@@ -138,8 +139,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
         files to survive the sample join.
 
         Returns an empty dict when *evidence_path* is ``None`` or lacks the
-        required columns, in which case callers fall back to the bare Experiment
-        token.
+        required columns, in which case callers try the SDRF mapping.
         """
         if not evidence_path:
             return {}
@@ -155,8 +155,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
             ).fetchall()
         except duckdb.Error:
             self.logger.warning(
-                "Could not read Experiment/Raw file from evidence.txt; pg.grouped_runs "
-                "will fall back to per-experiment tokens (not real run file names)",
+                "Could not read Experiment/Raw file from evidence.txt; trying the SDRF mapping",
                 exc_info=True,
             )
             return {}
@@ -216,6 +215,21 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
             "ibaq": ibaq_cols,
             "reporter": reporter_cols,
         }
+
+    def _validate_experiment_run_mappings(self, intensity_cols: dict[str, list[str]]) -> None:
+        """Fail before writing when an intensity experiment cannot resolve to runs."""
+        experiments = {column.removeprefix("Intensity ") for column in intensity_cols.get("intensity", [])}
+        for column in intensity_cols.get("reporter", []):
+            match = re.match(r"Reporter intensity \d+ (.+)", column)
+            if match:
+                experiments.add(match.group(1))
+        if not experiments:
+            raise ValueError(
+                "proteinGroups.txt has no per-experiment intensity columns; "
+                "the total Intensity cannot be assigned to grouped_runs"
+            )
+        for experiment in sorted(experiments):
+            self._runs_for(experiment)
 
     # ------------------------------------------------------------------
     # Transform
@@ -424,18 +438,6 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
                         self._runs_for(run_name),
                         [{"label": "LFQ", "intensity": float(intensity_val)}],
                         add_int,
-                    )
-                )
-
-        # If no per-sample intensity columns, emit one record with total Intensity
-        if not records:
-            total_intensity = safe_float(row.get(r.get("intensity", "Intensity"))) or 0.0
-            if total_intensity > 0:
-                records.append(
-                    _make_rec(
-                        ["unknown"],
-                        [{"label": "LFQ", "intensity": float(total_intensity)}],
-                        [],
                     )
                 )
 
