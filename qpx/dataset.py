@@ -8,9 +8,7 @@ from typing import TYPE_CHECKING
 
 import duckdb
 
-if TYPE_CHECKING:
-    import pandas as pd
-
+from qpx._version import __version__
 from qpx.core.convert import QueryResult
 from qpx.core.data import (
     PG,
@@ -28,6 +26,15 @@ from qpx.core.data import (
 from qpx.core.data.schema import ValidationIssue, ValidationResult
 from qpx.core.engine import DuckDBEngine
 from qpx.core.sql import escape_path, sql_build
+from qpx.version import (
+    QPX_SPEC_VERSION,
+    QpxVersionError,
+    check_pg_columns_compatible,
+    check_pg_file_compatible,
+)
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _log = logging.getLogger(__name__)
 
@@ -100,50 +107,83 @@ class Dataset:
             file_name = f"{self._file_prefix}{suffix}" if self._file_prefix else f"*{suffix}"
             s3_glob = f"{self.path.rstrip('/')}/{file_name}"
             try:
+                # PyArrow cannot open an S3 glob to read the footer, so register
+                # first and run the PG guard against the DuckDB view's columns.
                 self._engine.register_s3_parquet(name, s3_glob)
+                if name == "pg":
+                    cols = [row[0] for row in self._engine.execute('DESCRIBE "pg"').fetchall()]
+                    check_pg_columns_compatible(cols, source=s3_glob)
                 self._structures[name] = cls(
                     engine=self._engine,
                     table_name=name,
                     file_path=f"{self.path}/{name}",
                 )
+            except QpxVersionError as exc:
+                # One incompatible/old structure file must not abort the whole
+                # dataset — skip it with a warning so the other structures stay
+                # usable. (A direct read_pg()/PG.from_file() still raises.)
+                _log.warning("Skipping incompatible structure '%s': %s", name, exc)
             except (FileNotFoundError, duckdb.IOException):
                 pass  # Structure not present in S3
-            except Exception as exc:
+            except (OSError, ValueError, duckdb.Error) as exc:
                 _log.warning("Failed to register '%s' from S3: %s", name, exc)
 
     def _discover_local(self, requested: list[str] | None):
-        """Register structures from local filesystem."""
+        """Register structures from local filesystem.
+
+        Each structure is registered independently: a bad/old/garbage file for
+        one structure is skipped with a warning so the rest of the dataset stays
+        usable, instead of aborting the whole Dataset construction.
+        """
         for name, (cls, suffix) in self._STRUCTURE_REGISTRY.items():
             if requested and name not in requested:
                 continue
-            # Check for single file first
-            pattern = f"{self._file_prefix}{suffix}" if self._file_prefix else f"*{suffix}"
-            matches = sorted(self.path.glob(pattern))
-            if matches:
-                if len(matches) > 1:
-                    _log.warning(
-                        "Multiple files match '%s': %s — using first: %s",
-                        pattern,
-                        [m.name for m in matches],
-                        matches[0].name,
-                    )
-                file_path = matches[0]  # Take first match
-                self._engine.register_parquet(name, file_path)
+            try:
+                self._register_local_structure(name, cls, suffix)
+            except QpxVersionError as exc:
+                # One incompatible/old structure file must not abort the whole
+                # dataset — skip it with a warning so the other structures stay
+                # usable. (A direct read_pg()/PG.from_file() still raises.)
+                _log.warning("Skipping incompatible structure '%s': %s", name, exc)
+            except (OSError, ValueError, duckdb.Error) as exc:
+                _log.warning("Failed to register structure '%s': %s", name, exc)
+
+    def _register_local_structure(self, name: str, cls, suffix: str):
+        """Register a single local structure (single file or Hive-partitioned dir)."""
+        # Check for single file first
+        pattern = f"{self._file_prefix}{suffix}" if self._file_prefix else f"*{suffix}"
+        matches = sorted(self.path.glob(pattern))
+        if matches:
+            if len(matches) > 1:
+                _log.warning(
+                    "Multiple files match '%s': %s — using first: %s",
+                    pattern,
+                    [m.name for m in matches],
+                    matches[0].name,
+                )
+            file_path = matches[0]  # Take first match
+            if name == "pg":
+                check_pg_file_compatible(file_path)
+            self._engine.register_parquet(name, file_path)
+            self._structures[name] = cls(
+                engine=self._engine,
+                table_name=name,
+                file_path=file_path,
+            )
+        elif self._file_prefix is None:
+            # Check for Hive-partitioned directory
+            part_dir = self.path / name
+            part_files = list(part_dir.glob("**/*.parquet")) if part_dir.is_dir() else []
+            if part_files:
+                if name == "pg":
+                    for part_file in sorted(part_files):
+                        check_pg_file_compatible(part_file)
+                self._engine.register_partitioned_parquet(name, part_dir)
                 self._structures[name] = cls(
                     engine=self._engine,
                     table_name=name,
-                    file_path=file_path,
+                    file_path=part_dir,
                 )
-            elif self._file_prefix is None:
-                # Check for Hive-partitioned directory
-                part_dir = self.path / name
-                if part_dir.is_dir() and list(part_dir.glob("**/*.parquet")):
-                    self._engine.register_partitioned_parquet(name, part_dir)
-                    self._structures[name] = cls(
-                        engine=self._engine,
-                        table_name=name,
-                        file_path=part_dir,
-                    )
 
     # --- Data structure accessors (lazy, return None if not present) ---
     @property
@@ -269,34 +309,52 @@ class Dataset:
         Dynamically detects whether the intensities struct uses 'label' (new
         schema) or 'channel' (old schema) so that old datasets keep working.
         """
-        # Detect whether intensities use 'label' (new) or 'channel' (old)
+        # The feature view still carries an intensities list<struct> that may use
+        # 'label' (new) or 'channel' (old); detect for the peptide level. The pg
+        # view is flattened since 1.1 (scalar p.label), so protein needs no probe.
         label_field = "label"
-        if level == "protein" and self.pg is not None:
-            label_field = self.pg._intensity_label_field()
-        elif level == "peptide" and self.feature is not None:
+        if level == "peptide" and self.feature is not None:
             label_field = self.feature._intensity_label_field()
 
         if level == "protein":
             if self.pg is None or self.run is None:
                 raise ValueError("level='protein' requires pg and run structures.")
+            # Since QPX 1.1 the pg view is flattened: one row per label with scalar
+            # p.label / p.intensity (no intensities list to UNNEST). Match each pg
+            # row to the sample carrying its label. ID-only rows (null label /
+            # intensity) never match a sample label and drop out naturally.
             return sql_build(
                 """
-            SELECT rs.sample_accession,
-                   pg.anchor_protein AS feature_id,
-                   i.intensity
-            FROM pg,
-                 run r,
-                 UNNEST(r.samples) AS _t1(rs),
-                 UNNEST(pg.intensities) AS _t2(i)
-            WHERE pg.run_file_name = r.run_file_name
-              AND i.$lf = rs.$lf
-              AND pg.is_decoy = false
+            WITH numbered_pg AS MATERIALIZED (
+                SELECT ROW_NUMBER() OVER () AS pg_row_id, *
+                FROM pg
+            ),
+            pg_samples AS (
+                SELECT DISTINCT p.pg_row_id,
+                                rs.sample_accession,
+                                rs.label AS intensity_label
+                FROM numbered_pg p
+                CROSS JOIN UNNEST(list_distinct(p.grouped_runs)) AS _g(run_file_name)
+                JOIN run r USING (run_file_name)
+                CROSS JOIN UNNEST(r.samples) AS _s(rs)
+            )
+            SELECT ps.sample_accession,
+                   p.anchor_protein AS feature_id,
+                   p.intensity
+            FROM numbered_pg p
+            JOIN pg_samples ps USING (pg_row_id)
+            WHERE p.label = ps.intensity_label
+              AND p.is_decoy = false
             """,
-                lf=label_field,
             )
         elif level == "peptide":
             if self.feature is None or self.run is None:
                 raise ValueError("level='peptide' requires feature and run structures.")
+            intensity_match = (
+                "i.sample_accession = rs.sample_accession"
+                if label_field == "channel"
+                else "(i.label = rs.label OR len(r.samples) = 1)"
+            )
             return sql_build(
                 """
             SELECT rs.sample_accession,
@@ -307,11 +365,11 @@ class Dataset:
                  UNNEST(r.samples) AS _t1(rs),
                  UNNEST(f.intensities) AS _t2(i)
             WHERE f.run_file_name = r.run_file_name
-              AND i.$lf = rs.$lf
+              AND $intensity_match
               AND f.is_decoy = false
             GROUP BY rs.sample_accession, f.sequence
             """,
-                lf=label_field,
+                intensity_match=intensity_match,
             )
         else:
             raise ValueError(f"level must be 'protein' or 'peptide', got '{level}'")
@@ -421,7 +479,7 @@ class Dataset:
         return matrix
 
     # --- Validation ---
-    def validate(self, structures: list[str] | None = None) -> dict[str, ValidationResult]:
+    def validate(self, structures: list[str] | None = None, *, strict: bool = False) -> dict[str, ValidationResult]:
         """Validate the dataset or specific structures against their schemas.
 
         Parameters
@@ -451,8 +509,141 @@ class Dataset:
                 )
                 results[name] = result
             else:
-                results[name] = struct.validate()
+                results[name] = struct.validate(strict=strict)
+
+        # Cross-structure invariant: every pg.grouped_runs element must be a
+        # real run.run_file_name. A grouped run that names no acquisition run is
+        # dropped by every sample-joined view, so flag it as an error on pg.
+        if "pg" in results and self.pg is not None and self.run is not None:
+            self._check_grouped_runs_referential(results["pg"])
+            self._check_grouped_runs_sample_mapping(results["pg"])
+
         return results
+
+    def _check_grouped_runs_referential(self, pg_result: ValidationResult) -> None:
+        """Flag pg.grouped_runs values that are not present in run.run_file_name.
+
+        Appends an ``error`` issue to *pg_result* for each dangling grouped-run
+        token. Any query failure (e.g. missing columns) is swallowed so schema
+        validation is never masked by this referential check.
+        """
+        try:
+            rows = self._engine.execute(
+                """
+                SELECT DISTINCT gr AS grouped_run
+                FROM pg, UNNEST(pg.grouped_runs) AS _g(gr)
+                WHERE gr IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM run r WHERE r.run_file_name = gr)
+                ORDER BY grouped_run
+                """
+            ).fetchall()
+        except duckdb.Error as exc:
+            # Do not fail silently: a query error here can mean genuine schema
+            # drift (a referenced pg/run column was removed/renamed), which is how
+            # the last release's bug hid. Surface it in the validation result.
+            _log.warning("pg grouped_runs referential check could not run (possible schema drift): %s", exc)
+            pg_result.issues.append(
+                ValidationIssue(
+                    structure="pg",
+                    check="referential_check_skipped",
+                    severity="warning",
+                    column=None,
+                    message=f"grouped_runs referential check could not run (possible schema drift): {exc}",
+                )
+            )
+            return
+
+        for (grouped_run,) in rows:
+            pg_result.issues.append(
+                ValidationIssue(
+                    structure="pg",
+                    check="dangling_grouped_run",
+                    severity="error",
+                    column="grouped_runs",
+                    message=(
+                        f"grouped_runs contains {grouped_run!r}, which is not a "
+                        "run_file_name in run.parquet; PG rows keyed by it are "
+                        "dropped from all sample-joined views"
+                    ),
+                )
+            )
+
+    def _check_grouped_runs_sample_mapping(self, pg_result: ValidationResult) -> None:
+        """Require each PG intensity label to resolve to exactly one sample."""
+        try:
+            rows = self._engine.execute(
+                """
+                WITH numbered_pg AS MATERIALIZED (
+                    SELECT ROW_NUMBER() OVER () AS pg_row_id, *
+                    FROM pg
+                ),
+                pg_labels AS (
+                    -- pg is flattened since 1.1: scalar p.label (no intensities
+                    -- list). ID-only rows (null label) have no sample to resolve.
+                    SELECT p.pg_row_id,
+                           p.anchor_protein,
+                           p.grouped_runs,
+                           p.label
+                    FROM numbered_pg p
+                    WHERE p.label IS NOT NULL
+                ),
+                sample_matches AS (
+                    SELECT pl.pg_row_id,
+                           pl.label,
+                           rs.sample_accession
+                    FROM pg_labels pl
+                    CROSS JOIN UNNEST(list_distinct(pl.grouped_runs)) AS _g(run_file_name)
+                    JOIN run r USING (run_file_name)
+                    CROSS JOIN UNNEST(r.samples) AS _s(rs)
+                    WHERE rs.label = pl.label
+                )
+                SELECT pl.anchor_protein,
+                       pl.grouped_runs,
+                       pl.label,
+                       COUNT(DISTINCT sm.sample_accession) AS sample_count,
+                       LIST(DISTINCT sm.sample_accession)
+                           FILTER (WHERE sm.sample_accession IS NOT NULL) AS samples
+                FROM pg_labels pl
+                LEFT JOIN sample_matches sm
+                  ON pl.pg_row_id = sm.pg_row_id
+                 AND pl.label = sm.label
+                GROUP BY pl.pg_row_id,
+                         pl.anchor_protein,
+                         pl.grouped_runs,
+                         pl.label
+                HAVING COUNT(DISTINCT sm.sample_accession) != 1
+                ORDER BY pl.anchor_protein, pl.label
+                """
+            ).fetchall()
+        except duckdb.Error as exc:
+            # Do not fail silently on drift (see _check_grouped_runs_referential).
+            _log.warning("pg grouped_runs sample-mapping check could not run (possible schema drift): %s", exc)
+            pg_result.issues.append(
+                ValidationIssue(
+                    structure="pg",
+                    check="sample_mapping_check_skipped",
+                    severity="warning",
+                    column=None,
+                    message=f"grouped_runs sample-mapping check could not run (possible schema drift): {exc}",
+                )
+            )
+            return
+
+        for anchor_protein, grouped_runs, label, sample_count, samples in rows:
+            pg_result.issues.append(
+                ValidationIssue(
+                    structure="pg",
+                    check="ambiguous_grouped_run_sample",
+                    severity="error",
+                    column="grouped_runs",
+                    message=(
+                        f"PG {anchor_protein!r} label {label!r} across "
+                        f"grouped_runs={grouped_runs!r} resolves to "
+                        f"{sample_count} samples ({samples or []!r}); exactly "
+                        "one sample is required"
+                    ),
+                )
+            )
 
     # --- Integrity ---
     def _require_local(self, operation: str) -> None:
@@ -748,6 +939,8 @@ class Dataset:
             output_path = path / f"{prefix}.{view}.h5ad"
         else:
             raise ValueError("Either 'name' or 'view' must be provided")
+        adata.uns["qpx_version"] = QPX_SPEC_VERSION
+        adata.uns["writer_version"] = __version__
         adata.write_h5ad(output_path)
         return output_path
 

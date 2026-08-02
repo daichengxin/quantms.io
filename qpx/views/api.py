@@ -18,19 +18,27 @@ class ProteinView(BaseView):
     def intensity(self, q_value_threshold: float = 0.01) -> QueryResult:
         q_value_threshold = float(q_value_threshold)
         sql = """
-        SELECT pg.anchor_protein AS protein_accession,
-               rs.sample_accession,
-               i.label,
-               i.intensity,
-               pg.global_qvalue,
-               pg.gg_names AS gene_names
-        FROM pg,
-             run r,
-             UNNEST(r.samples) AS _t1(rs),
-             UNNEST(pg.intensities) AS _t2(i)
-        WHERE pg.run_file_name = r.run_file_name
-          AND i.label = rs.label
-          AND (pg.global_qvalue IS NULL OR pg.global_qvalue <= $1)
+        WITH numbered_pg AS MATERIALIZED (
+            SELECT ROW_NUMBER() OVER () AS pg_row_id, *
+            FROM pg
+        ),
+        pg_samples AS (
+            SELECT DISTINCT p.pg_row_id, rs.sample_accession, rs.label
+            FROM numbered_pg p
+            CROSS JOIN UNNEST(list_distinct(p.grouped_runs)) AS _g(run_file_name)
+            JOIN run r USING (run_file_name)
+            CROSS JOIN UNNEST(r.samples) AS _s(rs)
+        )
+        SELECT p.anchor_protein AS protein_accession,
+               ps.sample_accession,
+               p.label,
+               p.intensity,
+               p.global_qvalue,
+               p.gg_names AS gene_names
+        FROM numbered_pg p
+        JOIN pg_samples ps USING (pg_row_id)
+        WHERE p.label = ps.label
+          AND (p.global_qvalue IS NULL OR p.global_qvalue <= $1)
         """
         return QueryResult(self._engine.execute(sql, [q_value_threshold]))
 
@@ -39,15 +47,22 @@ class PeptideView(BaseView):
     """Peptide intensity per sample — joins Feature + Run."""
 
     def intensity(self) -> QueryResult:
+        # The label carried by a feature intensity is not always the SDRF channel
+        # label carried by run.samples. For label-free (LFQ) runs the converters
+        # emit a generic feature label (e.g. DIA-NN's ``'raw'``) while run.samples
+        # carries the canonical ``'LFQ'`` channel, so an exact ``i.label = rs.label``
+        # join returns 0 rows. A label-free run has exactly one sample, so when the
+        # run is single-sample we attribute the intensity to that lone sample
+        # regardless of label; multiplexed (TMT/iTRAQ) runs still require an exact
+        # label match to disambiguate channels.
         sql = """
         SELECT f.sequence, f.peptidoform, f.charge, f.anchor_protein,
-               rs.sample_accession, i.label, i.intensity
-        FROM feature f,
-             run r,
+               rs.sample_accession, rs.label AS label, i.intensity
+        FROM feature f
+        JOIN run r ON f.run_file_name = r.run_file_name,
              UNNEST(r.samples) AS _t1(rs),
              UNNEST(f.intensities) AS _t2(i)
-        WHERE f.run_file_name = r.run_file_name
-          AND i.label = rs.label
+        WHERE (i.label = rs.label OR len(r.samples) = 1)
         """
         return QueryResult(self._engine.execute(sql))
 
@@ -218,10 +233,16 @@ class SampleSummaryView(BaseView):
 
     def proteins_per_sample(self):
         """Count distinct proteins per sample (joins PG + Run)."""
+        # Pre-explode grouped_runs so the run join is a hash-join on
+        # run_file_name instead of a nested-loop list_contains predicate.
         sql = """
+        WITH pg_runs AS (
+            SELECT p.anchor_protein, p.is_decoy, gr AS run_file_name
+            FROM pg p, UNNEST(p.grouped_runs) AS _g(gr)
+        )
         SELECT rs.sample_accession,
                COUNT(DISTINCT pg.anchor_protein) AS n_proteins
-        FROM pg
+        FROM pg_runs pg
         JOIN run r ON pg.run_file_name = r.run_file_name,
              UNNEST(r.samples) AS _t(rs)
         WHERE pg.is_decoy = false

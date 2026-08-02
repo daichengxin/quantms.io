@@ -9,7 +9,7 @@ QPX organizes proteomics results into multiple **views**, each capturing a diffe
 
 ## Data model
 
-The diagram below shows the QPX views and how they relate to each other. Arrows indicate data flow from raw spectra through identification and quantification to final expression results.
+The diagram below shows the QPX views and how they relate to each other. Arrows indicate data flow from raw spectra through identification and quantification to final expression results. For the full conceptual model — every term defined, entity-relationship and quantification-unit diagrams, and how a measurement flows from raw file to protein quantity — see the [Data Model](data-model.md).
 
 ```mermaid
 graph LR
@@ -116,4 +116,4 @@ Several data structures are reused across multiple views. Each concept has its o
 
 ## Current status
 
-The QPX format is at **version 1.0**, primarily implemented in the [quantms workflow](https://github.com/bigbio/quantms). The format is open and can be adopted by any software tool. Versioning follows `{major}.{minor}` semantics: major releases may introduce breaking changes, while minor updates remain backward compatible. Every view file includes a `qpx_version` metadata field to identify which specification version produced it.
+The QPX format is at **version 1.1**, primarily implemented in the [quantms workflow](https://github.com/bigbio/quantms). The format is open and can be adopted by any software tool. During the pre-2.0 stabilisation period, minor versions may include documented breaking changes; readers must check each file's `qpx_version` and the [versioning changelog](versioning.md). Every view file includes a `qpx_version` metadata field to identify which specification version produced it.

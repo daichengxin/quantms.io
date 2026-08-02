@@ -116,6 +116,7 @@ nav:
       - Community: community.md
   - Specification:
       - Overview: spec/index.md
+      - Data Model: spec/data-model.md
       - Common Concepts:
           - Peptidoform: spec/peptidoform.md
           - Modifications: spec/modifications.md

@@ -26,6 +26,26 @@ MODIFICATION = pa.struct(
         pa.field("target_amino_acid", pa.string(), nullable=True),  # e.g. "S,T,Y", "C"
     ]
 )
+
+# Generic ontology term (accession + optional name/properties) used by additional_terms
+ONTOLOGY_TERM = pa.struct(
+    [
+        pa.field("accession", pa.string()),  # CV accession, e.g. "MS:1003221" (DIA)
+        pa.field("name", pa.string(), nullable=True),  # human-readable term name
+        pa.field(
+            "properties",
+            pa.list_(
+                pa.struct(
+                    [
+                        pa.field("key", pa.string()),
+                        pa.field("value", pa.string()),
+                    ]
+                )
+            ),
+            nullable=True,
+        ),
+    ]
+)
 ```
 
 ---
@@ -63,6 +83,9 @@ run_schema = pa.schema(
         pa.field("instrument", pa.string(), nullable=True),
         pa.field("enzymes", pa.list_(pa.string()), nullable=True),
         pa.field("dissociation_method", pa.string(), nullable=True),
+        pa.field("acquisition_method", pa.string(), nullable=True),
+        # Other ontology-backed run terms (acquisition method as CV, labeling, etc.)
+        pa.field("additional_terms", pa.list_(ONTOLOGY_TERM), nullable=True),
         # Modification parameters -- list of typed modification structs
         pa.field("modification_parameters", pa.list_(MODIFICATION), nullable=True),
     ]
@@ -81,6 +104,8 @@ run_schema = pa.schema(
 | `instrument` | Mass spectrometer name | string | no |
 | `enzymes` | Proteolytic enzyme name(s) | list[string] | no |
 | `dissociation_method` | Fragmentation method name (e.g. HCD, CID, ETD) | string | no |
+| `acquisition_method` | Data acquisition method name (e.g. DDA, DIA); from `comment[proteomics data acquisition method]` | string | no |
+| `additional_terms` | Other ontology-backed run terms (acquisition method, labeling, etc.) | list[ONTOLOGY_TERM] | no |
 | `modification_parameters` | Modifications configured in the database search | list[MODIFICATION] | no |
 
 ### Samples list detail

@@ -58,7 +58,22 @@ class BaseStructure:
     def join(self, other: BaseStructure, on: str | None = None) -> BaseStructure:
         if on is None:
             on = self._auto_join_key(other)
-        return self._with_query(self._query.join(other._query, on=on))
+        return self._with_query(self._query.join(other.query, on=on))
+
+    def _join_list_membership(
+        self,
+        other: BaseStructure,
+        list_column: str,
+        value_column: str,
+    ) -> BaseStructure:
+        """Join by expanding one of this structure's list columns."""
+        return self._with_query(
+            self._query.join_list_membership(
+                other.query,
+                list_column=list_column,
+                value_column=value_column,
+            )
+        )
 
     def order_by(self, *columns: str, desc: bool = False) -> BaseStructure:
         return self._with_query(self._query.order_by(*columns, desc=desc))
@@ -79,6 +94,11 @@ class BaseStructure:
     def count(self) -> int:
         return self._query.count()
 
+    @property
+    def query(self) -> LazyQuery:
+        """Return the immutable query backing this structure."""
+        return self._query
+
     # --- Batch iteration (for sample-level processing) ---
     def iter_batches(self, partition_by: str, batch_size: int = 20) -> Iterator[tuple[list[str], pd.DataFrame]]:
         """
@@ -96,10 +116,14 @@ class BaseStructure:
             yield batch_values, df
 
     # --- Validation ---
-    def validate(self) -> ValidationResult:
-        """Validate this structure's data against its schema."""
+    def validate(self, *, strict: bool = False) -> ValidationResult:
+        """Validate this structure's data against its schema.
+
+        ``strict=True`` (used by ``qpxc validate``) promotes duplicate-PK and
+        required-null issues to errors; the default is lenient.
+        """
         table = self.to_arrow()
-        return self._schema_class.validate_full(table)
+        return self._schema_class.validate_full(table, strict=strict)
 
     # --- Parquet metadata (delegates to core.parquet_io) ---
     @property

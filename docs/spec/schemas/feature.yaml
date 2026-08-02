@@ -1,6 +1,6 @@
 name: feature
 file_type: feature_file
-primary_key: [sequence, charge, run_file_name, anchor_protein]
+primary_key: [peptidoform, charge, run_file_name, rt]
 doc: "Quantified peptide features per MS run; unmapped features are keyed by sequence, charge, and run_file_name"
 
 fields:
@@ -23,6 +23,11 @@ fields:
   posterior_error_probability:
     type: float64
     doc: "PEP for the peptide match"
+  peptide_qvalue:
+    type: float64
+    nullable: true
+    optional: true
+    doc: "Peptide-level q-value; null/absent when the search engine does not provide one"
   is_decoy:
     type: bool
     required: true
@@ -57,7 +62,7 @@ fields:
     doc: "Scan ID (array of int components)"
   rt:
     type: float32
-    doc: "Retention time (seconds)"
+    doc: "Retention time (seconds); the RT component of the feature primary key. Populated where the producer reports it (DIA-NN, OpenMS/quantms, TMT); some tools (e.g. FragPipe combined_ion) do not report per-feature RT, leaving it null."
   ion_mobility:
     type: float32
     doc: "Ion mobility"
@@ -92,7 +97,7 @@ fields:
   pg_positions:
     type: "list<protein_position>"
     optional: true
-    doc: "Peptide positions per protein"
+    doc: "Peptide positions"
 
   # Ion mobility window
   ion_mobility_start:

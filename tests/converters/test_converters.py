@@ -475,7 +475,7 @@ class TestFragPipePgAdapter:
 
         output = tmp_path / "pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=str(tsv), output_path=str(output))
+            adapter.convert(protein_path=str(tsv), output_path=str(output), experiment_to_runs={"experiment_1": ["run_01"]})
         assert output.exists()
         table = pq.read_table(output)
         assert table.num_rows == 1
@@ -654,10 +654,10 @@ class TestQuantmsPgAdapter:
         # Make _build_single_pg fail for P3 and P4 (2 out of 5 = 40%)
         _original_build = QuantmsPgAdapter._build_single_pg
 
-        def _patched_build(self, anchor_protein, run_file_name, features, single_meta, group_meta):
+        def _patched_build(self, anchor_protein, grouped_runs, features, single_meta, group_meta):
             if anchor_protein in ("P3", "P4"):
                 raise RuntimeError("synthetic failure")
-            return _original_build(self, anchor_protein, run_file_name, features, single_meta, group_meta)
+            return _original_build(self, anchor_protein, grouped_runs, features, single_meta, group_meta)
 
         monkeypatch.setattr(QuantmsPgAdapter, "_build_single_pg", _patched_build)
 
@@ -824,7 +824,7 @@ class TestFragPipePgAdapterIsDecoy:
         tsv = self._make_tsv(tmp_path, [self._normal_row("sp|P12345|PROT_HUMAN")])
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         is_decoy_vals = table.column("is_decoy").to_pylist()
         assert all(v is False for v in is_decoy_vals), f"Expected False, got: {is_decoy_vals}"
@@ -836,7 +836,7 @@ class TestFragPipePgAdapterIsDecoy:
         tsv = self._make_tsv(tmp_path, [self._normal_row("rev_sp|P12345|PROT_HUMAN")])
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         is_decoy_vals = table.column("is_decoy").to_pylist()
         assert all(v is True for v in is_decoy_vals), f"Expected True, got: {is_decoy_vals}"
@@ -848,7 +848,7 @@ class TestFragPipePgAdapterIsDecoy:
         tsv = self._make_tsv(tmp_path, [self._normal_row("DECOY_P12345")])
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         is_decoy_vals = table.column("is_decoy").to_pylist()
         assert all(v is True for v in is_decoy_vals), f"Expected True, got: {is_decoy_vals}"
@@ -866,7 +866,7 @@ class TestFragPipePgAdapterIsDecoy:
         )
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         df = table.to_pandas()
         normal_rows = df[df["anchor_protein"] == "sp|P12345|PROT_HUMAN"]

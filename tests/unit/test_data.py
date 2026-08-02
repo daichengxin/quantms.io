@@ -173,3 +173,149 @@ def test_feature_join_run(feature_parquet, run_parquet):
     df = joined.to_df()
     assert len(df) == 3
     assert "run_accession" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# PG grouped_runs field (refactor: run_file_name scalar -> grouped_runs list<string>)
+# ---------------------------------------------------------------------------
+
+
+def test_pg_schema_grouped_runs_is_list_string():
+    """The pg schema keys on `grouped_runs` typed as list<string>."""
+    from qpx.core.data.pg import PgSchema
+
+    arrow_schema = PgSchema.get_arrow_schema()
+    assert "run_file_name" not in arrow_schema.names
+    field = arrow_schema.field("grouped_runs")
+    assert pa.types.is_list(field.type)
+    assert pa.types.is_string(field.type.value_type)
+    assert tuple(PgSchema._primary_key) == ("anchor_protein", "grouped_runs", "label")
+
+
+def test_pg_grouped_runs_roundtrip(pg_parquet):
+    """A round-tripped pg record exposes `grouped_runs` as a single-element list."""
+    pg = PG.from_file(pg_parquet)
+    df = pg.to_df()
+    assert "grouped_runs" in df.columns
+    assert "run_file_name" not in df.columns
+    row = df[df["anchor_protein"] == "P12345"].iloc[0]
+    assert list(row["grouped_runs"]) == ["run_01"]
+
+
+def test_pg_by_run_filters_via_grouped_runs(pg_parquet):
+    """PG.by_run matches on list membership of the grouped_runs list."""
+    pg = PG.from_file(pg_parquet)
+    assert pg.by_run("run_01").count() == 2
+    assert pg.by_run("run_02").count() == 1
+    assert pg.by_run("missing").count() == 0
+
+
+# ---------------------------------------------------------------------------
+# grouped_runs referential invariant (pg.grouped_runs subset of run.run_file_name)
+# ---------------------------------------------------------------------------
+
+
+def _write_pg_run_dataset(
+    ds_dir,
+    pg_grouped_runs,
+    run_sample_accessions=("SAMPLE_01", "SAMPLE_01"),
+):
+    """Write a minimal pg + run dataset; pg rows use the given grouped_runs lists."""
+    from qpx.writers import DatasetWriter, PgWriter, RunWriter
+    from tests.conftest import (
+        make_dataset_record,
+        make_pg_record,
+        make_run_record,
+    )
+
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    pg_records = []
+    for idx, grouped in enumerate(pg_grouped_runs):
+        rec = make_pg_record(anchor_protein=f"P{idx:05d}")
+        rec["grouped_runs"] = grouped
+        pg_records.append(rec)
+    with PgWriter(ds_dir / "exp.pg.parquet") as w:
+        w.write_batch(pg_records)
+    run_records = [
+        make_run_record(run_accession="assay_01", run_file_name="run_01"),
+        make_run_record(run_accession="assay_02", run_file_name="run_02"),
+    ]
+    for record, sample_accession in zip(
+        run_records,
+        run_sample_accessions,
+        strict=True,
+    ):
+        record["samples"][0]["sample_accession"] = sample_accession
+    with RunWriter(ds_dir / "exp.run.parquet") as w:
+        w.write_batch(run_records)
+    with DatasetWriter(ds_dir / "exp.dataset.parquet") as w:
+        w.write_batch([make_dataset_record()])
+    return ds_dir
+
+
+def test_grouped_runs_dangling_reference_is_error(tmp_path):
+    """A pg.grouped_runs value with no matching run.run_file_name is an ERROR."""
+    from qpx.dataset import Dataset
+
+    ds_dir = _write_pg_run_dataset(
+        tmp_path / "bad",
+        pg_grouped_runs=[["run_01"], ["run_99"]],  # run_99 does not exist
+    )
+    with Dataset(ds_dir) as ds:
+        results = ds.validate(structures=["pg"])
+
+    pg_result = results["pg"]
+    dangling = [i for i in pg_result.issues if i.check == "dangling_grouped_run"]
+    assert len(dangling) == 1
+    assert dangling[0].severity == "error"
+    assert "run_99" in dangling[0].message
+    assert not pg_result.is_valid  # the error must fail validation
+
+
+def test_grouped_runs_all_valid_passes_invariant(tmp_path):
+    """When every grouped_runs value is a real run_file_name, no dangling error."""
+    from qpx.dataset import Dataset
+
+    ds_dir = _write_pg_run_dataset(
+        tmp_path / "good",
+        pg_grouped_runs=[["run_01"], ["run_02"], ["run_01", "run_02"]],
+    )
+    with Dataset(ds_dir) as ds:
+        results = ds.validate(structures=["pg"])
+
+    dangling = [i for i in results["pg"].issues if i.check == "dangling_grouped_run"]
+    assert dangling == []
+
+
+def test_pg_auto_join_run_expands_grouped_runs(tmp_path):
+    """The documented PG-to-Run join expands every grouped run."""
+    from qpx.dataset import Dataset
+
+    ds_dir = _write_pg_run_dataset(
+        tmp_path / "join",
+        pg_grouped_runs=[["run_01", "run_02"]],
+    )
+    with Dataset(ds_dir) as ds:
+        joined = ds.pg.join(ds.run).to_df()
+
+    assert len(joined) == 2
+    assert set(joined["run_file_name"]) == {"run_01", "run_02"}
+
+
+def test_grouped_runs_label_resolving_to_multiple_samples_is_error(tmp_path):
+    """All fractions in one PG unit must resolve a label to the same sample."""
+    from qpx.dataset import Dataset
+
+    ds_dir = _write_pg_run_dataset(
+        tmp_path / "ambiguous",
+        pg_grouped_runs=[["run_01", "run_02"]],
+        run_sample_accessions=("SAMPLE_01", "SAMPLE_02"),
+    )
+    with Dataset(ds_dir) as ds:
+        results = ds.validate(structures=["pg"])
+
+    ambiguous = [issue for issue in results["pg"].issues if issue.check == "ambiguous_grouped_run_sample"]
+    assert len(ambiguous) == 1
+    assert ambiguous[0].severity == "error"
+    assert "2 samples" in ambiguous[0].message
+    assert not results["pg"].is_valid

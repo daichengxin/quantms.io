@@ -14,10 +14,12 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from qpx.converters.base import BaseConverter
+from qpx.converters.channel_labels import fraction_groups_from_sdrf
 from qpx.converters.mztab import load_mztab_sections
-from qpx.converters.utils import safe_float
+from qpx.converters.utils import parse_uniprot_id, safe_float
 from qpx.core.sql import escape_path, sql_build
 from qpx.writers.pg import PgWriter
 
@@ -40,6 +42,10 @@ class QuantmsPgAdapter(BaseConverter):
             )
     """
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._run_to_grouped: dict[str, list[str]] = {}
+
     def convert(
         self,
         mztab_path: str,
@@ -50,6 +56,7 @@ class QuantmsPgAdapter(BaseConverter):
         write_batch_size: int = 10_000,
         topn: Optional[int] = None,
         aggregation: str = "sum",
+        sdrf_path: Optional[str] = None,
     ) -> None:
         """Run the feature.parquet + mzTab proteins -> pg.parquet conversion.
 
@@ -82,17 +89,48 @@ class QuantmsPgAdapter(BaseConverter):
         ).fetchone()[0]
         self.logger.info(f"Loaded {total_features} features")
 
-        # Step 3: Aggregate features per (anchor_protein, run_file_name) while streaming.
-        self.logger.info("Aggregating protein groups from features ...")
-        grouped_sql = sql_build(
-            "SELECT * FROM read_parquet('$path') ORDER BY anchor_protein, run_file_name",
-            path=safe_fp,
-        )
+        # Step 3: Aggregate features per QUANTIFICATION UNIT while streaming.
+        # The unit is the set of raw files that differ only in fraction (same
+        # source/label/bio-rep/tech-rep), derived from the SDRF. Grouping the
+        # fractions here means a protein's per-label quantity aggregates across
+        # its fractions into ONE row with grouped_runs = the fraction files —
+        # rather than one dangling single-fraction row per fraction. Without an
+        # SDRF the unit falls back to the single run (unfractionated behavior).
+        run_to_grouped = fraction_groups_from_sdrf(sdrf_path)
+        self._run_to_grouped = run_to_grouped or {}
+        if run_to_grouped:
+            group_key = {run: "\x1f".join(runs) for run, runs in run_to_grouped.items()}
+            self._conn.register(
+                "run_group",
+                pa.table(
+                    {
+                        "run_file_name": list(group_key.keys()),
+                        "group_key": list(group_key.values()),
+                    }
+                ),
+            )
+            grouped_sql = sql_build(
+                """
+                SELECT f.*, COALESCE(g.group_key, f.run_file_name) AS _group_key
+                FROM read_parquet('$path') f
+                LEFT JOIN run_group g ON f.run_file_name = g.run_file_name
+                ORDER BY f.anchor_protein, _group_key
+                """,
+                path=safe_fp,
+            )
+            self.logger.info("Aggregating protein groups per SDRF quantification unit (fractions grouped) ...")
+        else:
+            grouped_sql = sql_build(
+                "SELECT *, run_file_name AS _group_key FROM read_parquet('$path') ORDER BY anchor_protein, _group_key",
+                path=safe_fp,
+            )
+            self.logger.info("Aggregating protein groups per run (no SDRF: unfractionated assumption) ...")
 
         records_buffer: list[dict] = []
         total_records = 0
         current_anchor: Optional[str] = None
-        current_run: Optional[str] = None
+        current_run: Optional[str] = None  # representative run of the current unit
+        current_gk: Optional[str] = None  # quantification-unit group key
         current_rows: list[dict] = []
         total_groups = 0
         processed_groups = 0
@@ -108,10 +146,11 @@ class QuantmsPgAdapter(BaseConverter):
             if not current_rows or current_anchor is None or current_run is None:
                 return
             total_groups += 1
+            grouped_runs = self._run_to_grouped.get(current_run, [current_run])
             try:
                 rec = self._build_single_pg(
                     anchor_protein=current_anchor,
-                    run_file_name=current_run,
+                    grouped_runs=grouped_runs,
                     features=pd.DataFrame.from_records(current_rows),
                     single_meta=single_meta,
                     group_meta=group_meta,
@@ -162,12 +201,17 @@ class QuantmsPgAdapter(BaseConverter):
                         continue
                     # ----------------------------------------------------
 
-                    if current_anchor is None:
-                        current_anchor, current_run = anchor, run_file
+                    # Group by the quantification unit (_group_key from the SQL:
+                    # the SDRF fraction-group, or the run itself when no SDRF).
+                    gk = row.get("_group_key")
+                    gk = str(gk).strip() if gk is not None and not (isinstance(gk, float) and pd.isna(gk)) else run_file
 
-                    if anchor != current_anchor or run_file != current_run:
+                    if current_gk is None:
+                        current_anchor, current_run, current_gk = anchor, run_file, gk
+
+                    if anchor != current_anchor or gk != current_gk:
                         _flush_current_group()
-                        current_anchor, current_run = anchor, run_file
+                        current_anchor, current_run, current_gk = anchor, run_file, gk
 
                     current_rows.append(row)
 
@@ -335,7 +379,7 @@ class QuantmsPgAdapter(BaseConverter):
     def _build_single_pg(
         self,
         anchor_protein: str,
-        run_file_name: str,
+        grouped_runs: list[str],
         features: pd.DataFrame,
         single_meta: dict[str, dict],
         group_meta: dict[str, dict],
@@ -353,9 +397,9 @@ class QuantmsPgAdapter(BaseConverter):
         pg_accessions = self._normalize_pg_accessions(first_pg)
         if not pg_accessions:
             self.logger.warning(
-                "Empty/invalid pg_accessions for anchor=%s run=%s; falling back to anchor_protein",
+                "Empty/invalid pg_accessions for anchor=%s grouped_runs=%s; falling back to anchor_protein",
                 anchor_protein,
-                run_file_name,
+                grouped_runs,
             )
             pg_accessions = [anchor_protein]
 
@@ -434,7 +478,7 @@ class QuantmsPgAdapter(BaseConverter):
             ),  # Gene symbols serve as both accession and name
             "gg_qvalue": None,
             "anchor_protein": anchor_protein,
-            "run_file_name": run_file_name,
+            "grouped_runs": list(grouped_runs),
             "global_qvalue": global_qvalue,
             "pg_qvalue": global_qvalue,
             "intensities": intensities or None,
@@ -596,17 +640,5 @@ class QuantmsPgAdapter(BaseConverter):
 
     @staticmethod
     def _extract_protein_names(accession: str) -> str:
-        """Extract protein names from UniProt-style accession."""
-        parts_list = []
-        for acc in accession.split(";"):
-            if "|" in acc:
-                pieces = acc.split("|")
-                if len(pieces) >= 3:
-                    parts_list.append(pieces[2])
-                elif len(pieces) >= 2:
-                    parts_list.append(pieces[1])
-                else:
-                    parts_list.append(acc)
-            else:
-                parts_list.append(acc)
-        return ";".join(parts_list)
+        """Extract protein names from a ``;``-joined UniProt-style accession string."""
+        return ";".join(parse_uniprot_id(acc)[1] for acc in accession.split(";"))

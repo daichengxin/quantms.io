@@ -399,31 +399,6 @@ class GeneMappingTransform:
             include_accessions=include_accessions,
         )
 
-    def annotate_dataset_pg(
-        self,
-        dataset,
-        include_accessions: bool = True,
-    ) -> pd.DataFrame:
-        """
-        Annotate a Dataset's PG data with gene names and accessions.
-
-        Args:
-            dataset: A qpx.Dataset with PG data.
-            include_accessions: Whether to include gg_accessions from MyGene.info.
-
-        Returns:
-            Annotated PG DataFrame with gg_names and gg_accessions.
-        """
-        if dataset.pg is None:
-            raise ValueError("Dataset does not contain PG data.")
-
-        pg_df = dataset.pg.to_df()
-        return self.annotate_dataframe(
-            pg_df,
-            protein_col="pg_accessions",
-            include_accessions=include_accessions,
-        )
-
     def write_annotated_features(
         self,
         dataset,
@@ -458,58 +433,3 @@ class GeneMappingTransform:
 
         logger.info(f"Wrote gene-annotated features to {output_path}")
         return output_path
-
-    def write_annotated_pg(
-        self,
-        dataset,
-        output_path: Union[str, Path],
-        include_accessions: bool = True,
-    ) -> Path:
-        """
-        Write gene-annotated PG data to a new Parquet file.
-
-        Uses the PgWriter to produce a schema-validated output file.
-
-        Args:
-            dataset: A qpx.Dataset with PG data.
-            output_path: Path for the output .pg.parquet file.
-            include_accessions: Whether to include gg_accessions from MyGene.info.
-
-        Returns:
-            Path to the written file.
-        """
-        from qpx.writers.pg import PgWriter
-
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        annotated_df = self.annotate_dataset_pg(
-            dataset,
-            include_accessions=include_accessions,
-        )
-
-        with PgWriter(output_path) as writer:
-            writer.write_dataframe(annotated_df)
-
-        logger.info(f"Wrote gene-annotated PG to {output_path}")
-        return output_path
-
-    def get_protein_sequences(self) -> dict[str, str]:
-        """
-        Parse protein sequences from FASTA for position mapping.
-
-        Returns:
-            Dict mapping protein accession to amino acid sequence.
-        """
-        try:
-            from Bio import SeqIO
-        except ImportError:
-            raise ImportError("Biopython is required for FASTA parsing. Install it with: pip install biopython")
-
-        protein_dict: dict[str, str] = {}
-        for record in SeqIO.parse(str(self._fasta_path), "fasta"):
-            parts = record.id.split("|")
-            accession = parts[1] if len(parts) >= 2 else record.id
-            protein_dict[accession] = str(record.seq)
-
-        return protein_dict

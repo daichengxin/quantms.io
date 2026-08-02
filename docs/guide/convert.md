@@ -103,6 +103,7 @@ The `convert` command group provides converters for multiple proteomics software
 ## Available Commands
 
 - [quantms](#quantms) - Convert QuantMS mzTab output to QPX format
+- [openms-consensus](#openms-consensus) - Convert an OpenMS consensusXML (+ SDRF) to QPX (interim; pg identification-only)
 - [diann](#diann) - Convert DIA-NN report to QPX format
 - [spectronaut](#spectronaut) - Convert Spectronaut report to QPX format
 - [maxquant](#maxquant) - Convert MaxQuant output to QPX format
@@ -659,6 +660,7 @@ Convert CPTAC CDAP `.psm` files to QPX format.
 
 ```python exec="1" html="1" session="doc_utils"
 from qpx.cli.convert import convert_cdap_cmd
+
 print(generate_description(convert_cdap_cmd))
 ```
 
@@ -666,6 +668,7 @@ print(generate_description(convert_cdap_cmd))
 
 ```python exec="1" html="1" session="doc_utils"
 from qpx.cli.convert import convert_cdap_cmd
+
 print(generate_params_table(convert_cdap_cmd))
 ```
 
@@ -675,7 +678,8 @@ print(generate_params_table(convert_cdap_cmd))
 
 ```python exec="1" html="1" session="doc_utils"
 from qpx.cli.convert import convert_cdap_cmd
-print(generate_example(convert_cdap_cmd, 'Convert one CPTAC CDAP study directory with default settings:'))
+
+print(generate_example(convert_cdap_cmd, "Convert one CPTAC CDAP study directory with default settings:"))
 ```
 
 #### Select Output Structures {#cdap-example-structures}
@@ -716,6 +720,7 @@ Convert a directory of mzML spectra to a QPX `mz.parquet` (full spectra).
 
 ```python exec="1" html="1" session="doc_utils"
 from qpx.cli.convert import convert_mz_cmd
+
 print(generate_description(convert_mz_cmd))
 ```
 
@@ -723,6 +728,7 @@ print(generate_description(convert_mz_cmd))
 
 ```python exec="1" html="1" session="doc_utils"
 from qpx.cli.convert import convert_mz_cmd
+
 print(generate_params_table(convert_mz_cmd))
 ```
 
@@ -805,6 +811,52 @@ print(generate_example(convert_sdrf_cmd, "Convert SDRF metadata with default set
 - Ensure SDRF file follows the PRIDE SDRF specifications
 - Use verbose mode to diagnose parsing issues
 - The converter automatically maps SDRF characteristics to QPX ontology terms
+
+---
+
+## openms-consensus
+
+### Description {#openms-consensus-description}
+
+Convert an OpenMS `.consensusXML` (plus its SDRF) directly to QPX. This is the
+**interim quantms production path** while OpenMS `-out_qpx` is not yet emitting
+QPX format 1.1. The consensusXML carries per-run peptide-feature intensities,
+PSMs, and the protein-inference graph; the SDRF supplies sample/label/fraction
+metadata and the `grouped_runs` quantification units.
+
+!!! warning "Protein intensity is not emitted (interim)"
+    The consensusXML has no protein-level abundance — that quantity lived only in
+    the mzTab (`protein_abundance_assay`, from ProteinQuantifier). So the **pg view
+    is identification-only**: `label` and `intensity` are null until OpenMS
+    `-out_qpx` provides the authoritative protein quant. The **feature view keeps**
+    its per-run/channel peptide intensities (read directly from the consensusXML).
+
+### Parameters {#openms-consensus-parameters}
+
+| Option | Required | Description |
+| ------ | -------- | ----------- |
+| `--consensusxml` | yes | OpenMS `.consensusXML` file. |
+| `--sdrf-file` | no | SDRF metadata (run/sample views + `grouped_runs` fraction grouping). |
+| `--output-folder` | yes | Output directory for the QPX views. |
+| `--output-prefix` | no | Prefix for output file names (default `openms`). |
+| `--structures` | no | Comma-separated views (default `feature,psm,pg,run,sample`; `run`/`sample` require `--sdrf-file`). |
+
+### Usage Examples {#openms-consensus-examples}
+
+```bash
+qpxc convert openms-consensus \
+  --consensusxml results.consensusXML \
+  --sdrf-file experiment.sdrf.tsv \
+  --output-folder ./qpx_output \
+  --output-prefix PXD001819
+```
+
+### Output Files {#openms-consensus-output}
+
+- `<prefix>.feature.parquet` — one row per `(peptidoform, charge, run, rt)` with per-run/channel intensities.
+- `<prefix>.psm.parquet` — one row per spectrum match (scan, PEP, q-value, decoy).
+- `<prefix>.pg.parquet` — protein groups (`pg_accessions`, `grouped_runs`, peptide/feature counts, `global_qvalue`, decoy, genes); **no `intensity`** (interim, identification-only).
+- `<prefix>.run.parquet`, `<prefix>.sample.parquet` — from the SDRF (when provided).
 
 ---
 

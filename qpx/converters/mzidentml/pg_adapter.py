@@ -165,7 +165,7 @@ class MzIdentMLPgAdapter(BaseConverter):
             "gg_names": None,
             "gg_qvalue": None,
             "anchor_protein": anchor_protein,
-            "run_file_name": run_file_name,
+            "grouped_runs": [run_file_name],
             "global_qvalue": None,
             "pg_qvalue": pg_qvalue,
             "intensities": None,

@@ -142,6 +142,7 @@ class QuantMSConverter(BaseOrchestrator):
                         mztab_path=self.mztab_path,
                         feature_path=str(feature_path),
                         output_path=str(output_folder / f"{output_prefix}.pg.parquet"),
+                        sdrf_path=self.sdrf_file,
                     )
                     ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=PG))
                     self._resolved_mappings_by_view[PG] = adapter.get_resolved_columns()

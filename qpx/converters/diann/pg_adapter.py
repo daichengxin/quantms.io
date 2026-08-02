@@ -35,7 +35,14 @@ _PG_EXTRA_COLS = [
     ('"Proteotypic"', "proteotypic"),
     ('"Stripped.Sequence"', "stripped_sequence"),
     ('"Precursor.Id"', "precursor_id"),
+    # Raw protein-group quantity (label-free primary intensity). Kept distinct
+    # from PG.MaxLFQ (additional_intensities) so the primary value is not the
+    # MaxLFQ matrix number duplicated under the "LFQ" label.
+    ('"PG.Quantity"', "pg_quantity_raw"),
 ]
+
+# DIA-NN decoy protein-accession prefixes (mirrors feature_adapter is_decoy logic).
+_DECOY_PREFIXES = ("DECOY_", "decoy_", "rev_", "REV_")
 
 
 class DiannPgAdapter(DiaNNBaseAdapter):
@@ -78,29 +85,27 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         pg_matrix = self._load_pg_matrix(pg_matrix_path)
         pg_matrix_indexed = pg_matrix.set_index("pg_accessions")
 
-        # Step 3: Load SDRF mapping
-        sample_map: dict[str, str] = {}
-        if sdrf_path:
-            from qpx.core.sdrf import SDRFHandler
-
-            handler = SDRFHandler(sdrf_path)
-            sample_map = handler.get_sample_map_run()
-
-        # Step 4: Cache report columns and resolve mappings (once, not per batch)
+        # Step 3: Cache report columns and resolve mappings (once, not per batch)
         report_cols = {
             c[0]
             for c in self._conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='report'").fetchall()
         }
         self._resolved_pg = resolve_columns(get_field_mappings("diann", "pg"), report_cols)
+        channel_col = self._register_channel_labels(report_cols, sdrf_path)
 
-        # Step 5: Get unique runs and process in batches
+        # Step 4: Get unique runs and process in batches
         runs = self._get_unique_runs()
 
         with PgWriter(output_path, creator=creator, compression=self._compression) as writer:
             for i in range(0, len(runs), file_num):
                 batch_runs = runs[i : i + file_num]
                 self.logger.info(f"Processing PG runs {i + 1}-{min(i + file_num, len(runs))} of {len(runs)}")
-                records = self._process_batch(batch_runs, pg_matrix_indexed, sample_map, report_cols)
+                records = self._process_batch(
+                    batch_runs,
+                    pg_matrix_indexed,
+                    report_cols,
+                    channel_col,
+                )
                 if records:
                     writer.write_batch(records)
 
@@ -156,8 +161,8 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         self,
         runs: list[str],
         pg_matrix_indexed: pd.DataFrame,
-        sample_map: dict[str, str],
         actual_report_cols: set[str] | None = None,
+        channel_col: str | None = None,
     ) -> list[dict]:
         """Process a batch of runs for PG quantification."""
         records: list[dict] = []
@@ -182,10 +187,12 @@ class DiannPgAdapter(DiaNNBaseAdapter):
             raw_name = src_col.strip('"')
             if raw_name in actual_report_cols:
                 select_parts.append(f'"{raw_name}" AS {alias}')
+        if channel_col:
+            select_parts.append("cl.canonical_label AS channel_label")
 
         # Push run_file_name extension stripping into SQL
         run_col = r["run_file_name"]
-        select_parts.append(f"regexp_replace(\"{run_col}\", '\\.(mzML|raw|d|wiff|htrms)$', '') AS run_file_name_clean")
+        select_parts.append(f"regexp_replace(\"{run_col}\", '(?i)\\.(mzML|raw|d|wiff|htrms)$', '') AS run_file_name_clean")
 
         select_clause = ",\n                ".join(select_parts)
 
@@ -193,15 +200,26 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         pg_col = r["pg_accessions"]
 
         placeholders = ", ".join(["?" for _ in runs])
+        channel_join = ""
+        if channel_col:
+            channel_join = sql_build(
+                """
+                JOIN diann_channel_labels cl
+                  ON CAST(report.$channel_col AS VARCHAR) = cl.channel_value
+                """,
+                channel_col=validate_identifier(channel_col),
+            )
         stmt = sql_build(
             """
             SELECT
                 $select_clause
             FROM report
+            $channel_join
             WHERE $run_col IN ($placeholders)
               AND $pg_col IS NOT NULL
             """,
             select_clause=select_clause,
+            channel_join=channel_join,
             run_col=validate_identifier(run_col),
             placeholders=placeholders,
             pg_col=validate_identifier(pg_col),
@@ -229,7 +247,6 @@ class DiannPgAdapter(DiaNNBaseAdapter):
                 run_file_name=str(ref),
                 group=group,
                 pg_matrix_indexed=pg_matrix_indexed,
-                sample_map=sample_map,
             )
             if rec:
                 records.append(rec)
@@ -244,7 +261,6 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         run_file_name: str,
         group: pd.DataFrame,
         pg_matrix_indexed: pd.DataFrame,
-        sample_map: dict[str, str],
     ) -> Optional[dict]:
         """Build a single PG record."""
 
@@ -254,6 +270,11 @@ class DiannPgAdapter(DiaNNBaseAdapter):
 
         anchor_protein = pg_accessions[0] if pg_accessions else ""
         global_qvalue = safe_float(group["global_qvalue"].iloc[0])
+
+        # is_decoy: a PG made up ENTIRELY of decoy proteins is a decoy group.
+        # Mirrors the feature adapter's prefix-based derivation (DIA-NN carries no
+        # per-PG decoy flag in report.tsv, so the accession prefix is the evidence).
+        is_decoy = bool(pg_accessions) and all(acc.startswith(_DECOY_PREFIXES) for acc in pg_accessions)
 
         # Peptide/feature counts
         total_sequences = group["stripped_sequence"].nunique()
@@ -272,22 +293,54 @@ class DiannPgAdapter(DiaNNBaseAdapter):
             except KeyError:
                 pass
 
-        # Intensities (new schema: {label, intensity})
-        label = "LFQ"
-        intensities = [{"label": label, "intensity": float(pg_quantity)}]
+        # Prefer raw PG.Quantity for the primary value. Reports that omit it use
+        # MaxLFQ as a compatibility fallback; the experimental channel remains
+        # the label, while "maxlfq" is recorded as the algorithm name in
+        # additional_intensities.
+        def first_quantity(frame: pd.DataFrame, column: str) -> float | None:
+            if column not in frame.columns:
+                return None
+            for value in frame[column]:
+                quantity = safe_float(value)
+                if quantity is not None:
+                    return quantity
+            return None
 
-        # Additional intensities pre-computed by DIA-NN (LFQ)
-        lfq_val = safe_float(group["lfq"].iloc[0])
-        additional_intensities = None
-        if lfq_val is not None:
-            additional_intensities = [
-                {
-                    "label": label,
-                    "intensities": [
-                        {"intensity_name": "lfq", "intensity_value": float(lfq_val)},
-                    ],
-                }
-            ]
+        if "channel_label" in group.columns:
+            quant_groups = list(group.groupby("channel_label", sort=True))
+        else:
+            quant_groups = [("LFQ", group)]
+
+        intensities = []
+        additional_intensities = []
+        for label, channel_group in quant_groups:
+            raw_quantity = first_quantity(channel_group, "pg_quantity_raw")
+            maxlfq_val = first_quantity(channel_group, "lfq")
+            if maxlfq_val is None and "channel_label" not in group.columns:
+                maxlfq_val = pg_quantity or None
+
+            primary_quantity = raw_quantity
+            if primary_quantity is None:
+                primary_quantity = maxlfq_val
+            if primary_quantity is not None:
+                intensities.append(
+                    {
+                        "label": str(label),
+                        "intensity": float(primary_quantity),
+                    }
+                )
+            if maxlfq_val is not None and raw_quantity is not None:
+                additional_intensities.append(
+                    {
+                        "label": str(label),
+                        "intensities": [
+                            {
+                                "intensity_name": "maxlfq",
+                                "intensity_value": float(maxlfq_val),
+                            },
+                        ],
+                    }
+                )
 
         # Peptides per protein
         peptide_count = max(total_sequences, 1)
@@ -307,12 +360,12 @@ class DiannPgAdapter(DiaNNBaseAdapter):
             "gg_names": gg_accessions,  # Gene symbols serve as both accession and name
             "gg_qvalue": (safe_float(group["gg_qvalue"].iloc[0]) if "gg_qvalue" in group.columns else None),
             "anchor_protein": anchor_protein,
-            "run_file_name": run_file_name,
+            "grouped_runs": [run_file_name],
             "global_qvalue": global_qvalue,
             "pg_qvalue": safe_float(group["qvalue"].iloc[0]),
-            "intensities": intensities,
-            "additional_intensities": additional_intensities,
-            "is_decoy": False,
+            "intensities": intensities or None,
+            "additional_intensities": additional_intensities or None,
+            "is_decoy": is_decoy,
             "contaminant": None,
             "peptides": peptides,
             "peptide_counts": {

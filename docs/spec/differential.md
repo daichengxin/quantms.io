@@ -141,7 +141,7 @@ adata.uns["de_results"] = {
 }
 
 # Add file-level metadata
-adata.uns["qpx_version"] = "2.0"
+adata.uns["qpx_version"] = "1.1"
 adata.uns["file_type"] = "differential_expression"
 adata.uns["statistical_method"] = "msstats_group_comparison"
 adata.uns["correction_method"] = "BH"

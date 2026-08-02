@@ -6,6 +6,7 @@ and a complete dataset directory with feature, pg, sample, and run parquets.
 
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
 from qpx.writers import (
@@ -22,6 +23,85 @@ from qpx.writers import (
 # Stable root paths for use by tests in subdirectories
 TESTS_ROOT = Path(__file__).parent
 PROJECT_ROOT = TESTS_ROOT.parent
+
+
+# ---------------------------------------------------------------------------
+# Shared schema/validation helpers (hoisted from unit tests)
+# ---------------------------------------------------------------------------
+
+
+def _placeholder(arrow_type):
+    """A non-null value of the given Arrow type, for filling required columns."""
+    if pa.types.is_boolean(arrow_type):
+        return False
+    if pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type):
+        return 0
+    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+        return "x"
+    if pa.types.is_list(arrow_type):
+        return []
+    return None
+
+
+def _valid_arrays(fields, n=1):
+    """Build column arrays that satisfy nullability: non-nullable columns get a
+    real placeholder value, nullable columns get nulls."""
+    out = {}
+    for f in fields:
+        if f.nullable:
+            out[f.name] = pa.nulls(n, type=f.type)
+        else:
+            out[f.name] = pa.array([_placeholder(f.type)] * n, type=f.type)
+    return out
+
+
+def assert_pg_table_wellformed(table):
+    """Assert a converter-produced pg table has well-formed grouped_runs,
+    pg_accessions, anchor_protein, and flat label/intensity columns.
+
+    Consolidates the per-converter grouped_runs / pg_accessions /
+    anchor_protein / intensity structural checks into one assertion. Since QPX
+    1.1 the pg view is flattened (scalar ``label`` + ``intensity``, one row per
+    label); identification-only rows carry null ``label``/``intensity``.
+    """
+    for gr in table.column("grouped_runs").to_pylist():
+        assert isinstance(gr, list) and gr and all(isinstance(n, str) and n for n in gr)
+    for accs in table.column("pg_accessions").to_pylist():
+        assert accs and all(isinstance(a, str) and a for a in accs)
+    for anchor in table.column("anchor_protein").to_pylist():
+        assert isinstance(anchor, str) and anchor
+    assert "label" in table.column_names and "intensity" in table.column_names
+    for lbl in table.column("label").to_pylist():
+        if lbl is not None:
+            assert isinstance(lbl, str) and lbl
+
+
+def write_lfq_consensusxml(path, maps, trailing=""):
+    """Write a minimal LFQ consensusXML whose maps carry design UserParams.
+
+    ``maps`` is a list of ``(id, name, fraction_group, fraction, sample_name)``.
+    A ``None`` value for any of fraction_group/fraction/sample_name omits that
+    UserParam. ``trailing`` appends raw text after </mapList> (to exercise the
+    parser's early stop).
+    """
+    entries = []
+    for map_id, name, fgroup, fraction, sample in maps:
+        params = "".join(
+            f'<UserParam type="{typ}" name="{pname}" value="{val}"/>'
+            for pname, val, typ in (
+                ("fraction_group", fgroup, "int"),
+                ("fraction", fraction, "int"),
+                ("sample_name", sample, "string"),
+            )
+            if val is not None
+        )
+        entries.append(f'<map id="{map_id}" name="{name}" label="label-free">{params}</map>')
+    body = "".join(entries)
+    path.write_text(
+        f'<consensusXML><mapList count="{len(maps)}">{body}</mapList>{trailing}',
+        encoding="utf-8",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Test record factories -- produce minimal valid dicts for each schema
@@ -132,7 +212,7 @@ def make_pg_record(
         "gg_accessions": None,
         "gg_names": ["GENE1"],
         "anchor_protein": anchor_protein,
-        "run_file_name": run_file_name,
+        "grouped_runs": [run_file_name],
         "global_qvalue": 0.005,
         "pg_qvalue": None,
         "intensities": intensities,

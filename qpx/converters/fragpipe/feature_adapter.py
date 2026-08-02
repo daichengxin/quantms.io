@@ -19,7 +19,7 @@ import pandas as pd
 from qpx.converters.base import BaseConverter, resolve_columns
 from qpx.converters.fragpipe.constants import to_modifications, to_proforma
 from qpx.converters.mappings import get_field_mappings
-from qpx.converters.utils import safe_float
+from qpx.converters.utils import parse_uniprot_id, safe_float
 from qpx.core.sql import escape_path, sql_build
 from qpx.writers.feature import FeatureWriter
 
@@ -27,15 +27,6 @@ logger = logging.getLogger(__name__)
 
 # Derive field map from central YAML mappings
 _FEATURE_MAP = get_field_mappings("fragpipe", "feature")
-
-
-def _extract_anchor_protein(protein_str: str) -> str:
-    """Extract the first UniProt accession from a FragPipe Protein field.
-
-    Handles formats like ``sp|P12345|PROT_HUMAN`` or plain accession ``P12345``.
-    """
-    pg_proteins = _extract_pg_proteins(protein_str, start=None, end=None)
-    return pg_proteins[0]["accession"] if pg_proteins else ""
 
 
 def _extract_pg_proteins(
@@ -56,7 +47,7 @@ def _extract_pg_proteins(
         part = part.strip()
         if not part:
             continue
-        acc = part.split("|")[1] if "|" in part and len(part.split("|")) >= 2 else part
+        acc = parse_uniprot_id(part)[0]
         if acc:
             result.append(
                 {

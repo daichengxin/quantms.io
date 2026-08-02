@@ -20,6 +20,41 @@ def safe_float(val) -> Optional[float]:
 
 
 # ------------------------------------------------------------------
+# UniProt accession helpers
+# ------------------------------------------------------------------
+
+
+def parse_uniprot_id(entry: str) -> tuple[str, str]:
+    """Split a UniProt-style ``db|ACCESSION|NAME`` id into ``(accession, name)``.
+
+    ``sp|P12345|PROT_HUMAN`` -> ``("P12345", "PROT_HUMAN")``. With only two
+    pipe-fields the accession doubles as the name; with none the whole ``entry``
+    is both. Shared by the FragPipe/quantms protein-field parsers.
+    """
+    parts = entry.split("|")
+    if len(parts) >= 3:
+        return parts[1], parts[2]
+    if len(parts) == 2:
+        return parts[1], parts[1]
+    return entry, entry
+
+
+def strip_uniprot_prefix(accession: str) -> str:
+    """Strip a leading ``sp|``/``tr|`` UniProt db prefix, returning the accession.
+
+    ``sp|P55011|S12A2_HUMAN`` -> ``P55011``; ``tr|A0A..|..._HUMAN`` -> ``A0A..``;
+    ids without that prefix (bare accessions, ``CON__``/``REV__`` decoys) are
+    returned unchanged. Used by the MaxQuant adapters, whose FASTA prefixing is
+    the only case that should be stripped.
+    """
+    if accession and accession.startswith(("sp|", "tr|")):
+        parts = accession.split("|")
+        if len(parts) >= 2:
+            return parts[1]
+    return accession
+
+
+# ------------------------------------------------------------------
 # mzTab spectra_ref helpers
 # ------------------------------------------------------------------
 
@@ -62,16 +97,6 @@ def resolve_run_file(spectra_ref: str, ms_runs: dict[int, str]) -> Optional[str]
 # ------------------------------------------------------------------
 
 
-def cv_column_name(cv_term: str, suffix: str) -> str:
-    """Build the mzTab opt_global column name for a CV term.
-
-    Returns the lowercase variant.  Use :func:`cv_column_names` for both
-    variants.
-    """
-    cv_code = cv_term.split(":")[1]
-    return f"opt_global_cv_ms:{cv_code}_{suffix}"
-
-
 def cv_column_names(cv_term: str, suffix: str) -> tuple[str, str]:
     """Return (lowercase, uppercase) opt_global column names for a CV term."""
     cv_code = cv_term.split(":")[1]
@@ -95,10 +120,3 @@ def get_cv_value(row: dict, cv_term: str, suffix: str, default=None):
 def mq_flag_to_bool(val) -> bool:
     """Convert MaxQuant '+' flag to boolean."""
     return str(val).strip() == "+"
-
-
-def clean_peptidoform(peptidoform: str) -> str:
-    """Strip leading/trailing underscores from a MaxQuant peptidoform."""
-    if not isinstance(peptidoform, str):
-        return ""
-    return peptidoform.strip("_")

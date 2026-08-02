@@ -213,7 +213,7 @@ Sample metadata fields map to biological ontologies. These mappings are critical
 | `gg_accessions` | --- | --- | Gene group accessions |
 | `gg_names` | --- | --- | Gene names |
 | `anchor_protein` | anchor protein | `MS:1001591` | Representative protein of the group |
-| `run_file_name` | --- | --- | Raw file containing this protein group |
+| `grouped_runs` | --- | --- | Raw files aggregated into this protein-group quantification unit |
 | `peptide_counts` | --- | --- | Peptide sequence counts (unique + total) |
 | `feature_counts` | --- | --- | Feature counts (unique + total) |
 | `global_qvalue` | protein-level global FDR | `MS:1001214` | Global q-value at the experiment level |
@@ -280,7 +280,8 @@ Fields defined by QPX without standardized ontology terms.
 
 | Field | View(s) | Description |
 |---|---|---|
-| `run_file_name` | PSM, Feature, PG | Spectrum/run file name without path or extension |
+| `run_file_name` | PSM, Feature | Spectrum/run file name without path or extension |
+| `grouped_runs` | PG | Raw files aggregated into a protein-group quantification unit |
 | `pg_accessions` | Feature, PG | Protein group accessions |
 | `pg_names` | PG | Descriptive protein names |
 | `gg_accessions` | PG | Gene group accessions |

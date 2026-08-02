@@ -1,7 +1,7 @@
 name: pg
 file_type: pg_file
-primary_key: [anchor_protein, run_file_name]
-doc: "Protein groups with per-run quantification"
+primary_key: [anchor_protein, grouped_runs, label]
+doc: "Protein groups with per-quantification-unit quantification (one row per label; label/intensity flattened from the old intensities list)"
 
 fields:
   # Protein group identity
@@ -27,11 +27,11 @@ fields:
     required: true
     doc: "Anchor/leading protein of the group"
 
-  # Run-level context
-  run_file_name:
-    type: string
+  # Quantification-unit context
+  grouped_runs:
+    type: "list<string>"
     required: true
-    doc: "Raw file name"
+    doc: "Raw files grouped into this quantification unit (fractions aggregated together; single-element for unfractionated/DIA)"
 
   # Quality metrics
   global_qvalue:
@@ -41,13 +41,19 @@ fields:
     type: float64
     doc: "Protein group q-value at run level"
 
-  # Quantification
-  intensities:
-    type: "list<intensity>"
-    doc: "Primary intensity per label"
+  # Quantification (flattened: one row per label. label/intensity are null for
+  # identification-only protein groups that carry no quantity, e.g. mzIdentML.)
+  label:
+    type: string
+    nullable: true
+    doc: "Channel/label of this quantification; null for identification-only groups (no intensity). Part of the primary key."
+  intensity:
+    type: float32
+    nullable: true
+    doc: "Primary intensity for this label; null for identification-only groups"
   additional_intensities:
     type: "list<additional_intensity>"
-    doc: "Tool-provided intensities (normalized, LFQ, iBAQ) read from upstream output"
+    doc: "Tool-provided intensities (normalized, LFQ, iBAQ) for this row's label, read from upstream output"
 
   # Flags
   is_decoy:

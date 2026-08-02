@@ -6,6 +6,7 @@ import pytest
 
 from qpx.core.data import FeatureSchema, PsmSchema
 from qpx.core.parquet_io import parquet_row_count, read_parquet_metadata
+from qpx.version import QPX_SPEC_VERSION
 from qpx.writers import (
     DatasetWriter,
     FeatureWriter,
@@ -58,7 +59,10 @@ def test_writer_footer_metadata(tmp_path):
     meta = read_parquet_metadata(path)
     assert meta["file_type"] == "feature_file"
     assert meta["creator"] == "test_suite"
-    assert "qpx_version" in meta
+    # qpx_version is the on-disk SPEC version, not the package build version.
+    assert meta["qpx_version"] == QPX_SPEC_VERSION == "1.1"
+    # The package build version is stamped separately for provenance.
+    assert "writer_version" in meta
     assert "uuid" in meta
     assert "creation_date" in meta
     assert meta["software_provider"] == "my_tool"

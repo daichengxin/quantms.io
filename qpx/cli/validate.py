@@ -96,7 +96,7 @@ def _validate_single_file(file_path: Path):
     for _, (cls, suffix) in Dataset._STRUCTURE_REGISTRY.items():
         if file_path.name.endswith(suffix):
             struct = cls.from_file(file_path)
-            result = struct.validate()
+            result = struct.validate(strict=True)
             _print_result(result)
             sys.exit(0 if result.is_valid else 1)
 
@@ -111,7 +111,7 @@ def _validate_dataset(dataset_path: Path, structures: list[str] | None):
     import qpx
 
     with qpx.open_dataset(dataset_path) as ds:
-        results = ds.validate(structures=structures)
+        results = ds.validate(structures=structures, strict=True)
 
     all_valid = True
     for _, result in results.items():

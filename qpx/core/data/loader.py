@@ -138,9 +138,3 @@ def load_schema(name: str) -> ViewSchema:
         doc=spec.get("doc", ""),
         extra_columns=spec.get("extra_columns", False),
     )
-
-
-def load_yaml_schema(yaml_path: str | Path) -> dict:
-    """Load a raw YAML schema spec file (for validation/inspection)."""
-    with open(yaml_path) as f:
-        return yaml.safe_load(f)

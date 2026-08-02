@@ -84,6 +84,31 @@ class TestPartitionedWriting:
         assert "run_file_name=run_01" in dirs
         assert "run_file_name=run_02" in dirs
 
+    def test_write_partitioned_pg_raises_actionable_error(self, tmp_path):
+        """A 1.1 pg table (grouped_runs list, no run_file_name) is not Hive-
+        partitionable — the default path must raise a clear ValueError, not a
+        raw KeyError (regression for bigbio/qpx#220 review)."""
+        import pytest
+
+        from qpx.writers.base import BaseWriter
+
+        pg = pa.table(
+            {
+                "anchor_protein": ["P1"],
+                "grouped_runs": [["r1", "r2"]],
+                "intensities": [[{"label": "LFQ", "intensity": 1.0}]],
+            }
+        )
+        # Default path (would default to the missing run_file_name).
+        with pytest.raises(ValueError, match="not Hive-partitionable"):
+            BaseWriter.write_partitioned(pg, tmp_path / "pg")
+        # Explicitly partitioning on the list column is also rejected clearly.
+        with pytest.raises(ValueError, match="non-scalar|not partitionable"):
+            BaseWriter.write_partitioned(pg, tmp_path / "pg2", ["grouped_runs"])
+        # A missing scalar column also gives an actionable message, not KeyError.
+        with pytest.raises(ValueError, match="missing column"):
+            BaseWriter.write_partitioned(pg, tmp_path / "pg3", ["nope"])
+
     def test_write_partitioned_data_readable(self, tmp_path):
         from qpx.core.engine import DuckDBEngine
         from qpx.writers.base import BaseWriter

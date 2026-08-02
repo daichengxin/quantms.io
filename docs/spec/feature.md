@@ -4,8 +4,15 @@ The feature view captures quantified peptide information at the MS run level. Ea
 
 For a de novo workflow without a database search, set `is_decoy` to `false` and
 record a `de_novo_peptide_sequencing` step in `provenance.parquet`. Protein-mapping
-fields may be null. When `anchor_protein` is null, a feature is identified by
-`sequence`, `charge`, and `run_file_name`.
+fields may be null; `anchor_protein` is an annotation and is not part of a feature's
+identity. A feature is a physical chromatographic peak, uniquely identified by its
+primary key `[peptidoform, charge, run_file_name, rt]` — the apex `rt` resolves the
+distinct peaks that a single peptidoform+charge produces within one run (isomers,
+split peaks, repeated elution). `rt` should be finite and populated wherever the
+producer reports per-feature retention time (DIA-NN, OpenMS/quantms, TMT); some
+tools (e.g. FragPipe `combined_ion`) do not, leaving `rt` null — for those the key
+degenerates and uniqueness is not guaranteed. The key is meaningful within a file
+only — never join across files or tools on `rt`.
 
 ## Use Cases
 
@@ -73,7 +80,7 @@ Each entry in `pg_positions` contains:
 | `end` | 1-based end position of the peptide in the protein sequence (inclusive) | `int` |
 
 !!! note "Gene and protein inference data"
-    Gene accessions, gene names, and unique peptide indicators are optionally included in the feature file for convenience. Protein-level scores are stored in the [Protein Group View](pg.md). For the complete protein-level perspective with aggregated intensities and peptide counts, join on `pg_accessions` + `run_file_name` with the PG view.
+    Gene accessions, gene names, and unique peptide indicators are optionally included in the feature file for convenience. Protein-level scores are stored in the [Protein Group View](pg.md). For the complete protein-level perspective with aggregated intensities and peptide counts, join the protein mapping (for example, `anchor_protein`) and require `feature.run_file_name` to be a member of `pg.grouped_runs`.
 
 !!! info "Optional vs nullable"
     `pg_global_qvalue` is **optional** — the column may be absent from the file entirely if the search engine does not provide a protein group q-value. When present, individual values may be null.

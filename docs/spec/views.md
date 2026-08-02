@@ -35,23 +35,28 @@ API views are computed by joining and aggregating the primary QPX data. For exam
 
 1. Joining `pg.parquet` with `run.parquet` to resolve sample-channel mappings.
 2. Selecting the `anchor_protein` as the representative for each protein group.
-3. Extracting intensity values per sample from `intensities`.
+3. Reading the per-label intensity directly from the flattened scalar `pg.intensity` (since QPX 1.1 the PG view has one row per label — there is no `intensities` list).
 4. Optionally aggregating peptide/PSM counts, scores, or gene annotations.
 
 ```sql
 -- Example: deriving protein abundance per sample from pg + run
-SELECT pg.anchor_protein AS protein_accession,
+SELECT DISTINCT
+       pg.anchor_protein AS protein_accession,
        rs.sample_accession,
-       i.intensity AS abundance,
+       pg.label,
+       pg.intensity AS abundance,
        pg.global_qvalue,
        pg.gg_names
-FROM 'PXD014414.pg.parquet' pg,
-     'PXD014414.run.parquet' r,
-     UNNEST(r.samples) AS rs,
-     UNNEST(pg.intensities) AS i
-WHERE pg.run_file_name = r.run_file_name
-  AND i.label = rs.label;
+FROM 'PXD014414.pg.parquet' pg
+CROSS JOIN UNNEST(pg.grouped_runs) AS grouped(run_file_name)
+JOIN 'PXD014414.run.parquet' r USING (run_file_name)
+CROSS JOIN UNNEST(r.samples) AS samples(rs)
+WHERE pg.label = rs.label;   -- flattened: scalar pg.label/pg.intensity, no intensities list
 ```
+
+`DISTINCT` is required because several member runs can be fractions of the
+same sample. The protein-group quantity is already aggregated across those
+fractions and must be returned only once per sample and label.
 
 **Peptide-level data** can be derived from the Feature view by:
 
@@ -74,7 +79,7 @@ FROM 'PXD014414.feature.parquet' f,
 WHERE f.run_file_name = r.run_file_name
   AND i.label = rs.label
   AND f.anchor_protein = pg.anchor_protein
-  AND f.run_file_name = pg.run_file_name;
+  AND list_contains(pg.grouped_runs, f.run_file_name);
 ```
 
 ## Relationship to primary views
@@ -108,8 +113,8 @@ The Python API provides several pre-built views accessible as properties on the 
 | Run Summary | `ds.run_summary` | `.summary()` | Per-run statistics (cached) |
 | Modification View | `ds.modification_view` | `.frequency()` | Modification frequency across PSMs |
 | QC View | `ds.qc_view` | `.metrics()` | Dataset-wide quality control metrics |
-| Protein View | `ds.protein_view` | `.abundance()` | Protein abundance per sample (joins PG + Run) |
-| Peptide View | `ds.peptide_view` | `.abundance()` | Peptide abundance per sample (joins Feature + Run) |
+| Protein View | `ds.protein_view` | `.intensity()` | Protein abundance per sample (joins PG + Run) |
+| Peptide View | `ds.peptide_view` | `.intensity()` | Peptide abundance per sample (joins Feature + Run) |
 
 ### Plotting
 

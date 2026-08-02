@@ -137,35 +137,6 @@ class BaseConverter(ABC):
         ).fetchall()
         return len(rows) > 0
 
-    def _load_tsv(self, table_name: str, path: str, **kwargs) -> None:
-        """Load a TSV file into a DuckDB table.
-
-        Args:
-            table_name: Target table name in DuckDB.
-            path: Path to the TSV file.
-            **kwargs: Extra ``read_csv_auto`` options (e.g. ``columns``).
-        """
-        opts = ", delim='\\t', header=true, auto_detect=true"
-        for k, v in kwargs.items():
-            if isinstance(v, str):
-                opts += f", {k}='{v}'"
-            elif isinstance(v, list):
-                cols = ", ".join(f"'{c}'" for c in v)
-                opts += f", {k}=[{cols}]"
-            else:
-                opts += f", {k}={v}"
-        safe = escape_path(path)
-        tbl = validate_table(table_name)
-        stmt = sql_build(
-            "CREATE OR REPLACE TABLE $tbl AS SELECT * FROM read_csv_auto('$path'$opts)",
-            tbl=tbl,
-            path=safe,
-            opts=opts,
-        )
-        self._conn.execute(stmt)
-        count = self._conn.execute(sql_build("SELECT COUNT(*) FROM $tbl", tbl=tbl)).fetchone()[0]
-        self.logger.info(f"Loaded {count:,} rows into '{table_name}' from {path}")
-
     def _load_parquet(self, table_name: str, path: str) -> None:
         """Load a Parquet file into a DuckDB table."""
         safe = escape_path(path)
@@ -191,10 +162,6 @@ class BaseConverter(ABC):
         for batch in reader:
             if batch.num_rows > 0:
                 yield batch
-
-    def _query_to_arrow(self, sql: str):
-        """Execute *sql* and return the full result as a PyArrow Table."""
-        return self._conn.execute(sql).fetch_arrow_table()
 
     # ------------------------------------------------------------------
     # Score tracking and ontology writing

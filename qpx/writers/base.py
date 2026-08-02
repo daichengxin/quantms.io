@@ -11,6 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from qpx._version import __version__
+from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -28,6 +29,20 @@ if TYPE_CHECKING:
 # float columns (e.g. ``additional_scores.score_value``,
 # ``posterior_error_probability``), where BYTE_STREAM_SPLIT measured *larger*
 # than the default dictionary encoding. Those keep their default encoding.
+#
+# PEP was a candidate for float32 + BYTE_STREAM_SPLIT (audit projected ~52%),
+# but empirical validation over the real qpx corpus found genuine PEP values as
+# small as ~1e-300..1e-318 (DIA/quantms feature+psm files): these underflow to
+# zero in float32 and would corrupt any downstream -log10(PEP)/q-value use. The
+# float32 narrowing was therefore held (PEP stays float64), so it is not split.
+#
+# The intensity leaves (``intensities.list.element.intensity`` and the nested
+# ``additional_intensities…intensity_value``) are intentionally NOT split.
+# BYTE_STREAM_SPLIT helps continuous LFQ intensities (~-20%) but slightly *hurts*
+# TMT reporter-ion columns (+4-7%), which dominate TMT feature files (~64% of
+# the file). Rather than probe the data at write time, we simply omit them here:
+# they fall back to dictionary encoding, which is safe everywhere (never worse
+# than PLAIN) and avoids the TMT regression. RT/mz leaves (a proven win) stay.
 _BYTE_STREAM_SPLIT_LEAVES: tuple[str, ...] = (
     "predicted_rt",
     "rt",
@@ -35,13 +50,59 @@ _BYTE_STREAM_SPLIT_LEAVES: tuple[str, ...] = (
     "rt_stop",
     "calculated_mz",
     "observed_mz",
-    "intensities.list.element.intensity",
-    "additional_intensities.list.element.intensities.list.element.intensity_value",
 )
 
 # ZSTD level 9 (vs the pyarrow default of 3) buys a few extra percent at modest
 # write-cost; only codecs that accept a level get one.
 _COMPRESSION_LEVELS: dict[str, int] = {"zstd": 9, "gzip": 9}
+
+# Row-group sizing for partitioned (dataset) writes. Left unset, pyarrow's
+# dataset writer flushes a group per input batch, which for streamed msnet
+# conversion fragments into ~80-row groups and collapses ZSTD (1.12x vs 1.75x).
+# A 200k-1M window matches the single-file writer's effective grouping.
+_PARTITIONED_MIN_ROWS_PER_GROUP: int = 200_000
+_PARTITIONED_MAX_ROWS_PER_GROUP: int = 1_000_000
+
+
+def _stamp_footer_metadata(
+    table: pa.Table,
+    compression: str,
+    file_metadata: dict | None = None,
+) -> pa.Table:
+    """Return *table* with qpx footer KV metadata on its schema.
+
+    Layering: any metadata already on the table schema, then defaults that a
+    caller may override (``creation_date``/``uuid``), then *file_metadata* (e.g.
+    a writer's ``_file_metadata`` carrying ``file_type``/``uuid``), and finally
+    the **canonical identity** (``qpx_version``/``writer_version``/
+    ``compression_format``) which always wins so a stale caller value cannot
+    mis-stamp the file. Used so partitioned datasets carry the same footer
+    identity as single files.
+    """
+    merged: dict[bytes, bytes] = dict(table.schema.metadata or {})
+    # Overridable defaults.
+    merged.update(
+        {
+            b"creation_date": datetime.datetime.now().isoformat().encode(),
+            b"uuid": str(uuid.uuid4()).encode(),
+        }
+    )
+    if file_metadata:
+        merged.update(
+            {
+                (k if isinstance(k, bytes) else str(k).encode()): (v if isinstance(v, bytes) else str(v).encode())
+                for k, v in file_metadata.items()
+            }
+        )
+    # Canonical identity — reserved, must not be overridden by caller metadata.
+    merged.update(
+        {
+            b"qpx_version": QPX_SPEC_VERSION.encode(),
+            b"writer_version": __version__.encode(),
+            b"compression_format": str(compression).encode(),
+        }
+    )
+    return table.replace_schema_metadata(merged)
 
 
 def _schema_leaf_paths(schema: pa.Schema) -> list[str]:
@@ -74,10 +135,13 @@ def parquet_write_options(schema: pa.Schema, compression: str) -> dict:
 
     leaves = _schema_leaf_paths(schema)
     bss = {leaf: "BYTE_STREAM_SPLIT" for leaf in _BYTE_STREAM_SPLIT_LEAVES if leaf in leaves}
+    # Always stamp the explicit v2.6 format and dictionary-encode non-BSS leaves so
+    # every artifact (feature/psm and pg alike) uses the same encoding, rather than
+    # falling back to pyarrow defaults when no byte-stream-split leaf is present.
+    options["version"] = "2.6"
+    options["use_dictionary"] = [leaf for leaf in leaves if leaf not in bss]
     if bss:
         options["column_encoding"] = bss
-        options["use_dictionary"] = [leaf for leaf in leaves if leaf not in bss]
-        options["version"] = "2.6"
     return options
 
 
@@ -111,9 +175,14 @@ class BaseWriter:
         self._writer: pq.ParquetWriter | None = None
         self._extra_columns = extra_columns or []
 
-        # Build Parquet footer metadata
+        # Build Parquet footer metadata. Two distinct versions are stamped:
+        #   qpx_version    — the on-disk *specification* version (QPX_SPEC_VERSION),
+        #                    what readers check for format compatibility.
+        #   writer_version — the *package* build (__version__, hatch-vcs), for
+        #                    provenance/debugging only.
         self._file_metadata = {
-            b"qpx_version": __version__.encode(),
+            b"qpx_version": QPX_SPEC_VERSION.encode(),
+            b"writer_version": __version__.encode(),
             b"creator": creator.encode(),
             b"file_type": self._schema_class._file_type.encode(),
             b"creation_date": datetime.datetime.now().isoformat().encode(),
@@ -199,8 +268,17 @@ class BaseWriter:
         output_dir: str | Path,
         partition_cols: list[str] | None = None,
         compression: str = "zstd",
+        file_metadata: dict | None = None,
     ) -> Path:
         """Write Arrow table as Hive-partitioned Parquet.
+
+        Encoding parity with the single-file writers: the same
+        :func:`parquet_write_options` path is used, so partitioned output gets
+        the tuned ZSTD level, selective BYTE_STREAM_SPLIT and dictionary
+        encoding, Parquet v2.6, plus a sane row-group size (so compression is
+        not defeated by ~80-row groups). The qpx footer KV metadata is stamped
+        onto every file so partitioned datasets keep ``qpx_version`` /
+        ``file_type`` / ``uuid`` like single files do.
 
         Parameters
         ----------
@@ -212,6 +290,10 @@ class BaseWriter:
             Columns to partition by. Defaults to ["run_file_name"].
         compression : str
             Compression algorithm. Defaults to "zstd".
+        file_metadata : dict | None
+            Extra footer KV metadata (bytes->bytes) to stamp, e.g. a writer's
+            ``_file_metadata`` carrying ``file_type`` / ``uuid``. Merged on top
+            of any metadata already on the table schema and a minimal qpx footer.
 
         Returns
         -------
@@ -222,9 +304,42 @@ class BaseWriter:
 
         output_dir = Path(output_dir)
         cols = partition_cols or ["run_file_name"]
+
+        # Validate the partition columns up front so the default path (or an
+        # unsupported key) fails with an actionable message instead of a raw
+        # KeyError deep in pyarrow. Since QPX 1.1 the pg view is keyed on
+        # grouped_runs (list<string>) with no scalar run_file_name, and Hive
+        # partitioning encodes each value as a directory name — it cannot
+        # represent a list — so the pg view is not Hive-partitionable.
+        available = set(table.schema.names)
+        missing = [c for c in cols if c not in available]
+        if missing:
+            if "grouped_runs" in available and "run_file_name" in missing:
+                raise ValueError(
+                    "The protein-group (pg) view is not Hive-partitionable: it is keyed on "
+                    "'grouped_runs' (list<string>, since QPX 1.1) and has no scalar "
+                    "'run_file_name' column. Hive partitioning encodes each value as a "
+                    "directory name and cannot represent a list. Write pg as a single "
+                    "Parquet file (write_table), or partition the psm/feature views, which "
+                    "keep 'run_file_name'."
+                )
+            raise ValueError(f"Cannot partition on missing column(s) {missing}; available columns: {sorted(available)}")
+        for col in cols:
+            col_type = table.schema.field(col).type
+            if pa.types.is_list(col_type) or pa.types.is_large_list(col_type) or pa.types.is_struct(col_type):
+                raise ValueError(
+                    f"Cannot Hive-partition on non-scalar column '{col}' (type {col_type}); partition "
+                    "columns must be scalar. The pg view's 'grouped_runs' is a list, so pg is not "
+                    "partitionable — write it as a single file."
+                )
+
+        table = _stamp_footer_metadata(table, compression, file_metadata)
+
         part_schema = pa.schema([table.schema.field(c) for c in cols])
         partitioning = ds.partitioning(part_schema, flavor="hive")
-        file_options = ds.ParquetFileFormat().make_write_options(compression=compression)
+
+        opts = parquet_write_options(table.schema, compression)
+        file_options = ds.ParquetFileFormat().make_write_options(**opts)
         ds.write_dataset(
             table,
             str(output_dir),
@@ -232,6 +347,8 @@ class BaseWriter:
             partitioning=partitioning,
             existing_data_behavior="overwrite_or_ignore",
             file_options=file_options,
+            min_rows_per_group=_PARTITIONED_MIN_ROWS_PER_GROUP,
+            max_rows_per_group=_PARTITIONED_MAX_ROWS_PER_GROUP,
         )
         return output_dir
 

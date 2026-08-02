@@ -94,7 +94,7 @@ The `scan_format` is stored in the Parquet file metadata alongside other QPX met
 import pyarrow.parquet as pq
 
 file_metadata = {
-    "qpx_version": "1.0",
+    "qpx_version": "1.1",
     "scan_format": "scan",
     "file_type": "psm_file",
     "software_provider": "quantms 1.3.0",

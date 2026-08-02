@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from qpx.dataset import Dataset
+from tests.conftest import assert_pg_table_wellformed
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "diann" / "small"
 
@@ -132,11 +133,6 @@ class TestFeatureConversion:
     def test_has_rows(self, feature_table):
         assert feature_table.num_rows > 0
 
-    def test_key_columns_present(self, feature_table):
-        expected = {"sequence", "charge", "intensities", "run_file_name"}
-        missing = expected - set(feature_table.column_names)
-        assert not missing, f"Missing columns: {missing}"
-
     def test_sequences_are_nonempty(self, feature_table):
         seqs = feature_table.column("sequence").to_pylist()
         assert all(isinstance(s, str) and len(s) > 0 for s in seqs)
@@ -175,26 +171,9 @@ class TestPgConversion:
     def test_has_rows(self, pg_table):
         assert pg_table.num_rows > 0
 
-    def test_key_columns_present(self, pg_table):
-        expected = {"pg_accessions", "anchor_protein", "run_file_name", "intensities"}
-        missing = expected - set(pg_table.column_names)
-        assert not missing, f"Missing columns: {missing}"
-
-    def test_protein_accessions_nonempty(self, pg_table):
-        for accs in pg_table.column("pg_accessions").to_pylist():
-            assert accs is not None and len(accs) > 0
-            assert all(isinstance(a, str) and len(a) > 0 for a in accs)
-
-    def test_anchor_protein_nonempty(self, pg_table):
-        anchors = pg_table.column("anchor_protein").to_pylist()
-        assert all(isinstance(a, str) and len(a) > 0 for a in anchors)
-
-    def test_intensities_structure(self, pg_table):
-        for row in pg_table.column("intensities").to_pylist():
-            assert row is not None and len(row) > 0
-            for entry in row:
-                assert "label" in entry
-                assert "intensity" in entry
+    def test_pg_table_wellformed(self, pg_table):
+        """grouped_runs, pg_accessions, anchor_protein, intensities are all well-formed."""
+        assert_pg_table_wellformed(pg_table)
 
     def test_schema_validation(self, pg_table):
         from qpx.core.data import PgSchema

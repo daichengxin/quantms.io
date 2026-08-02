@@ -578,6 +578,11 @@ def convert_maxquant_cmd(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
+    "--experiment-annotation-file",
+    help=("FragPipe experiment_annotation.tsv mapping protein-group experiments to member raw files"),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
     "--output-folder",
     help="Output directory for generated QPX files",
     required=True,
@@ -626,6 +631,7 @@ def convert_fragpipe_cmd(
     peptide_file: Optional[Path],
     pg_file: Optional[Path],
     sdrf_file: Optional[Path],
+    experiment_annotation_file: Optional[Path],
     output_folder: Path,
     output_prefix: Optional[str],
     batch_size: int,
@@ -654,6 +660,7 @@ def convert_fragpipe_cmd(
             --ion-file combined_ion.tsv \\
             --pg-file combined_protein.tsv \\
             --sdrf-file metadata.sdrf.tsv \\
+            --experiment-annotation-file experiment_annotation.tsv \\
             --output-folder ./qpx_output
     """
     if verbose:
@@ -677,6 +684,7 @@ def convert_fragpipe_cmd(
         peptide_file=peptide_file,
         pg_file=pg_file,
         sdrf_file=sdrf_file,
+        experiment_annotation_file=experiment_annotation_file,
         output_prefix=output_prefix,
         batch_size=batch_size,
         project_accession=project_accession,
@@ -908,6 +916,64 @@ def convert_openms_cmd(**kwargs):
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
     click.echo(f"OpenMS QPX enrichment complete. Output: {output_folder}")
+
+
+# ---------------------------------------------------------------------------
+# OpenMS consensusXML (interim path: consensusXML + SDRF -> QPX)
+# ---------------------------------------------------------------------------
+
+
+@convert.command("openms-consensus")
+@click.option(
+    "--consensusxml",
+    "consensusxml_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="OpenMS .consensusXML file (peptide feature intensities + IDs + protein inference).",
+)
+@click.option(
+    "--sdrf-file",
+    "sdrf_path",
+    required=False,
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="SDRF metadata (run/sample views + grouped_runs fraction grouping). Optional.",
+)
+@click.option(
+    "--output-folder",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Output directory for the QPX views.",
+)
+@click.option("--output-prefix", default="openms", show_default=True)
+@click.option(
+    "--structures",
+    default="feature,psm,pg,run,sample",
+    show_default=True,
+    help="Comma-separated views to write (run/sample require --sdrf-file).",
+)
+@click.option("--verbose", is_flag=True, help="Enable verbose logging.")
+def convert_openms_consensus_cmd(consensusxml_path, sdrf_path, output_folder, output_prefix, structures, verbose):
+    """Convert an OpenMS consensusXML (+ SDRF) to QPX.
+
+    Interim quantms path while OpenMS -out_qpx is pre-1.1. The feature view carries
+    the per-run/channel peptide intensities from the consensusXML; the pg view is
+    IDENTIFICATION-ONLY (no protein intensity) until OpenMS provides the
+    authoritative protein quant.
+    """
+    if verbose:
+        logging.basicConfig(level=logging.INFO)
+    from qpx.converters.openms_consensus.converter import OpenMSConsensusConverter
+
+    structs = tuple(s.strip() for s in structures.split(",") if s.strip())
+    written = OpenMSConsensusConverter().convert(
+        consensusxml_path=str(consensusxml_path),
+        output_folder=str(output_folder),
+        output_prefix=output_prefix,
+        sdrf_path=str(sdrf_path) if sdrf_path else None,
+        structures=structs,
+    )
+    click.echo(f"consensusXML conversion complete. Wrote: {sorted(written)}")
 
 
 # ---------------------------------------------------------------------------

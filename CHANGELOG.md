@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — Feature/PSM primary keys** (format 1.1, issue #217): feature PK
+  `[sequence, charge, run_file_name, anchor_protein]` → `[peptidoform, charge,
+  run_file_name, rt]`; psm PK `[sequence, charge, run_file_name, scan]` →
+  `[peptidoform, charge, run_file_name, scan]`. Measured across ~13M real rows:
+  `anchor_protein` is functionally redundant and apex `rt` is the only populated
+  RT column that resolves co-eluting peaks of one peptidoform+charge in a run.
+  Regenerate feature/psm files. `rt` must be finite/non-null; the key is
+  within-file only.
 - **Parquet output size**: writers now apply `BYTE_STREAM_SPLIT` encoding to high-entropy float columns (rt, rt_start/stop, predicted_rt, calculated/observed m/z, intensity arrays) and raise the ZSTD level to 9. Encoding-only and fully lossless — no schema change; output reads unchanged with pyarrow and DuckDB. Measured ~16% smaller on a 14 GB feature.parquet.
 
 ### Fixed

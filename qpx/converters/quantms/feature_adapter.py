@@ -267,7 +267,13 @@ class QuantmsFeatureAdapter(BaseConverter):
         with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
             offset = 0
             batch_num = 0
-            while offset < total:
+            emitted = 0
+            # Paginate the JOINED result by its own cardinality, not by
+            # COUNT(*) FROM msstats. The query LEFT JOINs several lookups; if any
+            # is not strictly 1:1 the joined result is larger than the msstats row
+            # count, and a msstats-bounded loop would silently drop every row past
+            # that count. Stop only when a chunk returns fewer rows than requested.
+            while True:
                 batch_sql = sql_build(
                     "$base LIMIT $lim OFFSET $off",
                     base=sql,
@@ -282,16 +288,14 @@ class QuantmsFeatureAdapter(BaseConverter):
                 if records:
                     self._track_scores(records)
                     writer.write_batch(records)
+                    emitted += len(records)
 
                 batch_num += 1
                 offset += chunksize
                 if batch_num % 5 == 0:
-                    self.logger.info(
-                        "Processed %d / %d rows (%.1f%%)",
-                        min(offset, total),
-                        total,
-                        100 * min(offset, total) / total,
-                    )
+                    self.logger.info("Processed %d joined rows (%d features written) ...", offset, emitted)
+                if len(rows) < chunksize:
+                    break
 
         # Clean up temp tables
         for t in ("_psm_lookup", "_protein_qvalues", "_protein_genes", "_proforma_lookup"):
@@ -446,11 +450,16 @@ class QuantmsFeatureAdapter(BaseConverter):
             self._conn.execute(
                 sql_build(
                     """CREATE OR REPLACE TABLE _protein_qvalues AS
+                -- One row per accession (the mzTab protein section may list an
+                -- accession in several rows — single-protein + group rows — each
+                -- with a q-value). Deduplicate to the best (min) q-value so the
+                -- feature join stays 1:1 and does not fan out / duplicate features.
                 SELECT
                     CAST(accession AS VARCHAR) AS accession,
-                    TRY_CAST($sc AS DOUBLE) AS qvalue
+                    MIN(TRY_CAST($sc AS DOUBLE)) AS qvalue
                 FROM proteins
-                WHERE accession IS NOT NULL AND $sc IS NOT NULL""",
+                WHERE accession IS NOT NULL AND $sc IS NOT NULL
+                GROUP BY CAST(accession AS VARCHAR)""",
                     sc=q_score,
                 )
             )
@@ -461,14 +470,17 @@ class QuantmsFeatureAdapter(BaseConverter):
         if "description" in cols:
             self._conn.execute("""
                 CREATE OR REPLACE TABLE _protein_genes AS
+                -- One row per accession (see _protein_qvalues) so the feature
+                -- join stays 1:1 and does not duplicate features.
                 SELECT
                     CAST(accession AS VARCHAR) AS accession,
-                    regexp_extract(CAST(description AS VARCHAR), 'GN=([^\\s]+)', 1) AS gene_name
+                    MIN(regexp_extract(CAST(description AS VARCHAR), 'GN=([^\\s]+)', 1)) AS gene_name
                 FROM proteins
                 WHERE accession IS NOT NULL
                   AND description IS NOT NULL
                   AND CAST(description AS VARCHAR) != 'null'
                   AND regexp_extract(CAST(description AS VARCHAR), 'GN=([^\\s]+)', 1) != ''
+                GROUP BY CAST(accession AS VARCHAR)
             """)
         else:
             self._conn.execute("CREATE OR REPLACE TABLE _protein_genes (accession VARCHAR, gene_name VARCHAR)")
@@ -1296,12 +1308,3 @@ class QuantmsFeatureAdapter(BaseConverter):
                 self.logger.debug(f"Skipping feature group: {e}")
 
         return records
-
-    @staticmethod
-    def _detect_msstats_columns(df: pd.DataFrame) -> dict[str, str]:
-        """Detect the actual MSstats column names in a DataFrame.
-
-        .. deprecated:: Use ``resolve_columns(FIELD_MAPPINGS["feature"], ...)`` instead.
-           Kept for backward compatibility with external callers.
-        """
-        return resolve_columns(_FEATURE_MAP, set(df.columns))

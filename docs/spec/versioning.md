@@ -10,21 +10,28 @@ This is a two-component scheme without patch numbers. The version applies to the
 
 ## Rules
 
-- **Major releases** (`X.0`): Introduce backward-incompatible changes. These may include removing fields, changing field types, renaming views, or restructuring the data model. Tools built for a previous major version may not be able to read files produced by a new major version without updates.
-- **Minor updates** (`1.X`): Introduce backward-compatible additions only. These may include adding new optional fields, new views, or new metadata keys. Tools built for an earlier minor version within the same major version can safely read files produced by a newer minor version (unknown fields are ignored).
+- **Major releases** (`X.0`): Reserved for large-scale, backward-incompatible restructuring of the data model once the format is declared stable.
+- **Minor updates** (`1.X`): The active line of development while the format stabilises. Minor updates normally add backward-compatible fields, views, or metadata keys, but **may also carry backward-incompatible changes** (removing or renaming a field, changing a field type) during the pre-2.0 stabilisation period. Every such change is called out in the [changelog](#changelog) below, and tools should check the `qpx_version` in the file footer and consult the changelog rather than assuming minor updates are always compatible.
+
+!!! warning "Pre-2.0 stabilisation"
+    While QPX is on the `1.x` line the specification is still stabilising, so a
+    minor release may change the data model in a backward-incompatible way. Pin
+    the `qpx_version` you target and read the changelog before upgrading. Once the
+    format is declared stable the strict "minor = additive only" rule takes over
+    and breaking changes move to a major (`2.0`) release.
 
 !!! note
     QPX does not use patch versions. Bug fixes to the specification text that do not change the data model are tracked in the documentation changelog but do not increment the version number.
 
 ## Version in Files
 
-All QPX views (PSM, Feature, PG, Peptide, Protein, MZ, and others serialized as Parquet) include a `qpx_version` field in their file-level metadata. This metadata is stored as a key-value pair in the Parquet file footer and identifies which version of the QPX specification was used to generate the file.
+All serialized QPX views (PSM, Feature, PG, MZ, and the other Parquet and AnnData files) include a `qpx_version` field in their file-level metadata identifying which version of the QPX specification generated the file. In Parquet files it is a key-value pair in the file footer; in AnnData/MuData (`.h5mu`) files it is stored under `uns`. Peptide- and protein-level summaries are derived [API views](views.md) computed on demand from these files, not standalone serialized files.
 
 ```python
 import pyarrow.parquet as pq
 
 # Writing a file with version metadata
-metadata = {"qpx_version": "1.0"}
+metadata = {"qpx_version": "1.1"}
 ```
 
 !!! tip "Reading the version from a file"
@@ -39,9 +46,41 @@ metadata = {"qpx_version": "1.0"}
 
 ## Current Version
 
-The current QPX specification version is **1.0**.
+The current QPX specification version is **1.1**.
 
-This version defines all core views (PSM, Feature, PG, Peptide, Protein, MZ), expression views (Absolute, Differential), and metadata views (SDRF, Project).
+This version defines all core serialized views (PSM, Feature, PG, MZ), the derived [API views](views.md) (Peptide, Protein) computed on demand from them, expression views (Absolute, Differential), and metadata views (SDRF, Project).
+
+### Changelog
+
+- **1.1** (backward-incompatible, pre-2.0 stabilisation): the PG view now keys on
+  `grouped_runs` (`list<string>`) instead of the scalar `run_file_name`. A
+  protein-group quantity applies to the set of raw files (fractions) aggregated
+  into one quantification unit, not a single file; the sample is resolved via
+  `(any file in grouped_runs, label) -> run.samples[]`. This removes and retypes
+  a field, so files written by 1.1 are **not** readable by strict 1.0 tooling —
+  shipped as a minor under the pre-2.0 stabilisation rule above. The PG
+  `intensities` list (`list<struct<label,intensity>>`) is also **flattened** into
+  scalar `label` + `intensity` columns — one row per label — and `label` joins the
+  primary key (`[anchor_protein, grouped_runs, label]`); `label`/`intensity` are
+  null for identification-only groups. This removes and retypes columns, so pg
+  files must be regenerated under >= 1.1.
+- **1.1** (backward-incompatible): the **Feature and PSM primary keys** change.
+  Feature: `[sequence, charge, run_file_name, anchor_protein]` ->
+  `[peptidoform, charge, run_file_name, rt]` — a feature is a physical
+  chromatographic peak, so `peptidoform` (not the unmodified `sequence`) plus the
+  apex `rt` are required to identify it uniquely; `anchor_protein` is an
+  annotation and was measured redundant. `rt` must be finite and non-null and the
+  key is meaningful within a file only (never join across files on `rt`). PSM:
+  `[sequence, charge, run_file_name, scan]` -> `[peptidoform, charge,
+  run_file_name, scan]`. Regenerate feature/psm files under >= 1.1.
+- **1.1** (OpenMS bridge): OpenMS and QPX share the *fraction_group* concept — a
+  group of fraction raw files that together quantify one protein, which is exactly
+  what `grouped_runs` encodes. Rather than change OpenMS's Arrow schema, the QPX
+  OpenMS converter stamps each pg (and feature) row with a `fraction_group`
+  cv_param carrying OpenMS's fraction_group number (read from the consensusXML
+  experimental design), so the grouping is preserved across both sides via a
+  shared cv term. No OpenMS schema change is required.
+- **1.0**: initial specification.
 
 ## Software Provider
 
@@ -66,10 +105,13 @@ The `software_provider` field is a free-text string in the Parquet metadata. The
 | Reader Version | File Version | Compatible? | Notes |
 |---------------|-------------|-------------|-------|
 | 1.0 | 1.0 | Yes | Exact match |
-| 1.1 | 1.0 | Yes | Reader is newer, can handle older files |
-| 1.0 | 1.1 | Yes | Reader ignores unknown optional fields |
-| 2.0 | 1.0 | Maybe | Major version change; check migration guide |
-| 1.0 | 2.0 | No | Reader cannot handle breaking changes |
+| 1.1 | 1.1 | Yes | Exact match |
+| 1.1 | 1.0 | No\* | 1.0 PG files use the scalar `run_file_name`; the 1.1 loader raises a clear version error rather than mis-read them. Re-convert the dataset. |
+| 1.0 | 1.1 | No | 1.1 replaces PG `run_file_name` with `grouped_runs` (backward-incompatible, per the changelog) — a strict 1.0 reader cannot read it. |
+| 2.0 | 1.0/1.1 | Maybe | Major version change; check migration guide |
+| 1.x | 2.0 | No | Reader cannot handle a newer major version |
+
+\* The 1.x line carries backward-incompatible changes during pre-2.0 stabilisation (see the Rules above), so even within `1.x` a reader must check `qpx_version` and the changelog — it is not safe to assume minor updates are compatible.
 
 ## See Also
 

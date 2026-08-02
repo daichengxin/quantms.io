@@ -48,7 +48,13 @@ class TestFragPipeConvertCLI:
     def test_fragpipe_help_shows_new_options(self):
         runner = CliRunner()
         result = runner.invoke(qpx_main, ["convert", "fragpipe", "--help"])
-        _assert_help(result, "--ion-file", "--peptide-file", "--pg-file")
+        _assert_help(
+            result,
+            "--ion-file",
+            "--peptide-file",
+            "--pg-file",
+            "--experiment-annotation-file",
+        )
 
 
 class TestMzIdentMLConvertCLI:

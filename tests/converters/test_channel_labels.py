@@ -13,16 +13,59 @@ import pyarrow.parquet as pq
 import pytest
 
 from qpx.converters.channel_labels import (
+    experiment_runs_from_sdrf,
     experiment_type_from_labels,
     normalize_label,
     relabel_intensities_parquet,
     resolve_channel_labels,
 )
+
+
+def test_experiment_runs_from_sdrf_groups_by_source_name(tmp_path):
+    """SDRF 'source name' -> distinct raw-file stems, fraction order preserved."""
+    sdrf = tmp_path / "x.sdrf.tsv"
+    sdrf.write_text(
+        "source name\tcomment[data file]\tcomment[fraction identifier]\nS1\tF1.raw\t1\nS1\tF2.raw\t2\nS2\tG1.raw\t1\n"
+    )
+    mapping = experiment_runs_from_sdrf(str(sdrf))
+    assert mapping == {"S1": ["F1", "F2"], "S2": ["G1"]}
+
+
+def test_experiment_runs_from_sdrf_missing_or_absent():
+    """None for no path; None when required columns are absent."""
+    assert experiment_runs_from_sdrf(None) is None
+
+
+def test_fraction_groups_from_sdrf_groups_fractions_not_techreps(tmp_path):
+    """Files that differ only in fraction group into one quantification unit;
+    technical replicates (differ in tech rep) stay separate."""
+    from qpx.converters.channel_labels import fraction_groups_from_sdrf
+
+    sdrf = tmp_path / "frac.sdrf.tsv"
+    # S1 has 3 fractions (one unit); S1 tech-rep 2 is a separate unit; S2 unfractionated.
+    sdrf.write_text(
+        "source name\tcomment[data file]\tcomment[label]\t"
+        "characteristics[biological replicate]\tcomment[technical replicate]\t"
+        "comment[fraction identifier]\n"
+        "S1\tF1.raw\tLFQ\t1\t1\t1\n"
+        "S1\tF2.raw\tLFQ\t1\t1\t2\n"
+        "S1\tF3.raw\tLFQ\t1\t1\t3\n"
+        "S1\tT2.raw\tLFQ\t1\t2\t1\n"
+        "S2\tG1.raw\tLFQ\t1\t1\t1\n"
+    )
+    m = fraction_groups_from_sdrf(str(sdrf))
+    assert m["F1"] == ["F1", "F2", "F3"]  # 3 fractions, fraction-ordered
+    assert m["F2"] == ["F1", "F2", "F3"]
+    assert m["T2"] == ["T2"]  # tech-rep 2 is its own unit
+    assert m["G1"] == ["G1"]  # unfractionated
+    assert fraction_groups_from_sdrf(None) is None
+
+
 from qpx.core.parquet_io import read_parquet_metadata
 from qpx.dataset import Dataset
 from qpx.writers.feature import FeatureWriter
 from qpx.writers.pg import PgWriter
-from tests.conftest import make_feature_record, make_pg_record
+from tests.conftest import make_feature_record, make_pg_record, write_lfq_consensusxml
 
 
 def _resolve(experiment_type, channel_indices, sdrf_labels=None):
@@ -126,13 +169,20 @@ def test_relabel_preserves_qpx_compression_and_float_encoding(tmp_path):
     assert read_parquet_metadata(dst)["compression_format"] == "zstd"
     parquet = pq.ParquetFile(dst)
     row_group = parquet.metadata.row_group(0)
-    intensity_column = next(
-        row_group.column(index)
-        for index in range(row_group.num_columns)
-        if row_group.column(index).path_in_schema == "intensities.list.element.intensity"
-    )
+
+    def _col(path):
+        return next(
+            row_group.column(index) for index in range(row_group.num_columns) if row_group.column(index).path_in_schema == path
+        )
+
+    # ZSTD compression is preserved (not silently downgraded to Snappy).
+    intensity_column = _col("intensities.list.element.intensity")
     assert intensity_column.compression == "ZSTD"
-    assert "BYTE_STREAM_SPLIT" in intensity_column.encodings
+    # Selective BYTE_STREAM_SPLIT is preserved through relabeling: rt (a BSS
+    # leaf) keeps it; the intensity leaves were deliberately dropped from BSS
+    # (they regress TMT reporter columns), so intensity no longer carries it.
+    assert "BYTE_STREAM_SPLIT" in _col("rt").encodings
+    assert "BYTE_STREAM_SPLIT" not in intensity_column.encodings
 
 
 def test_run_label_is_canonical_join_key(tmp_path):
@@ -291,6 +341,61 @@ def test_channel_labels_from_consensusxml_missing_file():
     from qpx.converters.channel_labels import channel_labels_from_consensusxml
 
     assert channel_labels_from_consensusxml("/no/such.consensusXML", "TMT", {"TMT126"}) == {}
+
+
+# ---------------------------------------------------------------------------
+# fraction_groups_from_consensusxml (LFQ experimental-design capture)
+# ---------------------------------------------------------------------------
+
+
+def test_fraction_groups_from_consensusxml_lfq(tmp_path):
+    from qpx.converters.channel_labels import fraction_groups_from_consensusxml
+
+    cxml = tmp_path / "lfq.consensusXML"
+    write_lfq_consensusxml(
+        cxml,
+        [
+            (0, "run_A_f1.mzML", "1", "1", "1"),
+            (1, "run_A_f2.mzML", "1", "2", "1"),
+            (2, "run_B_f1.mzML", "2", "1", "2"),
+        ],
+    )
+    groups = fraction_groups_from_consensusxml(str(cxml))
+    assert set(groups) == {"run_A_f1.mzML", "run_A_f2.mzML", "run_B_f1.mzML"}
+    assert groups["run_A_f1.mzML"] == {"fraction_group": "1", "fraction": "1", "sample_name": "1"}
+    # Two fractions of the same sample share a fraction_group.
+    assert groups["run_A_f2.mzML"]["fraction_group"] == "1"
+    assert groups["run_B_f1.mzML"]["fraction_group"] == "2"
+
+
+def test_fraction_groups_from_consensusxml_stops_after_map_list(tmp_path):
+    """Parsing must stop at </mapList> and not choke on trailing junk."""
+    from qpx.converters.channel_labels import fraction_groups_from_consensusxml
+
+    cxml = tmp_path / "trailing.consensusXML"
+    write_lfq_consensusxml(
+        cxml,
+        [(0, "run01.mzML", "1", "1", "1")],
+        trailing=(" " * 100_000) + "<malformed",
+    )
+    groups = fraction_groups_from_consensusxml(str(cxml))
+    assert groups["run01.mzML"]["fraction_group"] == "1"
+
+
+def test_fraction_groups_from_consensusxml_isobaric_returns_empty(tmp_path):
+    """Isobaric / pre-design maps have no fraction_group UserParam -> {}."""
+    from qpx.converters.channel_labels import fraction_groups_from_consensusxml
+
+    cxml = tmp_path / "isobaric.consensusXML"
+    maps = "".join(f'<map id="{i}" name="run01.mzML" label="{i + 1}" />' for i in range(6))
+    cxml.write_text(f'<consensusXML><mapList count="6">{maps}</mapList>', encoding="utf-8")
+    assert fraction_groups_from_consensusxml(str(cxml)) == {}
+
+
+def test_fraction_groups_from_consensusxml_missing_file():
+    from qpx.converters.channel_labels import fraction_groups_from_consensusxml
+
+    assert fraction_groups_from_consensusxml("/no/such.consensusXML") == {}
 
 
 @pytest.mark.parametrize(

@@ -16,7 +16,6 @@ import csv
 import datetime
 import logging
 import re
-import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,12 +25,15 @@ import pyarrow as pa
 import pyarrow.dataset as pds
 import pyarrow.parquet as pq
 
-# Add QPX root to path so we can import qpx
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from qpx._version import __version__
 from qpx.core.scores import field_ontology_entries
 from qpx.core.sql import escape_path, sql_build
+from qpx.writers.base import (
+    _PARTITIONED_MAX_ROWS_PER_GROUP,
+    _PARTITIONED_MIN_ROWS_PER_GROUP,
+    _stamp_footer_metadata,
+    parquet_write_options,
+)
 from qpx.writers.ontology import OntologyWriter
 from qpx.writers.provenance import ProvenanceWriter
 
@@ -823,9 +825,16 @@ def _write_partitioned_streaming(
     Each call uses a unique basename_template so that multiple batches
     writing to the same partition do not overwrite each other.
     """
+    # Encoding parity with the single-file writers: same parquet_write_options
+    # path (tuned ZSTD level, selective BYTE_STREAM_SPLIT + dictionary, v2.6),
+    # a sane row-group size (streamed batches otherwise fragment into ~80-row
+    # groups and defeat ZSTD), and the qpx footer KV metadata so partitioned
+    # PSM files keep qpx_version / file_type / uuid.
+    table = _stamp_footer_metadata(table, "zstd", {b"file_type": b"psm"})
     part_schema = pa.schema([table.schema.field(c) for c in partition_cols])
     partitioning = pds.partitioning(part_schema, flavor="hive")
-    file_options = pds.ParquetFileFormat().make_write_options(compression="zstd")
+    opts = parquet_write_options(table.schema, "zstd")
+    file_options = pds.ParquetFileFormat().make_write_options(**opts)
     basename = f"part-{uuid.uuid4().hex[:12]}-{{i}}.parquet"
     with _write_lock:
         pds.write_dataset(
@@ -837,6 +846,8 @@ def _write_partitioned_streaming(
             basename_template=basename,
             file_options=file_options,
             max_partitions=4096,
+            min_rows_per_group=_PARTITIONED_MIN_ROWS_PER_GROUP,
+            max_rows_per_group=_PARTITIONED_MAX_ROWS_PER_GROUP,
         )
 
 

@@ -1,6 +1,6 @@
 # Protein Group View
 
-The protein group (PG) view is a tabular Parquet file that contains the details of protein groups identified and quantified per raw file. It captures the relationship between protein groups and the raw files in which they were detected, including peptide counts, feature counts, quality metrics, and intensity-based quantification.
+The protein group (PG) view is a tabular Parquet file that contains the details of protein groups identified and quantified per quantification unit. A quantification unit is the group of raw files aggregated together (`grouped_runs`) — a protein quantity only exists after aggregating peptides across a sample's fractions, so the view keys on this group of raw files rather than a single raw file (for unfractionated or DIA data the group is a single file). It captures the relationship between protein groups and the grouped runs in which they were detected, including peptide counts, feature counts, quality metrics, and intensity-based quantification. The sample is resolved downstream via `(any file in grouped_runs, label) -> run.samples[].sample_accession`.
 
 This view is analogous to outputs from tools such as MaxQuant (`proteinGroups.txt`), DIA-NN (`pg_matrix`), and FragPipe protein group reports.
 
@@ -13,19 +13,19 @@ This view is analogous to outputs from tools such as MaxQuant (`proteinGroups.tx
 
 ## Schema
 
-Fields marked with **(PK)** are primary keys and MUST NOT be null. Fields marked with **(nullable)** may have null values. See the full YAML schema in [`pg.yaml`](schemas/pg.yaml).
+Fields marked with **(PK)** are primary keys and MUST NOT be null — with the single exception of `label`, which is part of the key but is null for identification-only protein groups that carry no quantity (marked **PK, nullable**). Fields marked with **(nullable)** may have null values. See the full YAML schema in [`pg.yaml`](schemas/pg.yaml).
 
 ### Identity
 
 | Field | Description | Type | Required |
 |-------|-------------|------|----------|
-| `pg_accessions` | Protein accessions of all proteins within this group | `array[string]` | Yes (PK) |
+| `pg_accessions` | Protein accessions of all proteins within this group | `array[string]` | Yes |
 | `pg_names` | Descriptive names for the proteins in the group | `array[string]` | No |
 | `gg_accessions` | Gene group accessions as a string array | `array[string]` | No |
 | `gg_names` | Gene names corresponding to the proteins in the group | `array[string]` | No |
 | `gg_qvalue` | Gene group q-value (e.g., DIA-NN GG.Q.Value) | `float64`, null | No |
-| `anchor_protein` | Representative protein of the group (leading protein) | `string` | No |
-| `run_file_name` | The raw file containing the identified/quantified protein group | `string` | Yes (PK) |
+| `anchor_protein` | Representative protein of the group (leading protein) | `string` | Yes (PK) |
+| `grouped_runs` | The group of raw files aggregated into one quantification unit (fractions aggregated together; single-element for unfractionated/DIA). The sample is resolved downstream via `(any file in grouped_runs, label) -> run.samples[].sample_accession` | `array[string]` | Yes (PK) |
 
 ### Counts
 
@@ -53,16 +53,12 @@ Fields marked with **(PK)** are primary keys and MUST NOT be null. Fields marked
 
 | Field | Description | Type | Required |
 |-------|-------------|------|----------|
-| `intensities` | Primary intensity-based abundance of the protein group across labels. See [Intensities](intensities.md) | `array[struct]` | No |
-| `additional_intensities` | Pre-computed intensity values from the upstream tool (normalized, LFQ, iBAQ, etc.). See [Intensities](intensities.md) | `array[struct]` | No |
+| `label` | Channel/label of this quantification (e.g., TMT126, LFQ); **one row per label**. Null for identification-only groups. Part of the primary key. | `string` | Yes (PK, nullable) |
+| `intensity` | Primary raw intensity value for this label. Null for identification-only groups. | `float32` | No |
+| `additional_intensities` | Pre-computed intensity values from the upstream tool (normalized, LFQ, iBAQ, etc.) for this row's label. See [Intensities](intensities.md) | `array[struct]` | No |
 | `additional_scores` | Additional scores and metrics (posterior error probability, confidence, etc.). See [Scores](scores.md) | `array[struct]` | No |
 
-Each entry in `intensities` contains:
-
-| Sub-field | Description | Type |
-|-----------|-------------|------|
-| `label` | Label identifier (e.g., TMT126, LFQ) | `string` |
-| `intensity` | Raw intensity value | `float32` |
+Since QPX 1.1 the protein-group quantification is **flattened**: instead of an `intensities` list, each row carries a scalar `label` + `intensity`, so there is one row per `(anchor_protein, grouped_runs, label)`. Identification-only groups (no quantity) have null `label`/`intensity`.
 
 Each entry in `additional_intensities` contains:
 
@@ -99,7 +95,7 @@ Each entry in `peptides` contains:
   "gg_accessions": ["A1BG"],
   "gg_names": ["A1BG"],
   "anchor_protein": "P04217",
-  "run_file_name": "20230101_sample_01",
+  "grouped_runs": ["20230101_sample_01"],
   "peptide_counts": {
     "unique_sequences": 12,
     "total_sequences": 18
@@ -114,12 +110,8 @@ Each entry in `peptides` contains:
   "contaminant": false,
   "sequence_coverage": 45.2,
   "molecular_weight": 54.3,
-  "intensities": [
-    {
-      "label": "TMT126",
-      "intensity": 1.5e8
-    }
-  ],
+  "label": "TMT126",
+  "intensity": 1.5e8,
   "additional_intensities": [
     {
       "label": "TMT126",
@@ -189,7 +181,7 @@ The following score names are commonly used in `additional_scores` for the PG vi
 This section shows how output columns from common search engines and pipelines map to `pg.parquet` fields.
 
 !!! info "Wide-to-long conversion"
-    MaxQuant, DIA-NN, and FragPipe output protein groups in **wide format** (one row per protein group, one column per experiment/run). QPX uses **long format** (one row per protein group **per run**). Converters must melt wide-format columns into separate rows keyed by `run_file_name`.
+    MaxQuant, DIA-NN, and FragPipe output protein groups in **wide format** (one row per protein group, one column per experiment/run). QPX uses **long format** (one row per protein group **per quantification unit**). Converters must melt wide-format columns into separate rows keyed by `grouped_runs` (the group of raw files aggregated into one quantification unit; single-element for unfractionated/DIA).
 
 ### MaxQuant (`proteinGroups.txt`)
 
@@ -220,11 +212,11 @@ This section shows how output columns from common search engines and pipelines m
 
     | MaxQuant column | QPX field | Notes |
     |---|---|---|
-    | `Intensity [exp]` | `intensities` | Primary raw intensity per run |
+    | `Intensity [exp]` | `intensity` | Primary raw intensity; scalar per row (one row per label) |
     | `LFQ intensity [exp]` | `additional_intensities` → `lfq` | MaxLFQ normalised |
     | `iBAQ [exp]` | `additional_intensities` → `ibaq` | Intensity-based absolute quantification |
     | `MS/MS count [exp]` | `additional_intensities` → `spectral_count` | PSM count as float |
-    | `Reporter intensity [channel]` | `intensities` | For TMT/iTRAQ, one entry per channel |
+    | `Reporter intensity [channel]` | `intensity` | For TMT/iTRAQ, one **row** per channel (`label` = channel) |
     | `Reporter intensity corrected [channel]` | `additional_intensities` → `reporter_intensity_corrected` | |
     | `Ratio H/L [exp]` | `additional_intensities` → `ratio_h_l` | SILAC ratio |
     | `Ratio H/L normalized [exp]` | `additional_intensities` → `ratio_h_l_normalized` | Normalised SILAC ratio |
@@ -248,13 +240,13 @@ DIA-NN's main report is precursor-level. PG-level columns (`PG.*`, `Genes.*`) ar
     | `Protein.Group` | `pg_accessions` | Semicolon-separated → array; also `anchor_protein` (first accession) |
     | `Protein.Names` | `pg_names` | |
     | `Genes` | `gg_names` / `gg_accessions` | |
-    | `Run` | `run_file_name` | Raw file name without path |
+    | `Run` | `grouped_runs` | Raw file name without path, wrapped as a single-element list |
 
 === "Quantification"
 
     | DIA-NN column | QPX field | Notes |
     |---|---|---|
-    | `PG.Quantity` | `intensities` | Non-normalised protein group quantity |
+    | `PG.Quantity` | `intensity` | Non-normalised protein group quantity (scalar; DIA `label` = `LFQ`) |
     | `PG.MaxLFQ` | `additional_intensities` → `maxlfq` | QuantUMS/MaxLFQ normalised |
     | `PG.Normalised` | `additional_intensities` → `normalize_intensity` | Normalised PG quantity |
     | `PG.TopN` | `additional_intensities` → `topn` | Top-N normalised quantity |
@@ -301,7 +293,7 @@ FragPipe outputs are pre-filtered (no decoys or contaminants). Per-experiment co
 
     | FragPipe column | QPX field | Notes |
     |---|---|---|
-    | `[exp] Intensity` | `intensities` | Primary razor peptide intensity |
+    | `[exp] Intensity` | `intensity` | Primary razor peptide intensity (scalar per row) |
     | `[exp] MaxLFQ Intensity` | `additional_intensities` → `maxlfq` | MaxLFQ normalised |
     | `[exp] MaxLFQ Unique Intensity` | `additional_intensities` → `maxlfq_unique` | MaxLFQ using only unique peptides |
     | `[exp] Unique Intensity` | `additional_intensities` → `unique_intensity` | Intensity from unique peptides only |
@@ -325,4 +317,6 @@ FragPipe outputs are pre-filtered (no decoys or contaminants). Per-experiment co
     The PG view provides per-file protein group quantification. For derived per-sample summaries (protein counts, abundances, etc.), see [API Views](views.md). For downstream absolute or differential expression results, see the [Absolute Expression](absolute.md) and [Differential Expression](differential.md) views.
 
 !!! warning "Primary key constraints"
-    The combination of `pg_accessions` and `run_file_name` forms the composite primary key. Both fields MUST NOT be null. Each record represents a single protein group observed in a single raw file.
+    The combination of `anchor_protein`, `grouped_runs`, and `label` forms the composite primary key. `anchor_protein` and `grouped_runs` MUST NOT be null. `label` is null **only** for identification-only protein groups that carry no quantity (e.g. mzIdentML); when a quantity exists, `label` is non-null and there is one row per label. `grouped_runs` is a **set of distinct raw files**: it MUST NOT contain duplicates, and two keys are equal when they contain the same files regardless of order (identity is compared set-wise). The list is **stored in fraction order** — sorting is not applied, because it would destroy fraction ordering (and lexicographically misorder names like `F1, F10, F2`). Each record represents a single protein group quantified in one quantification unit (the group of raw files/fractions aggregated together) for one label. A protein quantity only exists after aggregating peptides across a sample's fractions, so the PG view keys on this group of raw files, not a single raw file; for unfractionated or DIA data the list has a single element.
+
+    Within one `(anchor_protein, label)`, the `grouped_runs` sets across rows MUST be **disjoint** — every raw file contributes to at most one row, so no measurement is counted twice (the *run-disjointness* invariant enforced by validation).
