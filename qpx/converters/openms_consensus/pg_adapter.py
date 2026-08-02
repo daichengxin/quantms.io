@@ -141,7 +141,7 @@ def consensus_protein_groups_to_records(
     # so the quantification slot exists with a null intensity — a placeholder the
     # OpenMS-team -out_qpx will later fill. Labels come from the consensusXML map
     # columns (isobaric channels), or "LFQ" for label-free.
-    if cm.getExperimentType() != "label_free":
+    if cm.getExperimentType() != "label-free":
         labels = sorted({_canonical_channel(headers[i].label) for i in headers})
     else:
         labels = ["LFQ"]

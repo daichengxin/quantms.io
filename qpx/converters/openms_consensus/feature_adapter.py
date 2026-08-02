@@ -79,7 +79,7 @@ def consensus_features_to_records(consensusxml_path: str | None = None, cm=None)
     cm = cm if cm is not None else load_consensus_map(consensusxml_path)
 
     headers = cm.getColumnHeaders()
-    is_labeled = cm.getExperimentType() != "label_free"
+    is_labeled = cm.getExperimentType() != "label-free"
     map_info: dict[int, tuple[str, str]] = {}
     for idx in headers:
         header = headers[idx]

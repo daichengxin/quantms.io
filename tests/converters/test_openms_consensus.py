@@ -97,3 +97,29 @@ def test_consensusxml_to_qpx_feature_has_channels_pg_is_identification_only(tmp_
     # OpenMS -out_qpx fills it. The 2 TMT channels each get a placeholder row.
     assert {label for _, label, _ in pg} == {"TMT126", "TMT127"}
     assert all(intensity is None for _, _, intensity in pg)
+
+
+def test_label_free_consensusxml_uses_lfq_labels(tmp_path):
+    """OpenMS spells its label-free experiment type with a hyphen."""
+    cx = tmp_path / "label_free.consensusXML"
+    cx.write_text(_TMT_CONSENSUSXML.replace('experiment_type="labeled_MS2"', 'experiment_type="label-free"'))
+    out = tmp_path / "out"
+    written = OpenMSConsensusConverter().convert(
+        str(cx),
+        str(out),
+        output_prefix="lfq",
+        structures=("feature", "pg"),
+    )
+    con = duckdb.connect()
+    feature_labels = con.execute(
+        "SELECT UNNEST(intensities).label FROM read_parquet($1)",
+        [str(written["feature"])],
+    ).fetchall()
+    pg_labels = con.execute(
+        "SELECT label FROM read_parquet($1)",
+        [str(written["pg"])],
+    ).fetchall()
+    con.close()
+
+    assert {label for (label,) in feature_labels} == {"LFQ"}
+    assert {label for (label,) in pg_labels} == {"LFQ"}
