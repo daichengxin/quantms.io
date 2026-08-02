@@ -1163,7 +1163,9 @@ class QuantmsFeatureAdapter(BaseConverter):
         channel_col = col_map.get("channel", "Channel")
         rt_col = col_map.get("rt", "RetentionTime")
 
-        grouping = [pf_col, prot_col, ref_col, charge_col]
+        grouping = [pf_col, ref_col, charge_col]
+        if rt_col in df.columns:
+            grouping.append(rt_col)
 
         _strip = strip_modifications
         _from_proforma = from_proforma
@@ -1185,10 +1187,10 @@ class QuantmsFeatureAdapter(BaseConverter):
 
         for group_key, group_data in df.groupby(grouping, dropna=False):
             try:
-                peptidoform, protein_name, run_file_name, charge = group_key
+                peptidoform, run_file_name, charge, *rt_values = group_key
+                group_rt = next(iter(rt_values), None)
 
                 peptidoform = str(peptidoform) if peptidoform else ""
-                protein_name = str(protein_name) if protein_name else ""
                 run_file_name = str(run_file_name).split(".")[0] if run_file_name else ""
                 charge = int(float(charge)) if charge not in (None, "", "null") else 0
 
@@ -1228,7 +1230,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                     iv = _safe_float(int_vals[j]) or 0.0
                     intensities.append({"label": label, "intensity": float(iv)})
 
-                rt = _safe_float(group_data[rt_col].values[0]) if rt_col in group_data.columns else None
+                rt = _safe_float(group_rt)
 
                 psm_key = (run_file_name, peptidoform, str(charge))
                 psm_info = psm_lookup.get(psm_key, {})
@@ -1241,7 +1243,14 @@ class QuantmsFeatureAdapter(BaseConverter):
                 _obs = psm_info.get("observed_mz")
                 mass_error_ppm = 1e6 * (_obs - _calc) / _calc if _calc and _obs else None
 
-                acc_list = protein_name.split(";") if protein_name else []
+                acc_list = list(
+                    dict.fromkeys(
+                        accession
+                        for protein_name in group_data[prot_col].dropna().astype(str)
+                        for accession in protein_name.split(";")
+                        if accession
+                    )
+                )
                 anchor_protein = acc_list[0] if acc_list else ""
 
                 records.append(

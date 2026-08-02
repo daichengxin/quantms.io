@@ -79,6 +79,52 @@ def test_lfq_join_stream_is_executed_once(tmp_path):
     assert len(set(run_names)) == 100
 
 
+def test_tmt_groups_features_by_rt_not_protein_annotation(tmp_path):
+    """RT identifies features while protein mappings remain annotations."""
+    from qpx.converters.quantms.feature_adapter import QuantmsFeatureAdapter
+
+    output = tmp_path / "tmt.feature.parquet"
+    connection = duckdb.connect(":memory:")
+    connection.execute("PRAGMA threads=24")
+    connection.execute("CREATE TABLE metadata (key VARCHAR, value VARCHAR)")
+    connection.execute("CREATE TABLE proteins (accession VARCHAR, description VARCHAR)")
+    connection.execute(
+        """
+        CREATE TABLE psms (
+            spectra_ref VARCHAR,
+            charge INTEGER,
+            calc_mass_to_charge DOUBLE,
+            exp_mass_to_charge DOUBLE,
+            accession VARCHAR
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE msstats AS SELECT * FROM (VALUES
+            ('PEPTIDE', 'P1', 'run.raw', 2, 1, 10.0, 100.0),
+            ('PEPTIDE', 'P2', 'run.raw', 2, 2, 10.0, 200.0),
+            ('PEPTIDE', 'P1', 'run.raw', 2, 1, 20.0, 300.0),
+            ('PEPTIDE', 'P1', 'run.raw', 2, 2, 20.0, 400.0)
+        ) AS rows(PeptideSequence, ProteinName, Reference, Charge, Channel, RetentionTime, Intensity)
+        """
+    )
+
+    with QuantmsFeatureAdapter(conn=connection) as adapter:
+        adapter.convert(
+            mztab_path="already-loaded",
+            msstats_path="already-loaded",
+            output_path=str(output),
+        )
+    connection.close()
+
+    rows = pq.read_table(output).to_pylist()
+    by_rt = {row["rt"]: row for row in rows}
+    assert set(by_rt) == {10.0, 20.0}
+    assert {entry["label"] for entry in by_rt[10.0]["intensities"]} == {"TMT126", "TMT127"}
+    assert {entry["accession"] for entry in by_rt[10.0]["pg_accessions"]} == {"P1", "P2"}
+
+
 # ---------------------------------------------------------------------------
 # Fast fixture: SDRF conversion only (sample + run + ontology)
 # ---------------------------------------------------------------------------
