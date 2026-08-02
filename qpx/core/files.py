@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
-_RUN_FILE_SUFFIX = re.compile(r"(?i)\.(?:mzml(?:\.gz)?|raw|d|wiff|mgf)$")
+_RUN_FILE_SUFFIX = re.compile(r"(?i)\.(?:mzml(?:\.gz)?|mzxml|raw|d|wiff|mgf|dia)$")
 
 
 def run_file_stem(value: str) -> str:

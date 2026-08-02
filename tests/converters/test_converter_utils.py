@@ -21,7 +21,9 @@ from qpx.core.files import run_file_stem
     [
         ("run.part.1.raw", "run.part.1"),
         ("file:///data/run.part.1.mzML.gz", "run.part.1"),
+        ("file:///data/run.part.1.mzXML", "run.part.1"),
         (r"C:\data\run.part.1.wiff", "run.part.1"),
+        ("run.part.1.dia", "run.part.1"),
         ("run.part.1", "run.part.1"),
     ],
 )
