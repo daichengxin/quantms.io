@@ -155,8 +155,8 @@ def test_pg_peptide_counts_are_per_protein(monkeypatch):
     ]
 
 
-def test_run_resolver_tries_id_merge_index_after_unmapped_map_index():
-    from qpx.converters.openms_consensus.psm_adapter import _run_resolver
+def test_pg_uses_id_merge_index_after_unmapped_map_index():
+    from qpx.converters.openms_consensus.pg_adapter import _protein_maps
 
     class Header:
         def __init__(self, filename):
@@ -167,6 +167,40 @@ def test_run_resolver_tries_id_merge_index_after_unmapped_map_index():
         def getColumnHeaders():
             return {0: Header("run_01.mzML"), 1: Header("run_02.mzML")}
 
+        @staticmethod
+        def getUnassignedPeptideIdentifications():
+            return [PeptideIdentification()]
+
+        def __iter__(self):
+            return iter(())
+
+    class Sequence:
+        @staticmethod
+        def toUnmodifiedString():
+            return "PEPTIDE"
+
+        @staticmethod
+        def toUniModString():
+            return "PEPTIDE"
+
+    class Evidence:
+        @staticmethod
+        def getProteinAccession():
+            return "P1"
+
+    class Hit:
+        @staticmethod
+        def getSequence():
+            return Sequence()
+
+        @staticmethod
+        def getCharge():
+            return 2
+
+        @staticmethod
+        def getPeptideEvidences():
+            return [Evidence()]
+
     class PeptideIdentification:
         values = {"map_index": 99, "id_merge_index": 1}
 
@@ -176,7 +210,14 @@ def test_run_resolver_tries_id_merge_index_after_unmapped_map_index():
         def getMetaValue(self, key):
             return self.values[key]
 
-    assert _run_resolver(ConsensusMap())(PeptideIdentification()) == "run_02"
+        @staticmethod
+        def getHits():
+            return [Hit()]
+
+    peptides, runs, features = _protein_maps(ConsensusMap())
+    assert peptides == {"P1": {"PEPTIDE"}}
+    assert runs == {"P1": {"run_02"}}
+    assert features == {"P1": {("PEPTIDE", 2)}}
 
 
 def test_consensusxml_to_qpx_feature_has_channels_pg_is_identification_only(tmp_path):
