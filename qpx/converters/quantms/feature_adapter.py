@@ -265,22 +265,12 @@ class QuantmsFeatureAdapter(BaseConverter):
         self.logger.info("Total MSstats rows to process: %d", total)
 
         with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
-            offset = 0
             batch_num = 0
             emitted = 0
-            # Paginate the JOINED result by its own cardinality, not by
-            # COUNT(*) FROM msstats. The query LEFT JOINs several lookups; if any
-            # is not strictly 1:1 the joined result is larger than the msstats row
-            # count, and a msstats-bounded loop would silently drop every row past
-            # that count. Stop only when a chunk returns fewer rows than requested.
+            processed = 0
+            cursor = self._conn.execute(sql)
             while True:
-                batch_sql = sql_build(
-                    "$base LIMIT $lim OFFSET $off",
-                    base=sql,
-                    lim=str(int(chunksize)),
-                    off=str(int(offset)),
-                )
-                rows = self._conn.execute(batch_sql).fetchall()
+                rows = cursor.fetchmany(chunksize)
                 if not rows:
                     break
 
@@ -291,11 +281,9 @@ class QuantmsFeatureAdapter(BaseConverter):
                     emitted += len(records)
 
                 batch_num += 1
-                offset += chunksize
+                processed += len(rows)
                 if batch_num % 5 == 0:
-                    self.logger.info("Processed %d joined rows (%d features written) ...", offset, emitted)
-                if len(rows) < chunksize:
-                    break
+                    self.logger.info("Processed %d joined rows (%d features written) ...", processed, emitted)
 
         # Clean up temp tables
         for t in ("_psm_lookup", "_protein_qvalues", "_protein_genes", "_proforma_lookup"):

@@ -12,6 +12,7 @@ Two tiers of tests:
 
 from pathlib import Path
 
+import duckdb
 import pyarrow.parquet as pq
 import pytest
 
@@ -22,6 +23,60 @@ _SDRF = EXAMPLES_DIR / "PXD007683-LFQ.sdrf.tsv"
 _MSSTATS = EXAMPLES_DIR / "PXD007683-LFQ.sdrf_openms_design_msstats_in.csv.gz"
 
 _PREFIX = "quantms_test"
+
+
+def test_lfq_join_stream_is_executed_once(tmp_path):
+    """Streaming must not re-execute an unordered join for every output batch."""
+    from qpx.converters.quantms.feature_adapter import QuantmsFeatureAdapter
+
+    output = tmp_path / "streamed.feature.parquet"
+    connection = duckdb.connect(":memory:")
+    connection.execute("PRAGMA threads=24")
+    connection.execute("CREATE TABLE metadata (key VARCHAR, value VARCHAR)")
+    connection.execute("CREATE TABLE proteins (accession VARCHAR)")
+    connection.execute("CREATE TABLE peptides (sequence VARCHAR, accession VARCHAR)")
+    connection.execute(
+        """
+        CREATE TABLE psms (
+            spectra_ref VARCHAR,
+            charge INTEGER,
+            calc_mass_to_charge DOUBLE,
+            exp_mass_to_charge DOUBLE,
+            accession VARCHAR
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE source_msstats AS
+        SELECT
+            'PEPTIDE' AS PeptideSequence,
+            'P12345' AS ProteinName,
+            'run_' || range || '.raw' AS Reference,
+            2 AS Charge,
+            CAST(range + 1 AS DOUBLE) AS Intensity,
+            CAST(range + 10 AS DOUBLE) AS RetentionTime
+        FROM range(100)
+        """
+    )
+    # A volatile source order makes LIMIT/OFFSET re-execution duplicate and
+    # omit rows, while a single result cursor remains a stable snapshot.
+    connection.execute("CREATE VIEW msstats AS SELECT * FROM source_msstats ORDER BY random()")
+
+    with QuantmsFeatureAdapter(conn=connection) as adapter:
+        adapter.convert(
+            mztab_path="already-loaded",
+            msstats_path="already-loaded",
+            output_path=str(output),
+            creator="quantms",
+            chunksize=7,
+        )
+    connection.close()
+
+    table = pq.read_table(output, columns=["run_file_name"])
+    run_names = table.column("run_file_name").to_pylist()
+    assert len(run_names) == 100
+    assert len(set(run_names)) == 100
 
 
 # ---------------------------------------------------------------------------
