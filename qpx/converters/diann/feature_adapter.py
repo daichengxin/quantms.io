@@ -749,16 +749,56 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         return pa.Table.from_pandas(merged_df, schema=table.schema, preserve_index=False)
 
     def _merge_scan_info(self, run_data: pd.DataFrame, ms_info_path: Path) -> pd.DataFrame:
-        """Merge MS scan info (scan, observed_mz) with report data for a single run."""
+        """Fill missing scan metadata from one run's MS-info table."""
         target = pd.read_parquet(ms_info_path, columns=["rt", "scan", "precursor_mz"])
-        target = target.rename(columns={"precursor_mz": "observed_mz"})
-        # ms_info RT is already in seconds (matching report RT after SQL conversion)
-
-        # Ensure matching types for merge_asof (SQL may produce float32, ms_info float64)
         run_data = run_data.copy()
+        run_data["_merge_row"] = range(len(run_data))
         run_data["rt"] = run_data["rt"].astype("float64")
+        run_data["observed_mz"] = pd.to_numeric(run_data["observed_mz"], errors="coerce").astype("float64")
+        target["scan"] = pd.to_numeric(target["scan"], errors="coerce")
+        target["precursor_mz"] = pd.to_numeric(target["precursor_mz"], errors="coerce")
         target["rt"] = target["rt"].astype("float64")
 
-        run_data = run_data.sort_values("rt")
-        result = pd.merge_asof(run_data, target, on="rt", direction="nearest", suffixes=("", "_scan"))
-        return result
+        def _first_scan(value) -> int | None:
+            if hasattr(value, "tolist"):
+                value = value.tolist()
+            if isinstance(value, (list, tuple)):
+                value = value[0] if value else None
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        report_scans = run_data["scan"].map(_first_scan)
+        scan_to_mz = target.dropna(subset=["scan"]).drop_duplicates("scan").set_index("scan")["precursor_mz"]
+        exact_mz = report_scans.map(scan_to_mz)
+        observed_mz = run_data["observed_mz"]
+        fill_exact_mz = (observed_mz.isna() | (observed_mz <= 0)) & exact_mz.notna()
+        run_data.loc[fill_exact_mz, "observed_mz"] = exact_mz[fill_exact_mz]
+
+        # Older DIA-NN reports may not carry MS2.Scan.  For only those rows,
+        # select the nearest MS2 entry by RT, and never extend past the measured
+        # acquisition range.  Existing report scans remain authoritative.
+        missing_scan = report_scans.isna() & run_data["rt"].notna()
+        rt_target = target.dropna(subset=["rt", "scan", "precursor_mz"]).sort_values("rt")
+        if missing_scan.any() and not rt_target.empty:
+            left = run_data.loc[missing_scan, ["_merge_row", "rt"]].sort_values("rt")
+            right = rt_target[["rt", "scan", "precursor_mz"]].rename(
+                columns={"rt": "_ms_rt", "scan": "_matched_scan", "precursor_mz": "_matched_mz"}
+            )
+            nearest = pd.merge_asof(left, right, left_on="rt", right_on="_ms_rt", direction="nearest")
+            outside_acquisition = (nearest["rt"] < right["_ms_rt"].min()) | (nearest["rt"] > right["_ms_rt"].max())
+            nearest.loc[outside_acquisition, ["_matched_scan", "_matched_mz"]] = None
+
+            scan_matches = nearest.set_index("_merge_row")["_matched_scan"]
+            mz_matches = nearest.set_index("_merge_row")["_matched_mz"]
+            matched_scan = run_data["_merge_row"].map(scan_matches)
+            matched_mz = run_data["_merge_row"].map(mz_matches)
+            has_match = matched_scan.notna()
+            run_data.loc[has_match, "scan"] = matched_scan[has_match].map(lambda value: [int(value)])
+
+            observed_mz = run_data["observed_mz"]
+            fill_nearest_mz = has_match & (observed_mz.isna() | (observed_mz <= 0)) & matched_mz.notna()
+            run_data.loc[fill_nearest_mz, "observed_mz"] = matched_mz[fill_nearest_mz]
+
+        return run_data.drop(columns="_merge_row")
