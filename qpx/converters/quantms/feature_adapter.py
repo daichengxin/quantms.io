@@ -19,6 +19,7 @@ import json
 import logging
 from typing import Optional
 
+import duckdb
 import pandas as pd
 
 from qpx.converters.base import BaseConverter, resolve_columns
@@ -702,8 +703,8 @@ class QuantmsFeatureAdapter(BaseConverter):
                         "rt_stop": None,
                     }
                 )
-            except Exception as e:
-                self.logger.debug(f"Skipping feature row: {e}")
+            except (TypeError, ValueError, KeyError, IndexError) as exc:
+                raise ValueError("Invalid QuantMS LFQ feature row") from exc
 
         return records
 
@@ -737,8 +738,8 @@ class QuantmsFeatureAdapter(BaseConverter):
                         return "TMT"
                 except (ValueError, TypeError):
                     pass
-        except Exception:
-            self.logger.debug("Failed to detect labeling type from msstats channels", exc_info=True)
+        except duckdb.Error as exc:
+            raise RuntimeError("Could not detect the QuantMS experiment type") from exc
         return "LFQ"
 
     def _build_psm_lookup(self, ms_runs: dict[int, str]) -> dict[tuple, dict]:
@@ -870,8 +871,8 @@ class QuantmsFeatureAdapter(BaseConverter):
                         "id_run_file_name": run_file,
                         "rt": float(rt_val) if rt_val is not None else None,
                     }
-        except Exception as e:
-            self.logger.warning("Could not build PSM lookup: %s", e, exc_info=True)
+        except duckdb.Error as exc:
+            raise RuntimeError("Could not build the QuantMS PSM lookup") from exc
 
         return lookup
 
@@ -949,8 +950,8 @@ class QuantmsFeatureAdapter(BaseConverter):
                 ).df()
                 if not df.empty:
                     yield df
-        except Exception as e:
-            self.logger.error(f"Error iterating feature batches: {e}")
+        except duckdb.Error as exc:
+            raise RuntimeError("Could not read QuantMS feature batches") from exc
 
     def _detect_ref_column(self) -> str:
         """Detect the reference/run column name in MSstats table.
@@ -1131,8 +1132,8 @@ class QuantmsFeatureAdapter(BaseConverter):
                         "rt_stop": None,
                     }
                 )
-            except Exception as e:
-                self.logger.debug(f"Skipping feature row {i}: {e}")
+            except (TypeError, ValueError, KeyError, IndexError) as exc:
+                raise ValueError(f"Invalid QuantMS LFQ feature row at batch index {i}") from exc
 
         return records
 
@@ -1301,7 +1302,7 @@ class QuantmsFeatureAdapter(BaseConverter):
                         "rt_stop": None,
                     }
                 )
-            except Exception as e:
-                self.logger.debug(f"Skipping feature group: {e}")
+            except (TypeError, ValueError, KeyError, IndexError) as exc:
+                raise ValueError(f"Invalid QuantMS isobaric feature group {group_key!r}") from exc
 
         return records

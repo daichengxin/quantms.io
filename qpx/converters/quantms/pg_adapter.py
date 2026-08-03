@@ -12,6 +12,7 @@ import logging
 import re
 from typing import Optional
 
+import duckdb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -166,7 +167,7 @@ class QuantmsPgAdapter(BaseConverter):
                         current_anchor,
                         current_run,
                     )
-            except Exception as e:
+            except (TypeError, ValueError, KeyError, IndexError) as e:
                 failed_groups += 1
                 self.logger.debug(
                     "Failed PG group (%s, %s): %s",
@@ -322,8 +323,8 @@ class QuantmsPgAdapter(BaseConverter):
                     sorted_key = ";".join(sorted(self._normalize_pg_accessions(accession)))
                     if sorted_key:
                         group_meta[sorted_key] = entry
-        except Exception as e:
-            self.logger.error(f"Error loading protein metadata: {e}")
+        except duckdb.Error as exc:
+            raise RuntimeError("Could not load QuantMS protein metadata") from exc
 
         return single_meta, group_meta
 

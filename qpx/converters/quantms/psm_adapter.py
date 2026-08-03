@@ -205,25 +205,11 @@ class QuantmsPsmAdapter(BaseConverter):
     ) -> list[dict]:
         """Transform a pandas DataFrame of raw mzTab PSM rows into QPX records."""
         records: list[dict] = []
-        skipped = 0
 
         for row in df.to_dict("records"):
-            try:
-                rec = self._transform_row(row, ms_runs, modifications_meta, score_names, protein_qvalue_map)
-                if rec:
-                    records.append(rec)
-            except Exception as e:
-                skipped += 1
-                self.logger.debug(f"Skipping PSM row: {e}")
-
-        if skipped:
-            total = skipped + len(records)
-            self.logger.warning(
-                "Skipped %d / %d rows (%.1f%%) in batch",
-                skipped,
-                total,
-                100 * skipped / total if total else 0,
-            )
+            rec = self._transform_row(row, ms_runs, modifications_meta, score_names, protein_qvalue_map)
+            if rec:
+                records.append(rec)
 
         return records
 

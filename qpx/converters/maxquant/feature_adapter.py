@@ -20,6 +20,7 @@ import logging
 import re
 from typing import Optional
 
+import duckdb
 import pandas as pd
 
 from qpx.converters.base import resolve_columns
@@ -197,10 +198,8 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
                 len(gene_map),
             )
             return {"qvalue": qvalue_map, "genes": gene_map}
-        except (FileNotFoundError, pd.errors.ParserError, KeyError, ValueError) as e:
+        except (FileNotFoundError, pd.errors.ParserError, KeyError, ValueError, duckdb.Error) as e:
             self.logger.warning("Could not build protein group maps: %s", e)
-        except Exception as e:
-            self.logger.warning("Could not build protein group maps: %s", e, exc_info=True)
         return {"qvalue": {}, "genes": {}}
 
     @staticmethod
@@ -278,31 +277,24 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
     ) -> list[dict]:
         """Transform a batch of evidence.txt rows into QPX feature records."""
         records: list[dict] = []
-        skipped = 0
         # Detect reporter intensity column indexing once per batch
         ri_offset = self._detect_ri_offset(df.columns)
         # Pre-extract column arrays for faster per-row access than to_dict("records")
         col_arrays = {col: df[col].values for col in df.columns}
         n_rows = len(df)
         for i in range(n_rows):
-            try:
-                row = {col: vals[i] for col, vals in col_arrays.items()}
-                rec = self._transform_row(
-                    row, sample_map, experiment_type, tmt_channels, pg_maps, ri_offset, fixed_mod_only=fixed_mod_only
-                )
-                if rec:
-                    records.append(rec)
-            except Exception as e:
-                skipped += 1
-                self.logger.debug(f"Skipping MaxQuant feature row: {e}")
-        if skipped:
-            total = skipped + len(records)
-            self.logger.warning(
-                "Skipped %d / %d rows (%.1f%%) in batch",
-                skipped,
-                total,
-                100 * skipped / total if total else 0,
+            row = {col: vals[i] for col, vals in col_arrays.items()}
+            rec = self._transform_row(
+                row,
+                sample_map,
+                experiment_type,
+                tmt_channels,
+                pg_maps,
+                ri_offset,
+                fixed_mod_only=fixed_mod_only,
             )
+            if rec:
+                records.append(rec)
         return records
 
     _FIXED_MODS_ALLOWED = frozenset({"unmodified", "carbamidomethyl (c)"})

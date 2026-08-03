@@ -242,22 +242,9 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
         tmt_channels: list[str] | None = None,
     ) -> list[dict]:
         records: list[dict] = []
-        skipped = 0
         for row in df.to_dict("records"):
-            try:
-                recs = self._transform_row(row, intensity_cols, tmt_channels or [])
-                records.extend(recs)
-            except Exception as e:
-                skipped += 1
-                self.logger.debug(f"Skipping MaxQuant PG row: {e}")
-        if skipped:
-            total = skipped + len(records)
-            self.logger.warning(
-                "Skipped %d / %d rows (%.1f%%) in batch",
-                skipped,
-                total,
-                100 * skipped / total if total else 0,
-            )
+            recs = self._transform_row(row, intensity_cols, tmt_channels or [])
+            records.extend(recs)
         return records
 
     @staticmethod
