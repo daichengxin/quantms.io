@@ -168,6 +168,7 @@ class BaseWriter:
         batch_size: int = 1_000_000,
         scan_format: str | None = None,
         extra_columns: list[str] | None = None,
+        override_provided_ids: bool = False,
     ):
         self._path = Path(path)
         self._compression = compression
@@ -175,6 +176,12 @@ class BaseWriter:
         self._buffer: list[dict] = []
         self._writer: pq.ParquetWriter | None = None
         self._extra_columns = extra_columns or []
+        # Override mode (e.g. consensusXML): re-derive the id even when the
+        # producer supplied one, stashing the original as a cv_param so it is
+        # preserved/traceable. ``overridden_id_count`` lets the converter record
+        # the override in provenance.
+        self._override_provided_ids = override_provided_ids
+        self.overridden_id_count = 0
 
         # Build Parquet footer metadata. Two distinct versions are stamped:
         #   qpx_version    — the on-disk *specification* version (QPX_SPEC_VERSION),
@@ -228,9 +235,21 @@ class BaseWriter:
         id_field = self._id_field
         if not composite or id_field is None:
             return
+        has_cv = "cv_params" in self.arrow_schema.names
         for record in records:
-            if record.get(id_field) is None:
+            provided = record.get(id_field)
+            if provided is not None and self._override_provided_ids:
+                # Preserve the producer-supplied id as a cv_param, then re-derive
+                # ours so the primary key is library-owned and reproducible.
+                if has_cv:
+                    cvs = list(record.get("cv_params") or [])
+                    cvs.append({"cv_name": f"provided_{id_field}", "cv_value": str(provided)})
+                    record["cv_params"] = cvs
                 record[id_field] = derive_id([record.get(f) for f in composite])
+                self.overridden_id_count += 1
+            elif provided is None:
+                record[id_field] = derive_id([record.get(f) for f in composite])
+            # else: provided id kept as-is (default, non-override)
 
     def _fill_identity_table(self, table: pa.Table) -> pa.Table:
         """Return *table* with its derived-id column present and non-null.

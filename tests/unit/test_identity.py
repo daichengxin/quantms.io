@@ -108,3 +108,30 @@ def test_pg_roundtrip_derives_id(tmp_path):
     assert len(set(ids)) == len(ids)
     for i, got in enumerate(ids):
         assert got == derive_id([anchors[i], grouped[i], labels[i]])
+
+
+def test_provided_id_kept_by_default(tmp_path):
+    """Without override, a producer-supplied feature_id is preserved as-is."""
+    path = tmp_path / "t.feature.parquet"
+    rec = make_feature_record(sequence="PEPTIDEK", peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
+    rec["feature_id"] = 123456789
+    with FeatureWriter(path) as w:
+        w.write_batch([dict(rec)])
+    assert pq.read_table(path).column("feature_id").to_pylist() == [123456789]
+
+
+def test_override_provided_id_stashes_to_cv_params(tmp_path):
+    """With override_provided_ids, the id is re-derived and the original stashed as a cv_param."""
+    path = tmp_path / "t.feature.parquet"
+    rec = make_feature_record(sequence="PEPTIDEK", peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
+    rec["feature_id"] = 123456789
+    w = FeatureWriter(path, override_provided_ids=True)
+    w.write_batch([dict(rec)])
+    w.close()
+
+    table = pq.read_table(path)
+    derived = derive_id([rec["peptidoform"], rec["charge"], rec["run_file_name"], rec["rt"]])
+    assert table.column("feature_id").to_pylist() == [derived]
+    assert w.overridden_id_count == 1
+    cv = table.column("cv_params").to_pylist()[0]
+    assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in cv
