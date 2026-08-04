@@ -25,9 +25,26 @@ FIELD_SEP = chr(0x1F)  # ASCII Unit Separator
 NULL_TOKEN = chr(0x00)  # ASCII NUL — sentinel for a None composite value
 
 
+def _canonical_value(value) -> str:
+    """Order-insensitive canonical string for one composite value.
+
+    List/tuple values (e.g. ``grouped_runs``, ``scan``) are **sorted** so that
+    ``["r1", "r2"]`` and ``["r2", "r1"]`` canonicalize identically. This preserves
+    the order-insensitive identity the composite primary key had before it was
+    replaced by the single hashed id (the old duplicate-pk check JSON-sorted list
+    columns); without it, two rows differing only in list order would derive
+    distinct ids and escape duplicate detection.
+    """
+    if value is None:
+        return NULL_TOKEN
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(sorted(_canonical_value(v) for v in value)) + "]"
+    return str(value)
+
+
 def canonical(values: list) -> bytes:
     """Encode composite *values* into a single unambiguous byte string."""
-    return FIELD_SEP.join(NULL_TOKEN if v is None else str(v) for v in values).encode("utf-8")
+    return FIELD_SEP.join(_canonical_value(v) for v in values).encode("utf-8")
 
 
 def derive_id(values: list) -> int:

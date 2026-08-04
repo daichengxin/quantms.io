@@ -72,6 +72,16 @@ def test_strict_duplicate_pk_pg():
     assert not any(i.check == "duplicate_pk" for i in ok.issues)
 
 
+def test_grouped_runs_order_aliases_to_one_pg_id():
+    """grouped_runs list order must not change identity: ['r1','r2'] and
+    ['r2','r1'] derive the same pg_id, so they collide as a duplicate PK."""
+    table = _pg_table(anchor=["P1", "P1"], grouped_runs=[["r1", "r2"], ["r2", "r1"]])
+    # The two rows are the same logical group -> same derived pg_id.
+    assert table.column("pg_id").to_pylist()[0] == table.column("pg_id").to_pylist()[1]
+    dup = [i for i in PgSchema.validate_full(table, strict=True).issues if i.check == "duplicate_pk"]
+    assert len(dup) == 1
+
+
 def test_strict_null_in_required_pg():
     """Null in a non-nullable PG column errors under strict, warns by default."""
     # anchor_protein is non-nullable; inject a null.

@@ -271,6 +271,9 @@ class BaseWriter:
         The table is assumed to already match ``arrow_schema`` in every other
         column (callers build via ``arrow_schema`` or align first). Rows with a
         non-null id keep it; the rest are derived from the composite columns.
+        In ``override_provided_ids`` mode the id is re-derived even when present,
+        stashing the original as a ``provided_<id>`` cv_param — mirroring the
+        record path (:meth:`_derive_record_ids`) so both paths behave the same.
         """
         composite = self._identity_composite
         id_field = self._id_field
@@ -280,9 +283,29 @@ class BaseWriter:
         names = set(table.schema.names)
         existing = table.column(id_field).to_pylist() if id_field in names else [None] * n
         composite_values = {f: (table.column(f).to_pylist() if f in names else [None] * n) for f in composite}
-        ids = [
-            existing[i] if existing[i] is not None else derive_id([composite_values[f][i] for f in composite]) for i in range(n)
-        ]
+        override = self._override_provided_ids
+        cv_lists = table.column("cv_params").to_pylist() if (override and "cv_params" in names) else None
+        ids: list[int] = []
+        for i in range(n):
+            provided = existing[i]
+            if provided is not None and override:
+                if cv_lists is not None:
+                    cvs = list(cv_lists[i] or [])
+                    cvs.append({"cv_name": f"provided_{id_field}", "cv_value": str(provided)})
+                    cv_lists[i] = cvs
+                ids.append(derive_id([composite_values[f][i] for f in composite]))
+                self.overridden_id_count += 1
+            elif provided is None:
+                ids.append(derive_id([composite_values[f][i] for f in composite]))
+            else:
+                ids.append(provided)
+        if cv_lists is not None:
+            cv_type = table.schema.field("cv_params").type
+            table = table.set_column(
+                table.schema.get_field_index("cv_params"),
+                table.schema.field("cv_params"),
+                pa.array(cv_lists, type=cv_type),
+            )
         id_array = pa.array(ids, type=pa.int64())
         id_arrow_field = pa.field(id_field, pa.int64(), nullable=False)
         if id_field in names:
@@ -336,11 +359,15 @@ class BaseWriter:
     def write_dataframe(self, df: "pd.DataFrame"):
         """Write a pandas DataFrame. Converts to Arrow and validates.
 
-        Columns the schema declares but the frame omits (e.g. the derived id or
-        the optional cross-ref columns) are added as nulls; the id is then
-        stamped in :meth:`write_table`.
+        Only columns the schema declares as **nullable** — plus the derived id
+        column (required, but stamped later in :meth:`write_table`) — are
+        backfilled with nulls when the frame omits them (e.g. the optional
+        cross-ref columns). A genuinely missing *required* column is left absent
+        so ``from_pandas`` surfaces it as a clear error rather than a deferred
+        null-value failure.
         """
-        missing = [f.name for f in self.arrow_schema if f.name not in df.columns]
+        id_field = self._id_field
+        missing = [f.name for f in self.arrow_schema if f.name not in df.columns and (f.nullable or f.name == id_field)]
         if missing:
             df = df.copy()
             for name in missing:

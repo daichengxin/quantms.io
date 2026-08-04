@@ -3,7 +3,9 @@
 Since QPX 1.1 the pg view is **flattened**: instead of one row per
 ``(anchor_protein, grouped_runs)`` carrying an ``intensities: list<{label,
 intensity}>`` column, there is **one row per label** with scalar ``label`` and
-``intensity`` columns and PK ``(anchor_protein, grouped_runs, label)``. Converters
+``intensity`` columns. Since the mandatory-identity change the primary key is the
+single derived ``pg_id`` (hashed from the ``identity_composite``
+``(anchor_protein, grouped_runs, label)``). Converters
 still build the natural ``intensities`` list per protein group; the writer is the
 single place that materializes the flat physical layout, so no converter needs to
 know about the on-disk shape. Identification-only groups (no intensity, e.g.

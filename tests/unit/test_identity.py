@@ -1,5 +1,6 @@
 """Tests for the derived mandatory identity ids (feature_id / psm_id / pg_id)."""
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from qpx.core.data import FeatureSchema, PgSchema, PsmSchema
@@ -135,3 +136,31 @@ def test_override_provided_id_stashes_to_cv_params(tmp_path):
     assert w.overridden_id_count == 1
     cv = table.column("cv_params").to_pylist()[0]
     assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in cv
+
+
+def test_derive_id_list_order_insensitive():
+    """List-valued composite fields (grouped_runs, scan) are order-insensitive."""
+    assert derive_id(["P1", [1, 2, 3]]) == derive_id(["P1", [3, 1, 2]])
+    assert derive_id([["r1", "r2"]]) == derive_id([["r2", "r1"]])
+    # but different *elements* still differ
+    assert derive_id([[1, 2]]) != derive_id([[1, 3]])
+
+
+def test_override_applies_on_write_table_path(tmp_path):
+    """override_provided_ids must also take effect on the write_table/dataframe path."""
+    import pyarrow.parquet as pq
+
+    path = tmp_path / "t.feature.parquet"
+    rec = make_feature_record(sequence="PEPTIDEK", peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
+    rec["feature_id"] = 424242
+    # Build an Arrow table (write_table path) carrying the provided id.
+    w = FeatureWriter(path, override_provided_ids=True)
+    table = w.align_table_to_schema(pa.Table.from_pylist([{k: v for k, v in rec.items()}]))
+    w.write_table(table)
+    w.close()
+
+    out = pq.read_table(path)
+    derived = derive_id([rec["peptidoform"], rec["charge"], rec["run_file_name"], rec["rt"]])
+    assert out.column("feature_id").to_pylist() == [derived]
+    assert w.overridden_id_count == 1
+    assert {"cv_name": "provided_feature_id", "cv_value": "424242"} in out.column("cv_params").to_pylist()[0]

@@ -133,7 +133,13 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
                 )
             )
         if want_psm:
-            pw = stack.enter_context(PsmWriter(str(out / f"{output_prefix}.psm.parquet"), creator=creator))
+            pw = stack.enter_context(
+                PsmWriter(
+                    str(out / f"{output_prefix}.psm.parquet"),
+                    creator=creator,
+                    identity_composite=_PSM_IDENTITY_COMPOSITE,
+                )
+            )
         feat_buf: list[dict] = []
         psm_buf: list[dict] = []
         for kind, obj in cm.iter_all():
@@ -302,7 +308,7 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
                 written["feature"] = path
             if want_psm:
                 path = out / f"{output_prefix}.psm.parquet"
-                with PsmWriter(str(path), creator=creator) as w:
+                with PsmWriter(str(path), creator=creator, identity_composite=_PSM_IDENTITY_COMPOSITE) as w:
                     if psm_recs:
                         w.write_batch(psm_recs)
                 written["psm"] = path
