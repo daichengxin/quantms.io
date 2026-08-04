@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Feature/PSM/PG primary key is now the derived id** (`feature_id` / `psm_id` / `pg_id`) instead of the composite tuple; the previous composite is retained as the footer-declared `identity_composite` the id is derived from
+- **Deterministic ids across write paths**: the id is now derived from the **persisted (Arrow-cast) values** in a single place, so `write_batch`, `write_table`, and `write_dataframe` produce identical ids for the same row (previously a float32 field such as `rt` could hash differently on the record vs table path). The `write_table`/`write_dataframe` paths derive the id before the non-nullable cast, so a frame/table without a precomputed id is accepted
+- **Injective identity encoding**: `canonical()` uses JSON (quoted/escaped) instead of a delimiter join, so composites whose list elements or fields contain the delimiters (e.g. run names with commas) can no longer alias to the same id
+- **Referential validation** also flags reciprocal feature↔psm desync (an edge present one way but contradicted by the other), as a warning, only where the opposite direction is populated
 
 - **BREAKING — Feature/PSM primary keys** (format 1.1, issue #217): feature PK
   `[sequence, charge, run_file_name, anchor_protein]` → `[peptidoform, charge,

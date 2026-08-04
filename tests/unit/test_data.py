@@ -392,3 +392,21 @@ def test_feature_psm_cross_refs_dangling_are_warnings(tmp_path):
     # Warnings must NOT fail validation.
     assert results["psm"].is_valid
     assert results["feature"].is_valid
+
+
+def test_feature_psm_reciprocal_desync_is_warning(tmp_path):
+    """A psm pointing at a feature whose non-empty psm_ids does not list it back
+    is flagged as a reciprocal desync warning (not a hard error)."""
+    from qpx.dataset import Dataset
+
+    _, feature_id, psm_id = _write_feature_psm_dataset(tmp_path / "probe", feature_psm_ids=None, psm_feature_id=None)
+    # feature.psm_ids lists feature_id (a real feature id, NOT this psm's id) and
+    # psm.feature_id resolves to the feature -> the edge exists one way but is not
+    # reciprocated.
+    ds_dir, _, _ = _write_feature_psm_dataset(tmp_path / "desync", feature_psm_ids=[feature_id], psm_feature_id=feature_id)
+    with Dataset(ds_dir) as ds:
+        results = ds.validate(structures=["feature", "psm"])
+    desync = [i for i in results["psm"].issues if i.check == "feature_psm_desync"]
+    assert len(desync) == 1
+    assert desync[0].severity == "warning"
+    assert results["psm"].is_valid  # warnings do not fail validation

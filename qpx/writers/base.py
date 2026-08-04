@@ -238,32 +238,23 @@ class BaseWriter:
         pk = self._schema_class.primary_key
         return pk[0] if len(pk) == 1 else None
 
-    def _derive_record_ids(self, records: list[dict]) -> None:
-        """Fill the derived id on each record dict in place.
-
-        Records already carrying a non-null id (producer-supplied) keep it;
-        otherwise the id is derived from the identity_composite fields. Missing
-        composite fields are treated as None (KeyError-safe via ``.get``).
+    def _relaxed_id_schema(self) -> pa.Schema:
+        """``arrow_schema`` with the derived-id field made nullable, so a batch or
+        table can be materialized before :meth:`_fill_identity_table` fills the id
+        (casting a null id to the required non-nullable field would otherwise fail).
         """
-        composite = self._identity_composite
         id_field = self._id_field
-        if not composite or id_field is None:
-            return
-        has_cv = "cv_params" in self.arrow_schema.names
-        for record in records:
-            provided = record.get(id_field)
-            if provided is not None and self._override_provided_ids:
-                # Preserve the producer-supplied id as a cv_param, then re-derive
-                # ours so the primary key is library-owned and reproducible.
-                if has_cv:
-                    cvs = list(record.get("cv_params") or [])
-                    cvs.append({"cv_name": f"provided_{id_field}", "cv_value": str(provided)})
-                    record["cv_params"] = cvs
-                record[id_field] = derive_id([record.get(f) for f in composite])
-                self.overridden_id_count += 1
-            elif provided is None:
-                record[id_field] = derive_id([record.get(f) for f in composite])
-            # else: provided id kept as-is (default, non-override)
+        if id_field is None:
+            return self.arrow_schema
+        return pa.schema([f.with_nullable(True) if f.name == id_field else f for f in self.arrow_schema])
+
+    def _check_required_non_null(self, obj) -> None:
+        """Raise if any non-nullable schema column has nulls (Table or RecordBatch)."""
+        for i, field in enumerate(self.arrow_schema):
+            if not field.nullable and obj.column(i).null_count > 0:
+                raise ValueError(
+                    f"Column '{field.name}' has {obj.column(i).null_count} null(s) but is marked as required in the schema"
+                )
 
     def _fill_identity_table(self, table: pa.Table) -> pa.Table:
         """Return *table* with its derived-id column present and non-null.
@@ -272,8 +263,8 @@ class BaseWriter:
         column (callers build via ``arrow_schema`` or align first). Rows with a
         non-null id keep it; the rest are derived from the composite columns.
         In ``override_provided_ids`` mode the id is re-derived even when present,
-        stashing the original as a ``provided_<id>`` cv_param — mirroring the
-        record path (:meth:`_derive_record_ids`) so both paths behave the same.
+        stashing the original as a ``provided_<id>`` cv_param. This is the single
+        derivation point for every write path (record, table, DataFrame).
         """
         composite = self._identity_composite
         id_field = self._id_field
@@ -281,8 +272,28 @@ class BaseWriter:
             return table
         n = table.num_rows
         names = set(table.schema.names)
+        sch = self.arrow_schema
+        # Hash the PERSISTED (schema-cast) value of each composite field so the id
+        # is identical regardless of which write path built the table — e.g. a
+        # float32 ``rt`` hashes to the same value whether it arrived as a raw
+        # Python float (record path) or an already-cast float32 column (table path).
+        composite_values: dict[str, list] = {}
+        for f in composite:
+            if f in names:
+                col = table.column(f)
+                ftype = sch.field(f).type
+                if col.type != ftype:
+                    try:
+                        col = col.cast(ftype)
+                    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError):
+                        # Bad/incompatible data (e.g. a wrong-typed column): fall
+                        # back to raw values here; schema validation downstream
+                        # surfaces the real type error rather than a cast crash.
+                        pass
+                composite_values[f] = col.to_pylist()
+            else:
+                composite_values[f] = [None] * n
         existing = table.column(id_field).to_pylist() if id_field in names else [None] * n
-        composite_values = {f: (table.column(f).to_pylist() if f in names else [None] * n) for f in composite}
         override = self._override_provided_ids
         cv_lists = table.column("cv_params").to_pylist() if (override and "cv_params" in names) else None
         ids: list[int] = []
@@ -313,18 +324,21 @@ class BaseWriter:
         return table.add_column(0, id_arrow_field, id_array)
 
     def align_table_to_schema(self, table: pa.Table) -> pa.Table:
-        """Project *table* onto ``arrow_schema``: keep matching columns, fill
-        absent ones (e.g. the derived id or the optional cross-ref columns) with
-        nulls, then cast to normalize types/nullability."""
-        schema = self.arrow_schema
+        """Project *table* onto the schema: keep matching columns, fill absent ones
+        (e.g. the derived id or the optional cross-ref columns) with nulls, then
+        cast. The id is left nullable here so a not-yet-derived (null) id is valid;
+        :meth:`write_table` is the single place that derives it, so the id is never
+        derived twice (which in override mode would double-stash the provided id).
+        """
+        relaxed = self._relaxed_id_schema()
         present = set(table.schema.names)
         n = table.num_rows
-        columns = [table.column(f.name) if f.name in present else pa.nulls(n, type=f.type) for f in schema]
+        columns = [table.column(f.name) if f.name in present else pa.nulls(n, type=f.type) for f in relaxed]
         intermediate = pa.Table.from_arrays(
             columns,
-            schema=pa.schema([pa.field(f.name, columns[i].type) for i, f in enumerate(schema)]),
+            schema=pa.schema([pa.field(f.name, columns[i].type) for i, f in enumerate(relaxed)]),
         )
-        return intermediate.cast(schema)
+        return intermediate.cast(relaxed)
 
     @property
     def arrow_schema(self) -> pa.Schema:
@@ -359,20 +373,21 @@ class BaseWriter:
     def write_dataframe(self, df: "pd.DataFrame"):
         """Write a pandas DataFrame. Converts to Arrow and validates.
 
-        Only columns the schema declares as **nullable** — plus the derived id
-        column (required, but stamped later in :meth:`write_table`) — are
-        backfilled with nulls when the frame omits them (e.g. the optional
-        cross-ref columns). A genuinely missing *required* column is left absent
-        so ``from_pandas`` surfaces it as a clear error rather than a deferred
-        null-value failure.
+        Built against a schema whose derived-id field is **nullable**, so a frame
+        without a precomputed id is accepted; :meth:`write_table` then derives the
+        id before validating against the strict schema. Only columns the schema
+        declares as nullable — plus the derived id — are backfilled when the frame
+        omits them; a genuinely missing *required* column is left absent so
+        ``from_pandas`` surfaces it as a clear error.
         """
         id_field = self._id_field
-        missing = [f.name for f in self.arrow_schema if f.name not in df.columns and (f.nullable or f.name == id_field)]
+        relaxed = self._relaxed_id_schema()
+        missing = [f.name for f in relaxed if f.name not in df.columns and (f.nullable or f.name == id_field)]
         if missing:
             df = df.copy()
             for name in missing:
                 df[name] = None
-        table = pa.Table.from_pandas(df, schema=self.arrow_schema, preserve_index=False)
+        table = pa.Table.from_pandas(df, schema=relaxed, preserve_index=False)
         self.write_table(table)
 
     def close(self):
@@ -385,14 +400,17 @@ class BaseWriter:
             self._writer = None
 
     def _write_arrow_batch(self, records: list[dict]):
-        self._derive_record_ids(records)
+        if self._identity_composite and self._id_field is not None:
+            # Build with a nullable id, then derive from the persisted (cast)
+            # values via _fill_identity_table — the same path table/DataFrame
+            # writes use, so a row's id is identical no matter how it was written.
+            table = self._fill_identity_table(pa.Table.from_pylist(records, schema=self._relaxed_id_schema()))
+            self._check_required_non_null(table)
+            self._ensure_writer()
+            self._writer.write_table(table)
+            return
         batch = pa.RecordBatch.from_pylist(records, schema=self.arrow_schema)
-        # Validate non-nullable columns
-        for i, field in enumerate(self.arrow_schema):
-            if not field.nullable and batch.column(i).null_count > 0:
-                raise ValueError(
-                    f"Column '{field.name}' has {batch.column(i).null_count} null(s) but is marked as required in the schema"
-                )
+        self._check_required_non_null(batch)
         self._ensure_writer()
         self._writer.write_batch(batch)
 

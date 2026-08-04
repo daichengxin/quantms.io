@@ -541,9 +541,12 @@ class Dataset:
         Appends a ``warning`` issue to *psm_result* for each non-null
         ``psm.feature_id`` that is not a ``feature.feature_id``, and to
         *feature_result* for each ``feature.psm_ids`` element that is not a
-        ``psm.psm_id``. A query failure (e.g. the optional cross-ref columns are
-        absent on older files) is surfaced as ``referential_check_skipped`` rather
-        than masking schema validation.
+        ``psm.psm_id``. It also flags **reciprocal desync** — an edge that exists
+        in one direction but is contradicted by the other — but only where the
+        opposite direction is actually populated, so an unpopulated cross-ref
+        column (the common case) is never a false positive. A query failure (e.g.
+        the optional cross-ref columns are absent on older files) is surfaced as
+        ``referential_check_skipped`` rather than masking schema validation.
         """
         try:
             dangling_feature_ids = self._engine.execute(
@@ -561,6 +564,18 @@ class Dataset:
                 FROM feature f, UNNEST(f.psm_ids) AS _u(pid)
                 WHERE pid IS NOT NULL
                   AND NOT EXISTS (SELECT 1 FROM psm p WHERE p.psm_id = pid)
+                ORDER BY psm_id
+                """
+            ).fetchall()
+            # Reciprocal desync: a psm points at a feature whose (non-empty) psm_ids
+            # does not list it back — i.e. the two directions describe different edges.
+            desync = self._engine.execute(
+                """
+                SELECT DISTINCT p.psm_id AS psm_id, p.feature_id AS feature_id
+                FROM psm p JOIN feature f ON f.feature_id = p.feature_id
+                WHERE p.feature_id IS NOT NULL
+                  AND f.psm_ids IS NOT NULL AND len(f.psm_ids) > 0
+                  AND NOT list_contains(f.psm_ids, p.psm_id)
                 ORDER BY psm_id
                 """
             ).fetchall()
@@ -594,6 +609,19 @@ class Dataset:
                     severity="warning",
                     column="psm_ids",
                     message=(f"feature.psm_ids contains {psm_id!r}, which does not resolve to a psm.psm_id in psm.parquet"),
+                )
+            )
+        for psm_id, feature_id in desync:
+            psm_result.issues.append(
+                ValidationIssue(
+                    structure="psm",
+                    check="feature_psm_desync",
+                    severity="warning",
+                    column="feature_id",
+                    message=(
+                        f"psm.psm_id {psm_id!r} points to feature {feature_id!r}, but that "
+                        f"feature.psm_ids does not list this psm back (reciprocal cross-ref desync)"
+                    ),
                 )
             )
 

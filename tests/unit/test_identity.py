@@ -31,10 +31,13 @@ def test_derive_id_handles_none():
         assert -(2**63) <= v < 2**63
 
 
-def test_canonical_uses_separators():
-    """The canonical encoding is unambiguous byte output."""
-    assert canonical(["A", "B"]) == b"A\x1fB"
-    assert canonical([None]) == b"\x00"
+def test_canonical_is_injective_json():
+    """The canonical encoding is injective JSON: delimiter-bearing values cannot
+    alias, and None becomes JSON null."""
+    assert canonical(["A", "B"]) == b'["A","B"]'
+    assert canonical([None]) == b"[null]"
+    # list elements containing commas/brackets do not collide across groupings
+    assert canonical([["a,b", "c"]]) != canonical([["a", "b,c"]])
 
 
 def test_schema_identity_metadata():
@@ -164,3 +167,31 @@ def test_override_applies_on_write_table_path(tmp_path):
     assert out.column("feature_id").to_pylist() == [derived]
     assert w.overridden_id_count == 1
     assert {"cv_name": "provided_feature_id", "cv_value": "424242"} in out.column("cv_params").to_pylist()[0]
+
+
+def test_ids_agree_across_write_paths(tmp_path):
+    """The same row must derive the same feature_id via write_batch, write_table,
+    and write_dataframe, even for a non-float32-exact rt (persisted-value hashing)."""
+    import pandas as pd
+
+    rec = make_feature_record(sequence="PEPTIDEK", peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
+    rec["rt"] = 450.26  # not exactly representable in float32
+
+    def written_id(name, how):
+        p = tmp_path / name
+        w = FeatureWriter(p)
+        if how == "batch":
+            w.write_batch([dict(rec)])
+        elif how == "table":
+            w.write_table(w.align_table_to_schema(pa.Table.from_pylist([dict(rec)])))
+        else:
+            w.write_dataframe(pd.DataFrame([dict(rec)]))
+        w.close()
+        return pq.read_table(p).column("feature_id").to_pylist()[0]
+
+    ids = {
+        written_id("b.feature.parquet", "batch"),
+        written_id("t.feature.parquet", "table"),
+        written_id("d.feature.parquet", "df"),
+    }
+    assert len(ids) == 1

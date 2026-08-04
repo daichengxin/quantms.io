@@ -73,8 +73,9 @@ class PgWriter(BaseWriter):
         """Explode a pg table that still carries the ``intensities`` list column."""
         if "intensities" in table.schema.names:
             exploded = _explode_pg_records(table.to_pylist())
-            self._derive_record_ids(exploded)
-            batch = pa.RecordBatch.from_pylist(exploded, schema=self.arrow_schema)
-            super().write_table(pa.Table.from_batches([batch], schema=self.arrow_schema))
+            # Build with a nullable id; super().write_table derives pg_id.
+            relaxed = self._relaxed_id_schema()
+            batch = pa.RecordBatch.from_pylist(exploded, schema=relaxed)
+            super().write_table(pa.Table.from_batches([batch], schema=relaxed))
             return
         super().write_table(table)

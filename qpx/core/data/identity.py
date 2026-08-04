@@ -17,34 +17,31 @@ validation issue rather than a silent data loss.
 from __future__ import annotations
 
 import hashlib
-
-# Unit Separator between composite fields, and a NUL sentinel for None, so that
-# the canonical byte string is unambiguous (no ordinary field value contains
-# these control characters).
-FIELD_SEP = chr(0x1F)  # ASCII Unit Separator
-NULL_TOKEN = chr(0x00)  # ASCII NUL — sentinel for a None composite value
+import json
 
 
-def _canonical_value(value) -> str:
-    """Order-insensitive canonical string for one composite value.
-
-    List/tuple values (e.g. ``grouped_runs``, ``scan``) are **sorted** so that
-    ``["r1", "r2"]`` and ``["r2", "r1"]`` canonicalize identically. This preserves
-    the order-insensitive identity the composite primary key had before it was
-    replaced by the single hashed id (the old duplicate-pk check JSON-sorted list
-    columns); without it, two rows differing only in list order would derive
-    distinct ids and escape duplicate detection.
+def _normalize(value):
+    """Recursively normalize a composite value into a JSON-serializable, order-
+    insensitive form. List/tuple values (e.g. ``grouped_runs``, ``scan``) are
+    **sorted** — by each element's canonical JSON — so ``["r1", "r2"]`` and
+    ``["r2", "r1"]`` normalize identically, preserving the order-insensitive
+    identity the composite primary key had before it became a single hashed id.
     """
-    if value is None:
-        return NULL_TOKEN
     if isinstance(value, (list, tuple)):
-        return "[" + ",".join(sorted(_canonical_value(v) for v in value)) + "]"
-    return str(value)
+        return sorted((_normalize(v) for v in value), key=lambda x: json.dumps(x, sort_keys=True))
+    return value
 
 
 def canonical(values: list) -> bytes:
-    """Encode composite *values* into a single unambiguous byte string."""
-    return FIELD_SEP.join(_canonical_value(v) for v in values).encode("utf-8")
+    """Encode composite *values* into a single, injective byte string.
+
+    Uses canonical JSON (fixed separators, sorted keys). JSON quotes and escapes
+    strings, so — unlike a plain delimiter join — distinct composites can never
+    alias to the same bytes even when list elements or fields contain the
+    delimiters themselves (e.g. run names with commas/brackets): ``["a,b", "c"]``
+    and ``["a", "b,c"]`` encode differently. ``None`` becomes JSON ``null``.
+    """
+    return json.dumps([_normalize(v) for v in values], separators=(",", ":"), sort_keys=True, ensure_ascii=True).encode("utf-8")
 
 
 def derive_id(values: list) -> int:
