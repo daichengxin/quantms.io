@@ -952,14 +952,43 @@ def convert_openms_cmd(**kwargs):
     show_default=True,
     help="Comma-separated views to write (run/sample require --sdrf-file).",
 )
+@click.option(
+    "--pg-top",
+    default=0,
+    show_default=True,
+    type=int,
+    help=(
+        "Peptides used for the interim pg intensity (unnormalized unique-peptide sum): "
+        "0 = all; 3 mirrors the quantms ProteomicsLFQ/IsobaricWorkflow default."
+    ),
+)
+@click.option(
+    "--streaming/--no-streaming",
+    default=None,
+    help=(
+        "Force the low-memory streaming reader on/off. Default: auto (streaming for "
+        "consensusXML files > 4 GB, which pyopenms would otherwise load whole into "
+        "~0.8x-file RAM)."
+    ),
+)
 @click.option("--verbose", is_flag=True, help="Enable verbose logging.")
-def convert_openms_consensus_cmd(consensusxml_path, sdrf_path, output_folder, output_prefix, structures, verbose):
+def convert_openms_consensus_cmd(
+    consensusxml_path,
+    sdrf_path,
+    output_folder,
+    output_prefix,
+    structures,
+    pg_top,
+    streaming,
+    verbose,
+):
     """Convert an OpenMS consensusXML (+ SDRF) to QPX.
 
     Interim quantms path while OpenMS -out_qpx is pre-1.1. The feature view carries
-    the per-run/channel peptide intensities from the consensusXML; the pg view is
-    IDENTIFICATION-ONLY (no protein intensity) until OpenMS provides the
-    authoritative protein quant.
+    the per-run/channel peptide intensities from the consensusXML; the pg view
+    carries an interim unnormalized unique-peptide-sum protein intensity (stamped
+    with a quantification_method cv_param) until OpenMS provides the authoritative
+    protein quant.
     """
     if verbose:
         logging.basicConfig(level=logging.INFO)
@@ -972,6 +1001,8 @@ def convert_openms_consensus_cmd(consensusxml_path, sdrf_path, output_folder, ou
         output_prefix=output_prefix,
         sdrf_path=str(sdrf_path) if sdrf_path else None,
         structures=structs,
+        pg_top=pg_top,
+        streaming=streaming,
     )
     click.echo(f"consensusXML conversion complete. Wrote: {sorted(written)}")
 

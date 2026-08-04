@@ -68,9 +68,15 @@ This version defines all core serialized views (PSM, Feature, PG, MZ), the deriv
   Feature: `[sequence, charge, run_file_name, anchor_protein]` ->
   `[peptidoform, charge, run_file_name, rt]` — a feature is a physical
   chromatographic peak, so `peptidoform` (not the unmodified `sequence`) plus the
-  apex `rt` are required to identify it uniquely; `anchor_protein` is an
-  annotation and was measured redundant. `rt` must be finite and non-null and the
-  key is meaningful within a file only (never join across files on `rt`). PSM:
+  apex `rt` identify it uniquely; `anchor_protein` is an annotation and was
+  measured redundant. Where a producer reports it, `rt` is finite and the key is
+  meaningful within a file only (never join across files on `rt`). `rt` is
+  **nullable** because some producers (e.g. FragPipe `combined_ion`) report no
+  per-feature RT; a null `rt` is still a key value (it does not remove `rt` from
+  the key), so such producers must emit **at most one feature per `(peptidoform,
+  charge, run_file_name)`** — `combined_ion` does, being one row per ion. A null
+  `rt` cannot disambiguate co-eluting peaks, so any residual collision surfaces as
+  a `duplicate_pk` validation error rather than silent data loss. PSM:
   `[sequence, charge, run_file_name, scan]` -> `[peptidoform, charge,
   run_file_name, scan]`. Regenerate feature/psm files under >= 1.1.
 - **1.1** (OpenMS bridge): OpenMS and QPX share the *fraction_group* concept — a

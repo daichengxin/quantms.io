@@ -25,7 +25,7 @@ Define these once; the rest of the spec uses them consistently.
 | **source name** | SDRF term for the biological sample; becomes `sample_accession`. | SDRF → `sample` |
 | **channel** | A physically distinguishable measurement track within one run. LFQ has one channel; TMT-10plex has ten reporter-ion channels; plexDIA has one per plex label. | concept |
 | **label** | The **canonical name of a channel** (`LFQ`, `TMT126`, `iTRAQ114`, …). This is the string that ties a quantity to a sample. For LFQ there is exactly one label, `"LFQ"`. For TMT/iTRAQ/plexDIA each channel is a distinct label mapping to a distinct sample. | `run.samples[].label`, `feature.intensities[].label`, `pg.label` |
-| **fraction** | A pre-fractionation slice of one sample. Fractions of one sample share the same (source, biological replicate, technical replicate) and differ **only** in `run.fraction`. Each fraction is a separate run/raw file. | `run.fraction` |
+| **fraction** | A fractionated portion of one sample. Fractions of one sample share the same (source, biological replicate, technical replicate) and differ **only** in `run.fraction`. Each fraction is a separate run/raw file. | `run.fraction` |
 | **grouped_runs** | The **set of raw files aggregated into one quantification unit** — the fractions of one sample+channel context, aggregated together. `list<string>` of `run_file_name`. Single-element for unfractionated or DIA data. | `pg.grouped_runs` |
 | **quantification unit** | The thing a protein quantity is measured *over*: one `grouped_runs` set. A protein abundance exists per quantification unit, **not** per single raw file, because a protein quantity only emerges after aggregating its peptides across the sample's fractions. | `pg` (one row per `(anchor_protein, grouped_runs, label)`) |
 | **peptidoform** | Peptide sequence + modifications in ProForma notation. The identity thread linking PSM ↔ feature ↔ pepmap. | `psm`, `feature`, `pepmap` |
@@ -36,9 +36,9 @@ Define these once; the rest of the spec uses them consistently.
 !!! warning "label is per-channel, grouped_runs is per-quantification-unit — they are orthogonal"
     A quantity is pinned by **both** a `grouped_runs` set (which fractions were
     aggregated) **and** a `label` (which channel/sample). In LFQ the label is
-    always `"LFQ"` and multiplexing lives entirely in `grouped_runs`; in TMT one
-    `grouped_runs` carries *N* labels, one per reporter channel. Never collapse the
-    two.
+    always `"LFQ"` and sample separation lives entirely in `grouped_runs` (each
+    sample is its own fraction-aggregation set); in TMT one `grouped_runs` carries
+    *N* labels, one per reporter channel. Never collapse the two.
 
 ## The four core views and the measurement flow
 

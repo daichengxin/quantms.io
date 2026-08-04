@@ -36,6 +36,50 @@ def _canonical_channel(label: Optional[str]) -> str:
     return normalize_label(str(label))
 
 
+def _map_label(raw_label) -> str:
+    """Resolve a consensusXML map label to a QPX channel, or ``LFQ``.
+
+    Detection is by the label itself, NOT ``experiment_type``: quantms/OpenMS
+    write ``experiment_type="label-free"`` even for isobaric runs (the maps still
+    carry ``tmt6plex_126`` / ``itraq4plex_114`` labels; label-free maps carry the
+    literal ``"label-free"``). Only a real isobaric channel pattern becomes a
+    channel; everything else (``"label-free"``, empty, unknown) is ``LFQ``.
+    """
+    return _canonical_channel(raw_label) if _CHANNEL_RE.search(str(raw_label or "")) else "LFQ"
+
+
+def consensus_channels(cm) -> set[str]:
+    """Canonical isobaric channels present in the consensusXML maps (excludes LFQ)."""
+    headers = cm.getColumnHeaders()
+    return {lab for i in headers if (lab := _map_label(headers[i].label)) != "LFQ"}
+
+
+def check_channels_vs_sdrf(cm, sdrf_path) -> list[str]:
+    """Return warnings where the consensusXML channels disagree with the SDRF.
+
+    The consensusXML map labels are the channel identity the converter uses; the
+    SDRF ``comment[label]`` set is the experiment's declared ground truth. A
+    channel present in one but not the other is a metadata inconsistency worth
+    surfacing (e.g. a mis-declared plex, or the wrong SDRF). Returns human-readable
+    messages — empty when the two agree, or when the SDRF has no label column.
+    """
+    from qpx.converters.channel_labels import read_sdrf_labels
+
+    sdrf_raw = read_sdrf_labels(sdrf_path)
+    if not sdrf_raw:
+        return []
+    sdrf_channels = {normalize_label(v) for v in sdrf_raw} - {"LFQ"}
+    cm_channels = consensus_channels(cm)
+    messages: list[str] = []
+    only_cm = sorted(cm_channels - sdrf_channels)
+    only_sdrf = sorted(sdrf_channels - cm_channels)
+    if only_cm:
+        messages.append(f"channel(s) in the consensusXML but not the SDRF comment[label]: {only_cm}")
+    if only_sdrf:
+        messages.append(f"channel(s) in the SDRF comment[label] but not the consensusXML: {only_sdrf}")
+    return messages
+
+
 def to_proforma(aa_sequence) -> str:
     """Convert an OpenMS ``AASequence`` to a ProForma peptidoform string.
 
@@ -65,31 +109,63 @@ def load_consensus_map(consensusxml_path: str):
     return cm
 
 
-def consensus_features_to_records(consensusxml_path: str | None = None, cm=None) -> list[dict]:
+def _pid_scans(pid) -> list[int]:
+    """Scan numbers parsed from one identification's spectrum reference."""
+    ref = pid.getSpectrumReference() if hasattr(pid, "getSpectrumReference") else ""
+    if not ref and pid.metaValueExists("spectrum_reference"):
+        ref = pid.getMetaValue("spectrum_reference")
+    return [int(m) for m in re.findall(r"(?:scan|index|spectrum)=(\d+)", str(ref or ""), re.IGNORECASE)]
+
+
+def _scan_by_run(pids, map_info: dict[int, tuple[str, str]]) -> dict[str, list[int]]:
+    """Attribute each identification's scan(s) to its own run.
+
+    A consensus feature links spectra from several runs, so scans are resolved
+    per ID via its ``map_index`` (falling back to the sole run only when every
+    map is the same physical run, e.g. isobaric channels) rather than copying
+    one ID's scan onto every run's record.
+    """
+    runs_in_map = {info[0] for info in map_info.values()}
+    sole_run = next(iter(runs_in_map)) if len(runs_in_map) == 1 else None
+    scan_by_run: dict[str, list[int]] = {}
+    for pid in pids:
+        scans = _pid_scans(pid)
+        if not scans:
+            continue
+        pid_run = None
+        if pid.metaValueExists("map_index"):
+            pid_run = map_info.get(int(pid.getMetaValue("map_index")), (None, None))[0]
+        pid_run = pid_run or sole_run
+        if pid_run is not None:
+            scan_by_run.setdefault(pid_run, scans)
+    return scan_by_run
+
+
+def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, anchor_map=None) -> list[dict]:
     """Return QPX feature record dicts extracted from a consensusXML.
 
     Pass either ``consensusxml_path`` (loaded here) or an already-loaded ``cm``.
+    ``anchor_map`` (accession -> protein-group leader, from
+    ``pg_adapter.accession_to_anchor``) makes each feature's ``anchor_protein``
+    the same group leader the pg view uses, so the feature->pg join is reliable;
+    without it the anchor falls back to the peptide's first protein evidence.
     """
     cm = cm if cm is not None else load_consensus_map(consensusxml_path)
 
     headers = cm.getColumnHeaders()
-    is_labeled = cm.getExperimentType() != "label-free"
+    # Label per map from the map label itself (isobaric channel -> canonical, else
+    # LFQ) — experiment_type is unreliable (quantms writes "label-free" for TMT).
     map_info: dict[int, tuple[str, str]] = {}
     for idx in headers:
         header = headers[idx]
-        run = _run_stem(header.filename)
-        label = _canonical_channel(header.label) if is_labeled else "LFQ"
-        map_info[idx] = (run, label)
+        map_info[idx] = (_run_stem(header.filename), _map_label(header.label))
 
     records: list[dict] = []
     for cf in cm:
         pids = cf.getPeptideIdentifications()
         if not pids or not pids[0].getHits():
             continue
-        spectrum_ref = pids[0].getSpectrumReference() if hasattr(pids[0], "getSpectrumReference") else ""
-        if not spectrum_ref and pids[0].metaValueExists("spectrum_reference"):
-            spectrum_ref = pids[0].getMetaValue("spectrum_reference")
-        scan = [int(m) for m in re.findall(r"(?:scan|index|spectrum)=(\d+)", str(spectrum_ref or ""), re.IGNORECASE)]
+        scan_by_run = _scan_by_run(pids, map_info)
         hit = pids[0].getHits()[0]
         seq_obj = hit.getSequence()
         peptidoform = to_proforma(seq_obj)
@@ -104,6 +180,10 @@ def consensus_features_to_records(consensusxml_path: str | None = None, cm=None)
         anchor_protein = evidences[0].getProteinAccession() if evidences else None
         if isinstance(anchor_protein, bytes):
             anchor_protein = anchor_protein.decode()
+        # Resolve to the protein-group leader so feature.anchor_protein matches the
+        # pg view (peptide evidence order alone does not identify the leader).
+        if anchor_map and anchor_protein is not None:
+            anchor_protein = anchor_map.get(anchor_protein, anchor_protein)
 
         # Group the sub-feature intensities by run: for isobaric, one run carries
         # several channel maps (same rt); for label-free, one map == one run. One
@@ -128,8 +208,8 @@ def consensus_features_to_records(consensusxml_path: str | None = None, cm=None)
                     "peptidoform": peptidoform,
                     "charge": charge,
                     "run_file_name": run,
+                    "scan": scan_by_run.get(run, []),
                     "rt": entry["rt"],
-                    "scan": scan,
                     "intensities": intensities,
                     "is_decoy": is_decoy,
                     "calculated_mz": calculated_mz,

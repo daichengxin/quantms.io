@@ -180,8 +180,10 @@ def _pg_referential_issues(
         double = con.execute(
             """
             WITH exploded AS (
-                SELECT anchor_protein, label,
-                       UNNEST(list_distinct(grouped_runs)) AS run
+                -- Deduplicate each row's own grouped_runs first (a within-row
+                -- duplicate is already reported by duplicate_grouped_run); this
+                -- way run_double_count measures only cross-row disjointness.
+                SELECT anchor_protein, label, UNNEST(list_distinct(grouped_runs)) AS run
                 FROM pg_validate
             ),
             repeated AS (

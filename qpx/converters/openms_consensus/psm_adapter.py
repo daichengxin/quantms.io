@@ -9,9 +9,12 @@ single-run consensusXML, the sole run.
 
 from __future__ import annotations
 
+import logging
 import re
 
 from qpx.converters.openms_consensus.feature_adapter import _run_stem, load_consensus_map, to_proforma
+
+_log = logging.getLogger(__name__)
 
 _SCAN_RE = re.compile(r"(?:scan|index|spectrum)=(\d+)", re.IGNORECASE)
 
@@ -64,6 +67,13 @@ def consensus_psms_to_records(consensusxml_path: str | None = None, cm=None) -> 
         if not spectrum_ref and pid.metaValueExists("spectrum_reference"):
             spectrum_ref = pid.getMetaValue("spectrum_reference")
         scan = _scan_of(spectrum_ref)
+        if not scan:
+            # The PSM primary key is [peptidoform, charge, run_file_name, scan];
+            # an identification whose spectrum_reference carries no scan token
+            # cannot be keyed uniquely. Skip it rather than write a scan=[] record
+            # that would collapse distinct spectra under the primary key.
+            _log.debug("Skipping consensusXML PSM with no scan token in spectrum_reference: %r", spectrum_ref)
+            continue
         obs_mz = float(pid.getMZ()) if pid.getMZ() else 0.0
         # When the identification score IS the q-value, the hit score is the
         # peptide q-value (OpenMS FDR output); otherwise it is a search score.

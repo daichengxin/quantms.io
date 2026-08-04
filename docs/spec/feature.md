@@ -10,9 +10,11 @@ primary key `[peptidoform, charge, run_file_name, rt]` — the apex `rt` resolve
 distinct peaks that a single peptidoform+charge produces within one run (isomers,
 split peaks, repeated elution). `rt` should be finite and populated wherever the
 producer reports per-feature retention time (DIA-NN, OpenMS/quantms, TMT); some
-tools (e.g. FragPipe `combined_ion`) do not, leaving `rt` null — for those the key
-degenerates and uniqueness is not guaranteed. The key is meaningful within a file
-only — never join across files or tools on `rt`.
+tools (e.g. FragPipe `combined_ion`) do not, leaving `rt` null. A null `rt` is
+still a key value (it does not drop `rt` from the key), so those producers must
+emit at most one feature per `(peptidoform, charge, run_file_name)` — any residual
+collision is reported as a `duplicate_pk` validation error, not silent. The key is
+meaningful within a file only — never join across files or tools on `rt`.
 
 ## Use Cases
 

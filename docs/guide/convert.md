@@ -103,7 +103,7 @@ The `convert` command group provides converters for multiple proteomics software
 ## Available Commands
 
 - [quantms](#quantms) - Convert QuantMS mzTab output to QPX format
-- [openms-consensus](#openms-consensus) - Convert an OpenMS consensusXML (+ SDRF) to QPX (interim; pg identification-only)
+- [openms-consensus](#openms-consensus) - Convert an OpenMS consensusXML (+ SDRF) to QPX (interim; pg intensity = unnormalized unique-peptide sum)
 - [diann](#diann) - Convert DIA-NN report to QPX format
 - [spectronaut](#spectronaut) - Convert Spectronaut report to QPX format
 - [maxquant](#maxquant) - Convert MaxQuant output to QPX format
@@ -818,19 +818,24 @@ print(generate_example(convert_sdrf_cmd, "Convert SDRF metadata with default set
 
 ### Description {#openms-consensus-description}
 
-Convert an OpenMS `.consensusXML` (plus its SDRF) directly to QPX. This is the
+Convert an OpenMS `.consensusXML` (optionally with an SDRF) directly to QPX. This is the
 **interim quantms production path** while OpenMS `-out_qpx` is not yet emitting
 QPX format 1.1. The consensusXML carries per-run peptide-feature intensities,
 PSMs, and the protein-inference graph; the SDRF supplies sample/label/fraction
 metadata and the `grouped_runs` quantification units.
 
-!!! warning "Protein intensity is not emitted (interim)"
+!!! warning "Protein intensity is an interim, unnormalized rollup"
     The consensusXML has no protein-level abundance — that quantity lived only in
-    the mzTab (`protein_abundance_assay`, from ProteinQuantifier). So the **pg view
-    is identification-only**: `label` identifies the channel (`LFQ`, `TMT126`,
-    etc.), while `intensity` is null until OpenMS `-out_qpx` provides the
-    authoritative protein quant. The **feature view keeps** its per-run/channel
-    peptide intensities (read directly from the consensusXML).
+    the mzTab (`protein_abundance_assay`, from ProteinQuantifier). Until OpenMS
+    `-out_qpx` provides the authoritative number, each `(protein group,
+    grouped_runs, label)` row's `intensity` is a stopgap we compute ourselves: the
+    **unnormalized sum of the group's unique peptides** for that channel (the
+    quantms `unique_peptides` policy, no normalization). Every quantified row
+    carries a `quantification_method` cv_param (`unnormalized_unique_peptide_sum`)
+    so it is never mistaken for the real quant, and rows stay `intensity`-null
+    where a group has no unique-peptide signal. Use `--pg-top 3` to mirror the
+    quantms ProteomicsLFQ/IsobaricWorkflow default (top-3 peptides) instead of
+    summing all.
 
 ### Parameters {#openms-consensus-parameters}
 
@@ -841,6 +846,7 @@ metadata and the `grouped_runs` quantification units.
 | `--output-folder` | yes | Output directory for the QPX views. |
 | `--output-prefix` | no | Prefix for output file names (default `openms`). |
 | `--structures` | no | Comma-separated views (default `feature,psm,pg,run,sample`; `run`/`sample` require `--sdrf-file`). |
+| `--pg-top` | no | Peptides used for the interim pg intensity: `0` (default) sums all unique peptides; `3` mirrors the quantms ProteomicsLFQ/IsobaricWorkflow default. |
 
 ### Usage Examples {#openms-consensus-examples}
 
@@ -856,7 +862,7 @@ qpxc convert openms-consensus \
 
 - `<prefix>.feature.parquet` — one row per `(peptidoform, charge, run, rt)` with per-run/channel intensities.
 - `<prefix>.psm.parquet` — one row per spectrum match (scan, PEP, q-value, decoy).
-- `<prefix>.pg.parquet` — protein groups (`pg_accessions`, `grouped_runs`, `label`, peptide/feature counts, `global_qvalue`, decoy, genes); `intensity` is null (interim, identification-only).
+- `<prefix>.pg.parquet` — protein groups (`pg_accessions`, `grouped_runs`, peptide/feature counts, `global_qvalue`, decoy, genes); one row per channel with a populated `label` and an interim `intensity` = unnormalized sum of the group's unique peptides (stamped with a `quantification_method` cv_param; null where a group has no unique-peptide signal). See `--pg-top`.
 - `<prefix>.run.parquet`, `<prefix>.sample.parquet` — from the SDRF (when provided).
 
 ---
