@@ -522,7 +522,80 @@ class Dataset:
             self._check_grouped_runs_referential(results["pg"], strict=strict)
             self._check_grouped_runs_sample_mapping(results["pg"], strict=strict)
 
+        # Cross-structure invariant: the optional feature<->psm cross-references
+        # must resolve. Every non-null psm.feature_id must name a real
+        # feature.feature_id, and every feature.psm_ids element a real psm.psm_id.
+        # Unresolved references are reported as *warnings* (per the agreed design:
+        # during/after conversion a dangling cross-ref is a soft signal, not a
+        # hard error) — but only when both views are present.
+        if "feature" in results and "psm" in results and self.feature is not None and self.psm is not None:
+            self._check_feature_psm_referential(results["feature"], results["psm"], strict=strict)
+
         return results
+
+    def _check_feature_psm_referential(
+        self, feature_result: ValidationResult, psm_result: ValidationResult, *, strict: bool = False
+    ) -> None:
+        """Flag feature<->psm cross-references that do not resolve.
+
+        Appends a ``warning`` issue to *psm_result* for each non-null
+        ``psm.feature_id`` that is not a ``feature.feature_id``, and to
+        *feature_result* for each ``feature.psm_ids`` element that is not a
+        ``psm.psm_id``. A query failure (e.g. the optional cross-ref columns are
+        absent on older files) is surfaced as ``referential_check_skipped`` rather
+        than masking schema validation.
+        """
+        try:
+            dangling_feature_ids = self._engine.execute(
+                """
+                SELECT DISTINCT p.feature_id AS feature_id
+                FROM psm p
+                WHERE p.feature_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM feature f WHERE f.feature_id = p.feature_id)
+                ORDER BY feature_id
+                """
+            ).fetchall()
+            dangling_psm_ids = self._engine.execute(
+                """
+                SELECT DISTINCT pid AS psm_id
+                FROM feature f, UNNEST(f.psm_ids) AS _u(pid)
+                WHERE pid IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM psm p WHERE p.psm_id = pid)
+                ORDER BY psm_id
+                """
+            ).fetchall()
+        except duckdb.Error as exc:
+            _log.warning("feature<->psm referential check could not run (possible schema drift): %s", exc)
+            skipped = ValidationIssue(
+                structure="psm",
+                check="referential_check_skipped",
+                severity="error" if strict else "warning",
+                column=None,
+                message=f"feature<->psm referential check could not run (possible schema drift): {exc}",
+            )
+            psm_result.issues.append(skipped)
+            return
+
+        for (feature_id,) in dangling_feature_ids:
+            psm_result.issues.append(
+                ValidationIssue(
+                    structure="psm",
+                    check="dangling_feature_id",
+                    severity="warning",
+                    column="feature_id",
+                    message=(f"psm.feature_id {feature_id!r} does not resolve to a feature.feature_id in feature.parquet"),
+                )
+            )
+        for (psm_id,) in dangling_psm_ids:
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="dangling_psm_id",
+                    severity="warning",
+                    column="psm_ids",
+                    message=(f"feature.psm_ids contains {psm_id!r}, which does not resolve to a psm.psm_id in psm.parquet"),
+                )
+            )
 
     def _check_grouped_runs_referential(self, pg_result: ValidationResult, *, strict: bool = False) -> None:
         """Flag pg.grouped_runs values that are not present in run.run_file_name.

@@ -114,6 +114,10 @@ class FragPipeFeatureAdapter(BaseConverter):
         psm_lookup = self._build_psm_lookup(psm_path) if psm_path else {}
 
         # Step 5: Stream and transform
+        # NOTE: no producer-specific identity_composite is passed here — FragPipe
+        # keeps the feature.yaml schema default for now. Its true producer composite
+        # needs compensation_voltage + quantification_unit_id (bigbio/qpx#230), which
+        # do not exist in feature.yaml yet; wire it once those columns are added.
         with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
             for batch in self._query_batched("SELECT * FROM fragpipe_features", chunksize):
                 df = batch.to_pandas()

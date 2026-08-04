@@ -320,3 +320,75 @@ def test_grouped_runs_label_resolving_to_multiple_samples_is_error(tmp_path):
     assert ambiguous[0].severity == "error"
     assert "2 samples" in ambiguous[0].message
     assert not results["pg"].is_valid
+
+
+# ---------------------------------------------------------------------------
+# feature<->psm cross-reference referential invariant
+# ---------------------------------------------------------------------------
+
+
+def _write_feature_psm_dataset(ds_dir, *, feature_psm_ids, psm_feature_id):
+    """Write a minimal feature + psm dataset with explicit cross-refs.
+
+    ``feature_psm_ids`` is assigned to the single feature's ``psm_ids`` and
+    ``psm_feature_id`` to the single psm's ``feature_id``. Returns the dir plus
+    the writer-derived ``(feature_id, psm_id)`` so callers can build resolving refs.
+    """
+    from qpx.core.data.identity import derive_id
+    from qpx.writers import FeatureWriter, PsmWriter
+    from tests.conftest import make_feature_record, make_psm_record
+
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    feat = make_feature_record()
+    psm = make_psm_record()
+    # The writers derive the identity ids from the schema-default composites; mirror
+    # them so a caller can construct a *resolving* cross-ref.
+    feature_id = derive_id([feat["peptidoform"], feat["charge"], feat["run_file_name"], feat["rt"]])
+    psm_id = derive_id([psm["peptidoform"], psm["charge"], psm["run_file_name"], psm["scan"]])
+    feat["psm_ids"] = feature_psm_ids
+    psm["feature_id"] = psm_feature_id
+    with FeatureWriter(ds_dir / "exp.feature.parquet") as w:
+        w.write_batch([feat])
+    with PsmWriter(ds_dir / "exp.psm.parquet") as w:
+        w.write_batch([psm])
+    return ds_dir, feature_id, psm_id
+
+
+def test_feature_psm_cross_refs_resolve_cleanly(tmp_path):
+    """When every cross-ref resolves, no dangling-reference issue is raised."""
+    from qpx.dataset import Dataset
+
+    # Two-pass: first derive the ids, then rewrite with resolving refs.
+    _, feature_id, psm_id = _write_feature_psm_dataset(tmp_path / "probe", feature_psm_ids=None, psm_feature_id=None)
+    ds_dir, _, _ = _write_feature_psm_dataset(tmp_path / "good", feature_psm_ids=[psm_id], psm_feature_id=feature_id)
+
+    with Dataset(ds_dir) as ds:
+        results = ds.validate(structures=["feature", "psm"])
+
+    dangling = [i for r in results.values() for i in r.issues if i.check in ("dangling_feature_id", "dangling_psm_id")]
+    assert dangling == []
+
+
+def test_feature_psm_cross_refs_dangling_are_warnings(tmp_path):
+    """A psm.feature_id / feature.psm_ids element with no sibling id -> warning."""
+    from qpx.dataset import Dataset
+
+    ds_dir, _, _ = _write_feature_psm_dataset(
+        tmp_path / "bad",
+        feature_psm_ids=[888888],  # no such psm_id
+        psm_feature_id=999999,  # no such feature_id
+    )
+    with Dataset(ds_dir) as ds:
+        results = ds.validate(structures=["feature", "psm"])
+
+    dangling_feature = [i for i in results["psm"].issues if i.check == "dangling_feature_id"]
+    dangling_psm = [i for i in results["feature"].issues if i.check == "dangling_psm_id"]
+    assert len(dangling_feature) == 1
+    assert dangling_feature[0].severity == "warning"
+    assert "999999" in dangling_feature[0].message
+    assert len(dangling_psm) == 1
+    assert dangling_psm[0].severity == "warning"
+    assert "888888" in dangling_psm[0].message
+    # Warnings must NOT fail validation.
+    assert results["psm"].is_valid
+    assert results["feature"].is_valid

@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -169,6 +169,7 @@ class BaseWriter:
         scan_format: str | None = None,
         extra_columns: list[str] | None = None,
         override_provided_ids: bool = False,
+        identity_composite: Optional[Sequence[str]] = None,
     ):
         self._path = Path(path)
         self._compression = compression
@@ -182,6 +183,13 @@ class BaseWriter:
         # the override in provenance.
         self._override_provided_ids = override_provided_ids
         self.overridden_id_count = 0
+        # Producer-specific identity composite override. When set, the writer
+        # hashes THIS composite into the derived id (feature_id / psm_id / pg_id)
+        # instead of the schema default, letting each converter declare the
+        # measured keys its producer emits (bigbio/qpx#229). Stored as a tuple so
+        # the footer stamps the effective composite via the ``_identity_composite``
+        # property below.
+        self._identity_composite_override = tuple(identity_composite) if identity_composite else None
 
         # Build Parquet footer metadata. Two distinct versions are stamped:
         #   qpx_version    — the on-disk *specification* version (QPX_SPEC_VERSION),
@@ -213,7 +221,13 @@ class BaseWriter:
 
     @property
     def _identity_composite(self) -> tuple[str, ...] | None:
-        """The schema's identity_composite, or None for views without one."""
+        """The effective identity_composite the id is derived from.
+
+        A converter-supplied override (producer-specific composite) wins over the
+        schema class attribute; ``None`` for views without any derived identity.
+        """
+        if self._identity_composite_override is not None:
+            return self._identity_composite_override
         return getattr(self._schema_class, "identity_composite", None)
 
     @property
