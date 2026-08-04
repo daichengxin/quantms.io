@@ -525,7 +525,7 @@ class TestQuantmsPgAdapter:
         )
 
         def _always_fail(*args, **kwargs):
-            raise RuntimeError("synthetic failure")
+            raise ValueError("synthetic failure")
 
         monkeypatch.setattr(QuantmsPgAdapter, "_build_single_pg", _always_fail)
 
@@ -662,7 +662,7 @@ class TestQuantmsPgAdapter:
 
         def _patched_build(self, anchor_protein, grouped_runs, features, single_meta, group_meta):
             if anchor_protein in ("P3", "P4"):
-                raise RuntimeError("synthetic failure")
+                raise ValueError("synthetic failure")
             return _original_build(self, anchor_protein, grouped_runs, features, single_meta, group_meta)
 
         monkeypatch.setattr(QuantmsPgAdapter, "_build_single_pg", _patched_build)
