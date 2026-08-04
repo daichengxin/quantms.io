@@ -11,6 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from qpx._version import __version__
+from qpx.core.data.identity import derive_id
 from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
@@ -193,6 +194,82 @@ class BaseWriter:
         if scan_format:
             self._file_metadata[b"scan_format"] = scan_format.encode()
 
+        # Views with a footer-declared identity_composite carry a single-column
+        # derived-identity primary key (feature_id / psm_id / pg_id). Stamp the
+        # footer so every file self-describes its key and how the id is derived.
+        identity_composite = self._identity_composite
+        if identity_composite:
+            self._file_metadata[b"primary_key"] = self._id_field.encode()
+            self._file_metadata[b"identity_composite"] = ",".join(identity_composite).encode()
+
+    # --- Derived identity --------------------------------------------------
+
+    @property
+    def _identity_composite(self) -> tuple[str, ...] | None:
+        """The schema's identity_composite, or None for views without one."""
+        return getattr(self._schema_class, "identity_composite", None)
+
+    @property
+    def _id_field(self) -> str | None:
+        """The single-column identity primary key (the id field), else None."""
+        if not self._identity_composite:
+            return None
+        pk = self._schema_class._primary_key
+        return pk[0] if len(pk) == 1 else None
+
+    def _derive_record_ids(self, records: list[dict]) -> None:
+        """Fill the derived id on each record dict in place.
+
+        Records already carrying a non-null id (producer-supplied) keep it;
+        otherwise the id is derived from the identity_composite fields. Missing
+        composite fields are treated as None (KeyError-safe via ``.get``).
+        """
+        composite = self._identity_composite
+        id_field = self._id_field
+        if not composite or id_field is None:
+            return
+        for record in records:
+            if record.get(id_field) is None:
+                record[id_field] = derive_id([record.get(f) for f in composite])
+
+    def _fill_identity_table(self, table: pa.Table) -> pa.Table:
+        """Return *table* with its derived-id column present and non-null.
+
+        The table is assumed to already match ``arrow_schema`` in every other
+        column (callers build via ``arrow_schema`` or align first). Rows with a
+        non-null id keep it; the rest are derived from the composite columns.
+        """
+        composite = self._identity_composite
+        id_field = self._id_field
+        if not composite or id_field is None:
+            return table
+        n = table.num_rows
+        names = set(table.schema.names)
+        existing = table.column(id_field).to_pylist() if id_field in names else [None] * n
+        composite_values = {f: (table.column(f).to_pylist() if f in names else [None] * n) for f in composite}
+        ids = [
+            existing[i] if existing[i] is not None else derive_id([composite_values[f][i] for f in composite]) for i in range(n)
+        ]
+        id_array = pa.array(ids, type=pa.int64())
+        id_arrow_field = pa.field(id_field, pa.int64(), nullable=False)
+        if id_field in names:
+            return table.set_column(table.schema.get_field_index(id_field), id_arrow_field, id_array)
+        return table.add_column(0, id_arrow_field, id_array)
+
+    def _align_table_to_schema(self, table: pa.Table) -> pa.Table:
+        """Project *table* onto ``arrow_schema``: keep matching columns, fill
+        absent ones (e.g. the derived id or the optional cross-ref columns) with
+        nulls, then cast to normalize types/nullability."""
+        schema = self.arrow_schema
+        present = set(table.schema.names)
+        n = table.num_rows
+        columns = [table.column(f.name) if f.name in present else pa.nulls(n, type=f.type) for f in schema]
+        intermediate = pa.Table.from_arrays(
+            columns,
+            schema=pa.schema([pa.field(f.name, columns[i].type) for i, f in enumerate(schema)]),
+        )
+        return intermediate.cast(schema)
+
     @property
     def arrow_schema(self) -> pa.Schema:
         if self._extra_columns:
@@ -210,7 +287,13 @@ class BaseWriter:
             self._write_arrow_batch(batch)
 
     def write_table(self, table: pa.Table):
-        """Write a complete Arrow table. Validates schema."""
+        """Write a complete Arrow table. Validates schema.
+
+        For views with a derived identity, the id column is stamped
+        (derived from the identity_composite) before validation, so callers may
+        pass tables whose id column is absent or null.
+        """
+        table = self._fill_identity_table(table)
         errors = self._schema_class.validate(table)
         if errors:
             raise ValueError("Schema validation failed:\n" + "\n".join(errors))
@@ -218,7 +301,17 @@ class BaseWriter:
         self._writer.write_table(table)
 
     def write_dataframe(self, df: "pd.DataFrame"):
-        """Write a pandas DataFrame. Converts to Arrow and validates."""
+        """Write a pandas DataFrame. Converts to Arrow and validates.
+
+        Columns the schema declares but the frame omits (e.g. the derived id or
+        the optional cross-ref columns) are added as nulls; the id is then
+        stamped in :meth:`write_table`.
+        """
+        missing = [f.name for f in self.arrow_schema if f.name not in df.columns]
+        if missing:
+            df = df.copy()
+            for name in missing:
+                df[name] = None
         table = pa.Table.from_pandas(df, schema=self.arrow_schema, preserve_index=False)
         self.write_table(table)
 
@@ -232,6 +325,7 @@ class BaseWriter:
             self._writer = None
 
     def _write_arrow_batch(self, records: list[dict]):
+        self._derive_record_ids(records)
         batch = pa.RecordBatch.from_pylist(records, schema=self.arrow_schema)
         # Validate non-nullable columns
         for i, field in enumerate(self.arrow_schema):

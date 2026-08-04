@@ -15,19 +15,30 @@ from qpx.core.data import (
     ValidationIssue,
     ValidationResult,
 )
+from qpx.core.data.identity import derive_id
 from tests.conftest import _valid_arrays
 
 
-def _pg_table(anchor, grouped_runs):
-    """Build a minimal valid PG table, overriding only the PK columns."""
+def _pg_table(anchor, grouped_runs, label=None):
+    """Build a minimal valid PG table, overriding only the identity columns.
+
+    The primary key is the derived ``pg_id``; it is stamped here the same way
+    the writer would, from the (anchor_protein, grouped_runs, label) composite.
+    """
     schema = PgSchema.get_arrow_schema()
     n = len(anchor)
+    labels = label if label is not None else [None] * n
+    pg_ids = [derive_id([anchor[i], grouped_runs[i], labels[i]]) for i in range(n)]
     arrays = {}
     for f in schema:
-        if f.name == "anchor_protein":
+        if f.name == "pg_id":
+            arrays[f.name] = pa.array(pg_ids, type=f.type)
+        elif f.name == "anchor_protein":
             arrays[f.name] = pa.array(anchor, type=f.type)
         elif f.name == "grouped_runs":
             arrays[f.name] = pa.array(grouped_runs, type=f.type)
+        elif f.name == "label":
+            arrays[f.name] = pa.array(labels, type=f.type)
         else:
             arrays[f.name] = pa.nulls(n, type=f.type)
     return pa.table(arrays, schema=schema)
@@ -35,12 +46,11 @@ def _pg_table(anchor, grouped_runs):
 
 def test_strict_duplicate_pk_pg():
     """Duplicate PG primary key errors under strict (qpxc validate), warns by default."""
-    # Two rows with identical (anchor_protein, grouped_runs). The grouped_runs
-    # lists are reordered to also exercise the JSON-canonical sorted-form
-    # normalization: ["r1","r2"] and ["r2","r1"] must alias to one PK.
+    # Two rows with an identical identity composite derive the same pg_id, so
+    # the derived-identity primary key collides -> duplicate_pk.
     table = _pg_table(
         anchor=["P1", "P1"],
-        grouped_runs=[["r1", "r2"], ["r2", "r1"]],
+        grouped_runs=[["r1", "r2"], ["r1", "r2"]],
     )
 
     # strict=True -> error, invalid

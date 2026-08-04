@@ -1,9 +1,17 @@
 name: feature
 file_type: feature_file
-primary_key: [peptidoform, charge, run_file_name, rt]
+primary_key: [feature_id]
+identity_composite: [peptidoform, charge, run_file_name, rt]
 doc: "Quantified peptide features per MS run; unmapped features are keyed by sequence, charge, and run_file_name"
 
 fields:
+  # Identity
+  feature_id:
+    type: int64
+    required: true
+    nullable: false
+    doc: "Opaque identity of the feature (int64), derived from the identity_composite declared in the footer; the primary key of this view."
+
   # Core identification
   sequence:
     type: string
@@ -128,3 +136,15 @@ fields:
   rt_stop:
     type: float32
     doc: "RT window end"
+
+  # Optional cross-references
+  psm_ids:
+    type: "list<int64>"
+    optional: true
+    nullable: true
+    doc: "Optional references to the psm rows this feature maps to (list of psm_id)."
+  pg_ids:
+    type: "list<int64>"
+    optional: true
+    nullable: true
+    doc: "Optional references to the pg rows this feature maps to (list of pg_id)."

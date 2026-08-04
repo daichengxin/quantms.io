@@ -519,6 +519,12 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             "peptide_qvalue",
             "pg_accessions",
             "pg_positions",
+            # Derived identity + optional cross-refs are not produced by the
+            # channel row SQL: feature_id is stamped by the writer, psm_ids/pg_ids
+            # stay null. Skip them here; they are filled as NULL in final assembly.
+            "feature_id",
+            "psm_ids",
+            "pg_ids",
         }
         select_parts: list[str] = []
         for field in target_schema:
