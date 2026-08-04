@@ -141,6 +141,26 @@ def _scan_by_run(pids, map_info: dict[int, tuple[str, str]]) -> dict[str, list[i
     return scan_by_run
 
 
+def _group_subfeatures_by_run(cf, map_info: dict[int, tuple[str, str]]) -> dict[str, dict]:
+    """Group a consensus feature's sub-feature intensities by run.
+
+    For isobaric, one run carries several channel maps (same rt); for label-free,
+    one map == one run. One entry per label — if a channel is linked twice, keep
+    the max rather than emit it twice (which would double-count downstream).
+    """
+    by_run: dict[str, dict] = {}
+    for sub in cf.getFeatureList():
+        intensity = float(sub.getIntensity())
+        if intensity <= 0:
+            continue
+        run, label = map_info.get(sub.getMapIndex(), (None, None))
+        if run is None:
+            continue
+        entry = by_run.setdefault(run, {"rt": float(sub.getRT()), "labels": {}})
+        entry["labels"][label] = max(entry["labels"].get(label, 0.0), intensity)
+    return by_run
+
+
 def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, anchor_map=None) -> list[dict]:
     """Return QPX feature record dicts extracted from a consensusXML.
 
@@ -151,70 +171,64 @@ def consensus_features_to_records(consensusxml_path: str | None = None, cm=None,
     without it the anchor falls back to the peptide's first protein evidence.
     """
     cm = cm if cm is not None else load_consensus_map(consensusxml_path)
-
-    headers = cm.getColumnHeaders()
-    # Label per map from the map label itself (isobaric channel -> canonical, else
-    # LFQ) — experiment_type is unreliable (quantms writes "label-free" for TMT).
-    map_info: dict[int, tuple[str, str]] = {}
-    for idx in headers:
-        header = headers[idx]
-        map_info[idx] = (_run_stem(header.filename), _map_label(header.label))
-
+    map_info = feature_map_info(cm)
     records: list[dict] = []
     for cf in cm:
-        pids = cf.getPeptideIdentifications()
-        if not pids or not pids[0].getHits():
-            continue
-        scan_by_run = _scan_by_run(pids, map_info)
-        hit = pids[0].getHits()[0]
-        seq_obj = hit.getSequence()
-        peptidoform = to_proforma(seq_obj)
-        sequence = seq_obj.toUnmodifiedString()
-        charge = int(cf.getCharge() or hit.getCharge() or 0)
-        is_decoy = False
-        if hit.metaValueExists("target_decoy"):
-            is_decoy = "decoy" in str(hit.getMetaValue("target_decoy")).lower()
-        observed_mz = float(cf.getMZ()) if cf.getMZ() else 0.0
-        calculated_mz = float(seq_obj.getMZ(charge)) if charge else observed_mz
-        evidences = hit.getPeptideEvidences()
-        anchor_protein = evidences[0].getProteinAccession() if evidences else None
-        if isinstance(anchor_protein, bytes):
-            anchor_protein = anchor_protein.decode()
-        # Resolve to the protein-group leader so feature.anchor_protein matches the
-        # pg view (peptide evidence order alone does not identify the leader).
-        if anchor_map and anchor_protein is not None:
-            anchor_protein = anchor_map.get(anchor_protein, anchor_protein)
+        records.extend(feature_records_for_cf(cf, map_info, anchor_map))
+    return records
 
-        # Group the sub-feature intensities by run: for isobaric, one run carries
-        # several channel maps (same rt); for label-free, one map == one run. One
-        # entry per label — if a channel is linked twice, keep the max rather than
-        # emit the channel twice (which would double-count downstream).
-        by_run: dict[str, dict] = {}
-        for sub in cf.getFeatureList():
-            intensity = float(sub.getIntensity())
-            if intensity <= 0:
-                continue
-            run, label = map_info.get(sub.getMapIndex(), (None, None))
-            if run is None:
-                continue
-            entry = by_run.setdefault(run, {"rt": float(sub.getRT()), "labels": {}})
-            entry["labels"][label] = max(entry["labels"].get(label, 0.0), intensity)
 
-        for run, entry in by_run.items():
-            intensities = [{"label": label, "intensity": inten} for label, inten in entry["labels"].items()]
-            records.append(
-                {
-                    "sequence": sequence,
-                    "peptidoform": peptidoform,
-                    "charge": charge,
-                    "run_file_name": run,
-                    "scan": scan_by_run.get(run, []),
-                    "rt": entry["rt"],
-                    "intensities": intensities,
-                    "is_decoy": is_decoy,
-                    "calculated_mz": calculated_mz,
-                    "observed_mz": observed_mz,
-                    "anchor_protein": anchor_protein,
-                }
-            )
+def feature_map_info(cm) -> dict[int, tuple[str, str]]:
+    """Map index -> (run_file_name, label) from the consensusXML column headers.
+
+    Label comes from the map label itself (isobaric channel -> canonical, else
+    LFQ) — experiment_type is unreliable (quantms writes "label-free" for TMT).
+    """
+    headers = cm.getColumnHeaders()
+    return {idx: (_run_stem(headers[idx].filename), _map_label(headers[idx].label)) for idx in headers}
+
+
+def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=None) -> list[dict]:
+    """Feature records for one consensus feature (one per run, channels as intensities)."""
+    pids = cf.getPeptideIdentifications()
+    if not pids or not pids[0].getHits():
+        return []
+    scan_by_run = _scan_by_run(pids, map_info)
+    hit = pids[0].getHits()[0]
+    seq_obj = hit.getSequence()
+    peptidoform = to_proforma(seq_obj)
+    sequence = seq_obj.toUnmodifiedString()
+    charge = int(cf.getCharge() or hit.getCharge() or 0)
+    is_decoy = False
+    if hit.metaValueExists("target_decoy"):
+        is_decoy = "decoy" in str(hit.getMetaValue("target_decoy")).lower()
+    observed_mz = float(cf.getMZ()) if cf.getMZ() else 0.0
+    calculated_mz = float(seq_obj.getMZ(charge)) if charge else observed_mz
+    evidences = hit.getPeptideEvidences()
+    anchor_protein = evidences[0].getProteinAccession() if evidences else None
+    if isinstance(anchor_protein, bytes):
+        anchor_protein = anchor_protein.decode()
+    # Resolve to the protein-group leader so feature.anchor_protein matches the
+    # pg view (peptide evidence order alone does not identify the leader).
+    if anchor_map and anchor_protein is not None:
+        anchor_protein = anchor_map.get(anchor_protein, anchor_protein)
+
+    records: list[dict] = []
+    for run, entry in _group_subfeatures_by_run(cf, map_info).items():
+        intensities = [{"label": label, "intensity": inten} for label, inten in entry["labels"].items()]
+        records.append(
+            {
+                "sequence": sequence,
+                "peptidoform": peptidoform,
+                "charge": charge,
+                "run_file_name": run,
+                "scan": scan_by_run.get(run, []),
+                "rt": entry["rt"],
+                "intensities": intensities,
+                "is_decoy": is_decoy,
+                "calculated_mz": calculated_mz,
+                "observed_mz": observed_mz,
+                "anchor_protein": anchor_protein,
+            }
+        )
     return records

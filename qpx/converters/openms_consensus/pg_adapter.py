@@ -58,37 +58,51 @@ def _evidence_accession(ev) -> str | None:
     return acc.decode() if isinstance(acc, bytes) else str(acc)
 
 
+def _collect_pid(pid, runs: set[str], m: _ProteinMaps) -> None:
+    """Fold one PeptideIdentification's evidence into the accession maps."""
+    for hit in pid.getHits():
+        seq_obj = hit.getSequence()
+        seq = seq_obj.toUnmodifiedString()
+        feat = (to_proforma(seq_obj), int(hit.getCharge() or 0))
+        for ev in hit.getPeptideEvidences():
+            acc = _evidence_accession(ev)
+            if acc:
+                m.acc_to_pep[acc].add(seq)
+                m.acc_to_feat[acc].add(feat)
+                m.acc_to_runs[acc] |= runs
+                m.pep_to_accs[seq].add(acc)
+                m.feat_to_accs[feat].add(acc)
+
+
+def _cf_runs(cf, map_run: dict[int, str]) -> set[str]:
+    runs = {map_run.get(sub.getMapIndex()) for sub in cf.getFeatureList() if sub.getIntensity() > 0}
+    runs.discard(None)
+    return runs
+
+
+def accumulate_cf_maps(cf, map_run: dict[int, str], m: _ProteinMaps) -> None:
+    """Fold one consensus feature's assigned IDs into the accession maps (per-cf)."""
+    runs = _cf_runs(cf, map_run)
+    for pid in cf.getPeptideIdentifications():
+        _collect_pid(pid, runs, m)
+
+
+def accumulate_unassigned_maps(pid, resolve_run, m: _ProteinMaps) -> None:
+    """Fold one unassigned PeptideIdentification into the accession maps."""
+    run = resolve_run(pid)
+    _collect_pid(pid, {run} if run else set(), m)
+
+
 def _protein_maps(cm) -> _ProteinMaps:
     """Index peptide/feature/run evidence by accession (see :class:`_ProteinMaps`)."""
     headers = cm.getColumnHeaders()
     map_run = {i: _run_stem(headers[i].filename) for i in headers}
     resolve_run = _run_resolver(cm)
     m = _ProteinMaps()
-
-    def _collect(pid, runs):
-        for hit in pid.getHits():
-            seq_obj = hit.getSequence()
-            seq = seq_obj.toUnmodifiedString()
-            feat = (to_proforma(seq_obj), int(hit.getCharge() or 0))
-            for ev in hit.getPeptideEvidences():
-                acc = _evidence_accession(ev)
-                if acc:
-                    m.acc_to_pep[acc].add(seq)
-                    m.acc_to_feat[acc].add(feat)
-                    m.acc_to_runs[acc] |= runs
-                    m.pep_to_accs[seq].add(acc)
-                    m.feat_to_accs[feat].add(acc)
-
-    # Assigned IDs: the runs are the consensus feature's member maps.
-    for cf in cm:
-        cf_runs = {map_run.get(sub.getMapIndex()) for sub in cf.getFeatureList() if sub.getIntensity() > 0}
-        cf_runs.discard(None)
-        for pid in cf.getPeptideIdentifications():
-            _collect(pid, cf_runs)
-    # Unassigned IDs: the run comes from map_index / id_merge_index.
-    for pid in cm.getUnassignedPeptideIdentifications():
-        run = resolve_run(pid)
-        _collect(pid, {run} if run else set())
+    for cf in cm:  # assigned IDs: runs are the consensus feature's member maps
+        accumulate_cf_maps(cf, map_run, m)
+    for pid in cm.getUnassignedPeptideIdentifications():  # run from map_index/id_merge_index
+        accumulate_unassigned_maps(pid, resolve_run, m)
     return m
 
 
@@ -206,18 +220,23 @@ def _peptide_intensities(cm, map_info: dict[int, tuple[str, str]]) -> dict[tuple
     """
     pep_intensity: dict[tuple[str, str, str], float] = defaultdict(float)
     for cf in cm:
-        pids = cf.getPeptideIdentifications()
-        if not pids or not pids[0].getHits():
-            continue
-        seq = pids[0].getHits()[0].getSequence().toUnmodifiedString()
-        for sub in cf.getFeatureList():
-            inten = float(sub.getIntensity())
-            if inten <= 0:
-                continue
-            run, label = map_info.get(sub.getMapIndex(), (None, None))
-            if run is not None:
-                pep_intensity[(seq, run, label)] += inten
+        accumulate_cf_intensity(cf, map_info, pep_intensity)
     return pep_intensity
+
+
+def accumulate_cf_intensity(cf, map_info: dict[int, tuple[str, str]], pep_intensity: dict) -> None:
+    """Sum one consensus feature's per-map intensities into ``(seq, run, label)`` (per-cf)."""
+    pids = cf.getPeptideIdentifications()
+    if not pids or not pids[0].getHits():
+        return
+    seq = pids[0].getHits()[0].getSequence().toUnmodifiedString()
+    for sub in cf.getFeatureList():
+        inten = float(sub.getIntensity())
+        if inten <= 0:
+            continue
+        run, label = map_info.get(sub.getMapIndex(), (None, None))
+        if run is not None:
+            pep_intensity[(seq, run, label)] += inten
 
 
 def _protein_intensity(group_peps, group_accs, unit, label, pep_intensity, pep_accs, top) -> Optional[float]:
@@ -262,8 +281,18 @@ def consensus_protein_groups_to_records(
     ``consensusxml_path`` (loaded here) or an already-loaded ``cm``.
     """
     cm = cm if cm is not None else load_consensus_map(consensusxml_path)
-
     map_info = _map_info(cm)
+    m = _protein_maps(cm)
+    pep_intensity = _peptide_intensities(cm, map_info)
+    return build_pg_records(cm, map_info, m, pep_intensity, sdrf_path, top)
+
+
+def build_pg_records(cm, map_info, m: _ProteinMaps, pep_intensity: dict, sdrf_path, top: int) -> list[dict]:
+    """Build pg records from already-accumulated maps + peptide intensities.
+
+    Separated from the accumulation so both the multi-pass adapter and the
+    single-pass streaming driver share the exact record-building logic.
+    """
     all_runs = sorted({run for run, _ in map_info.values()})
     # grouped_runs unit per run, from the SDRF (fractions grouped); else one unit.
     run_to_grouped = fraction_groups_from_sdrf(sdrf_path)
@@ -271,9 +300,7 @@ def consensus_protein_groups_to_records(
     # One pg row per (protein group, unit, label): the isobaric channels, or "LFQ".
     labels = sorted({label for _, label in map_info.values()})
 
-    m = _protein_maps(cm)
     acc_decoy, acc_qvalue, acc_gene, groups = _merge_protein_ids(cm)
-    pep_intensity = _peptide_intensities(cm, map_info)
     quant_method = "unnormalized_unique_peptide_sum" if not top else f"unnormalized_unique_peptide_top{top}_sum"
 
     records: list[dict] = []

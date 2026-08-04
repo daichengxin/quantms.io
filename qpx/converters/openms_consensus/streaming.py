@@ -361,6 +361,14 @@ class StreamingConsensusMap:
         return out
 
     def __iter__(self):
+        for kind, obj in self.iter_all():
+            if kind == "element":
+                yield obj
+
+    def iter_all(self):
+        """Single pass yielding ``("element", ConsensusFeature)`` then, in file
+        order, ``("unassigned", PeptideIdentification)`` — for the single-pass
+        streaming converter (one parse builds feature/psm/pg)."""
         depth_in_list = False
         for event, el in iterparse(self._path, events=("start", "end")):
             tag = _localname(el.tag)
@@ -369,5 +377,8 @@ class StreamingConsensusMap:
             elif event == "end" and tag == "consensusElementList":
                 depth_in_list = False
             elif event == "end" and tag == "consensusElement" and depth_in_list:
-                yield _parse_consensus_element(el, self._ph_to_acc)
+                yield "element", _parse_consensus_element(el, self._ph_to_acc)
+                el.clear()
+            elif event == "end" and tag == "UnassignedPeptideIdentification":
+                yield "unassigned", _parse_peptide_id(el, self._ph_to_acc)
                 el.clear()

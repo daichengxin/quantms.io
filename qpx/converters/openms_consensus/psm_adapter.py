@@ -56,74 +56,78 @@ def consensus_psms_to_records(consensusxml_path: str | None = None, cm=None) -> 
     """
     cm = cm if cm is not None else load_consensus_map(consensusxml_path)
     resolve_run = _run_resolver(cm)
-
     records: list[dict] = []
     seen: set[tuple] = set()
     for pid in _iter_peptide_ids(cm):
-        run = resolve_run(pid)
-        if run is None:
+        records.extend(psm_records_for_pid(pid, resolve_run, seen))
+    return records
+
+
+def psm_records_for_pid(pid, resolve_run, seen: set[tuple]) -> list[dict]:
+    """PSM records for one PeptideIdentification (deduped via the shared ``seen`` set)."""
+    run = resolve_run(pid)
+    if run is None:
+        return []
+    spectrum_ref = pid.getSpectrumReference() if hasattr(pid, "getSpectrumReference") else ""
+    if not spectrum_ref and pid.metaValueExists("spectrum_reference"):
+        spectrum_ref = pid.getMetaValue("spectrum_reference")
+    scan = _scan_of(spectrum_ref)
+    if not scan:
+        # The PSM primary key is [peptidoform, charge, run_file_name, scan]; an
+        # identification whose spectrum_reference carries no scan token cannot be
+        # keyed uniquely. Skip it rather than write a scan=[] record that would
+        # collapse distinct spectra under the primary key.
+        _log.debug("Skipping consensusXML PSM with no scan token in spectrum_reference: %r", spectrum_ref)
+        return []
+    obs_mz = float(pid.getMZ()) if pid.getMZ() else 0.0
+    # When the identification score IS the q-value, the hit score is the peptide
+    # q-value (OpenMS FDR output); otherwise it is a search score.
+    score_type = str(pid.getScoreType() or "")
+    score_is_qvalue = score_type.lower() in ("q-value", "qvalue", "fdr")
+    records: list[dict] = []
+    for hit in pid.getHits():
+        seq_obj = hit.getSequence()
+        peptidoform = to_proforma(seq_obj)
+        charge = int(hit.getCharge() or 0)
+        calc_mz = float(seq_obj.getMZ(charge)) if charge else obs_mz
+        key = (peptidoform, charge, run, tuple(scan))
+        if key in seen:
             continue
-        spectrum_ref = pid.getSpectrumReference() if hasattr(pid, "getSpectrumReference") else ""
-        if not spectrum_ref and pid.metaValueExists("spectrum_reference"):
-            spectrum_ref = pid.getMetaValue("spectrum_reference")
-        scan = _scan_of(spectrum_ref)
-        if not scan:
-            # The PSM primary key is [peptidoform, charge, run_file_name, scan];
-            # an identification whose spectrum_reference carries no scan token
-            # cannot be keyed uniquely. Skip it rather than write a scan=[] record
-            # that would collapse distinct spectra under the primary key.
-            _log.debug("Skipping consensusXML PSM with no scan token in spectrum_reference: %r", spectrum_ref)
-            continue
-        obs_mz = float(pid.getMZ()) if pid.getMZ() else 0.0
-        # When the identification score IS the q-value, the hit score is the
-        # peptide q-value (OpenMS FDR output); otherwise it is a search score.
-        score_type = str(pid.getScoreType() or "")
-        score_is_qvalue = score_type.lower() in ("q-value", "qvalue", "fdr")
-        for hit in pid.getHits():
-            seq_obj = hit.getSequence()
-            peptidoform = to_proforma(seq_obj)
-            charge = int(hit.getCharge() or 0)
-            calc_mz = float(seq_obj.getMZ(charge)) if charge else obs_mz
-            key = (peptidoform, charge, run, tuple(scan))
-            if key in seen:
-                continue
-            seen.add(key)
-            is_decoy = hit.metaValueExists("target_decoy") and "decoy" in str(hit.getMetaValue("target_decoy")).lower()
-            pep = None
-            for mv in ("Posterior Error Probability_score", "PEP", "pep"):
-                if hit.metaValueExists(mv):
-                    pep = float(hit.getMetaValue(mv))
-                    break
-            score = float(hit.getScore()) if hit.getScore() is not None else None
-            additional_scores = []
-            if score is not None:
-                # Route the identification score into additional_scores: the psm
-                # schema has no dedicated q-value column.
-                name = "q-value" if score_is_qvalue else (score_type or "search_score")
-                additional_scores.append(
-                    {"score_name": name, "score_value": score, "higher_better": bool(pid.isHigherScoreBetter())}
-                )
-            if hit.metaValueExists("consensus_support"):
-                additional_scores.append(
-                    {
-                        "score_name": "consensus_support",
-                        "score_value": float(hit.getMetaValue("consensus_support")),
-                        "higher_better": True,
-                    }
-                )
-            records.append(
+        seen.add(key)
+        is_decoy = hit.metaValueExists("target_decoy") and "decoy" in str(hit.getMetaValue("target_decoy")).lower()
+        pep = None
+        for mv in ("Posterior Error Probability_score", "PEP", "pep"):
+            if hit.metaValueExists(mv):
+                pep = float(hit.getMetaValue(mv))
+                break
+        score = float(hit.getScore()) if hit.getScore() is not None else None
+        additional_scores = []
+        if score is not None:
+            # Route the identification score into additional_scores: the psm schema
+            # has no dedicated q-value column.
+            name = "q-value" if score_is_qvalue else (score_type or "search_score")
+            additional_scores.append({"score_name": name, "score_value": score, "higher_better": bool(pid.isHigherScoreBetter())})
+        if hit.metaValueExists("consensus_support"):
+            additional_scores.append(
                 {
-                    "sequence": seq_obj.toUnmodifiedString(),
-                    "peptidoform": peptidoform,
-                    "charge": charge,
-                    "run_file_name": run,
-                    "scan": scan,
-                    "rt": float(pid.getRT()) if pid.getRT() else None,
-                    "calculated_mz": calc_mz,
-                    "observed_mz": obs_mz,
-                    "posterior_error_probability": pep,
-                    "additional_scores": additional_scores or None,
-                    "is_decoy": is_decoy,
+                    "score_name": "consensus_support",
+                    "score_value": float(hit.getMetaValue("consensus_support")),
+                    "higher_better": True,
                 }
             )
+        records.append(
+            {
+                "sequence": seq_obj.toUnmodifiedString(),
+                "peptidoform": peptidoform,
+                "charge": charge,
+                "run_file_name": run,
+                "scan": scan,
+                "rt": float(pid.getRT()) if pid.getRT() else None,
+                "calculated_mz": calc_mz,
+                "observed_mz": obs_mz,
+                "posterior_error_probability": pep,
+                "additional_scores": additional_scores or None,
+                "is_decoy": is_decoy,
+            }
+        )
     return records
