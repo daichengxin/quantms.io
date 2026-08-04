@@ -102,7 +102,7 @@ The `convert` command group provides converters for multiple proteomics software
 
 ## Available Commands
 
-- [quantms](#quantms) - Convert QuantMS mzTab output to QPX format
+- [openms](#openms) - Enrich native OpenMS `-out_qpx` output into a full QPX dataset
 - [openms-consensus](#openms-consensus) - Convert an OpenMS consensusXML (+ SDRF) to QPX (interim; pg intensity = unnormalized unique-peptide sum)
 - [diann](#diann) - Convert DIA-NN report to QPX format
 - [spectronaut](#spectronaut) - Convert Spectronaut report to QPX format
@@ -112,101 +112,6 @@ The `convert` command group provides converters for multiple proteomics software
 - [cdap](#cdap) - Convert CPTAC CDAP `.psm` files to QPX format
 - [mz](#mz) - Convert an mzML spectra directory to QPX `mz.parquet` (full spectra)
 - [sdrf](#sdrf) - Convert SDRF to sample and run parquet files
-
----
-
-## quantms
-
-Convert QuantMS mzTab output to QPX format.
-
-### Description {#quantms-description}
-
-```python exec="1" html="1" session="doc_utils"
-from qpx.cli.convert import convert_quantms_cmd
-
-print(generate_description(convert_quantms_cmd))
-```
-
-### Parameters {#quantms-parameters}
-
-```python exec="1" html="1" session="doc_utils"
-from qpx.cli.convert import convert_quantms_cmd
-
-print(generate_params_table(convert_quantms_cmd))
-```
-
-### Usage Examples {#quantms-examples}
-
-#### Basic Example {#quantms-example-basic}
-
-```python exec="1" html="1" session="doc_utils"
-from qpx.cli.convert import convert_quantms_cmd
-
-print(generate_example(convert_quantms_cmd, "Convert QuantMS data with default settings:"))
-```
-
-#### PSM Data Only {#quantms-example-psm}
-
-```bash
-qpxc convert quantms \
-    --mztab-path tests/examples/quantms/dda-lfq-small/PXD007683-LFQ.sdrf_openms_design_openms.mzTab \
-    --sdrf-file tests/examples/quantms/dda-lfq-small/PXD007683-LFQ.sdrf.tsv \
-    --output-folder ./output \
-    --structures psm \
-    --output-prefix quantms_psm
-```
-
-#### Feature Data with MSstats {#quantms-example-feature}
-
-```bash
-qpxc convert quantms \
-    --mztab-path tests/examples/quantms/dda-lfq-full/PXD007683-LFQ.sdrf_openms_design_openms.mzTab.gz \
-    --msstats-file tests/examples/quantms/dda-lfq-full/PXD007683-LFQ.sdrf_openms_design_msstats_in.csv.gz \
-    --sdrf-file tests/examples/quantms/dda-lfq-full/PXD007683-LFQ.sdrf.tsv \
-    --output-folder ./output \
-    --structures feature \
-    --verbose
-```
-
-#### All Structures {#quantms-example-all}
-
-```bash
-qpxc convert quantms \
-    --mztab-path tests/examples/quantms/dda-lfq-full/PXD007683-LFQ.sdrf_openms_design_openms.mzTab.gz \
-    --msstats-file tests/examples/quantms/dda-lfq-full/PXD007683-LFQ.sdrf_openms_design_msstats_in.csv.gz \
-    --sdrf-file tests/examples/quantms/dda-lfq-full/PXD007683-LFQ.sdrf.tsv \
-    --output-folder ./output \
-    --structures psm,feature,pg \
-    --verbose
-```
-
-#### TMT Data {#quantms-example-tmt}
-
-```bash
-qpxc convert quantms \
-    --mztab-path tests/examples/quantms/dda-plex-full/PXD007683TMT.sdrf_openms_design_openms.mzTab.gz \
-    --msstats-file tests/examples/quantms/dda-plex-full/PXD007683TMT.sdrf_openms_design_msstats_in.csv.gz \
-    --sdrf-file tests/examples/quantms/dda-plex-full/PXD007683-TMT.sdrf.tsv \
-    --output-folder ./output \
-    --structures pg
-```
-
-### Output Files {#quantms-output}
-
-Depending on `--structures` parameter:
-
-- **PSM**: `{output-prefix}-{uuid}.psm.parquet`
-- **Feature**: `{output-prefix}-{uuid}.feature.parquet`
-- **Protein Group**: `{output-prefix}-{uuid}.pg.parquet`
-
-All files are in Parquet format and conform to their respective QPX specifications.
-
-### Best Practices {#quantms-best-practices}
-
-- Use `--structures` to control which output files are generated
-- Provide `--msstats-file` when converting feature or pg structures
-- Reuse database files with `--database-path` when processing the same mzTab multiple times
-- Enable verbose mode for large datasets to monitor progress
 
 ---
 
@@ -811,6 +716,42 @@ print(generate_example(convert_sdrf_cmd, "Convert SDRF metadata with default set
 - Ensure SDRF file follows the PRIDE SDRF specifications
 - Use verbose mode to diagnose parsing issues
 - The converter automatically maps SDRF characteristics to QPX ontology terms
+
+---
+
+## openms
+
+Enrich native OpenMS `-out_qpx` Parquet output into a full QPX dataset.
+
+### Description {#openms-description}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_openms_cmd
+
+print(generate_description(convert_openms_cmd))
+```
+
+### Parameters {#openms-parameters}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_openms_cmd
+
+print(generate_params_table(convert_openms_cmd))
+```
+
+### Usage Examples {#openms-examples}
+
+```python exec="1" html="1" session="doc_utils"
+from qpx.cli.convert import convert_openms_cmd
+
+print(generate_example(convert_openms_cmd))
+```
+
+### Output Files {#openms-output}
+
+- Copies and validates the OpenMS `psm`, `feature`, and `pg` Parquet files found in `--qpx-dir`.
+- Generates `run`, `sample`, `ontology`, `provenance`, and `dataset` views.
+- Generates a MuData file when the converted quantification views are sufficient for export.
 
 ---
 

@@ -18,13 +18,6 @@ def _assert_help(result, *options):
             raise AssertionError(f"Missing option {opt} in help output")
 
 
-class TestQuantMSConvertCLI:
-    def test_quantms_help_renders(self):
-        runner = CliRunner()
-        result = runner.invoke(qpx_main, ["convert", "quantms", "--help"])
-        _assert_help(result, "--mztab-path")
-
-
 class TestDiaNNConvertCLI:
     def test_diann_help_renders(self):
         runner = CliRunner()
@@ -110,6 +103,26 @@ class TestTransformNormalizeAccessionsCLI:
         runner = CliRunner()
         result = runner.invoke(qpx_main, ["transform", "normalize-accessions", "--help"])
         _assert_help(result, "--dataset", "--direction", "--fasta")
+
+    def test_normalize_accessions_discovers_openms_prefix(self, tmp_path, monkeypatch):
+        (tmp_path / "openms.feature.parquet").touch()
+        (tmp_path / "openms.pg.parquet").touch()
+        normalized = []
+
+        def fake_normalize(**kwargs):
+            normalized.append(kwargs["parquet_path"].name)
+            return {"rows": 1, "accessions_changed": 0}
+
+        monkeypatch.setattr("qpx.transforms.accession_normalizer.normalize_parquet", fake_normalize)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            qpx_main,
+            ["transform", "normalize-accessions", "--dataset", str(tmp_path), "--in-place"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert normalized == ["openms.feature.parquet", "openms.pg.parquet"]
 
 
 class TestTransformUpdateMetadataCLI:

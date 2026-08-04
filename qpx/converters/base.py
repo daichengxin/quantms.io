@@ -1,8 +1,8 @@
 """BaseConverter -- abstract base for all tool-specific converters.
 
 Each converter creates its own DuckDB in-memory connection, loads
-tool-specific output (TSV, mzTab, etc.), transforms via SQL into the
-QPX schema, and pipes rows into the appropriate Writer.
+tool-specific output, transforms it via SQL into the QPX schema, and pipes
+rows into the appropriate Writer.
 """
 
 from __future__ import annotations

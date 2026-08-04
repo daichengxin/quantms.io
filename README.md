@@ -12,7 +12,7 @@ A Python package for working with mass spectrometry data in the QPX format.
 
 ## Features
 
-- **Convert** data from DIA-NN, MaxQuant, Spectronaut, FragPipe, QuantMS (mzTab), CPTAC CDAP (`.psm`), mzIdentML, and SDRF to QPX Parquet format
+- **Convert** data from OpenMS (native QPX and consensusXML), DIA-NN, MaxQuant, Spectronaut, FragPipe, CPTAC CDAP (`.psm`), mzIdentML, and SDRF to QPX Parquet format
 - **Transform** QPX data: gene mapping, protein quantification (DirectLFQ, MaxLFQ, iBAQ, TopN, …), accession normalization, metadata updates
 - **Query** datasets with SQL, filter rows, or preview with `head`
 - **Inspect** dataset summaries, Arrow schemas, and Parquet metadata
@@ -199,7 +199,7 @@ qpxc pdc2qpx -a cptac_lfq.csv --download-dir ./downloads --output-folder ./qpx
 ### Convert
 
 ```bash
-qpxc convert [diann | maxquant | spectronaut | quantms | fragpipe | mzidentml | cdap | mz | sdrf] [OPTIONS]
+qpxc convert [openms | openms-consensus | diann | maxquant | spectronaut | fragpipe | mzidentml | cdap | mz | sdrf] [OPTIONS]
 ```
 
 ### Transform
@@ -244,10 +244,11 @@ qpx/
 ├── cli/                    # Click CLI (entry point: qpx.cli.main:main)
 │   ├── main.py             # Top-level CLI group
 │   ├── pdc2qpx.py          # pdc2qpx command (PDC download + convert)
-│   └── convert.py          # convert subcommands (maxquant, diann, spectronaut, quantms, fragpipe, mzidentml, cdap, mz, sdrf)
+│   └── convert.py          # convert subcommands (openms, openms-consensus, maxquant, diann, spectronaut, fragpipe, mzidentml, cdap, mz, sdrf)
 ├── pipeline/               # High-level orchestration (pdc2qpx: download + CDAP + mz)
 ├── converters/             # Tool-specific converters
-│   ├── quantms/            # QuantMS (mzTab) converter
+│   ├── openms/             # OpenMS native QPX enrichment
+│   ├── openms_consensus/   # OpenMS consensusXML converter
 │   ├── cdap/               # CPTAC CDAP (.psm) converter
 │   ├── diann/              # DIA-NN converter
 │   ├── maxquant/           # MaxQuant converter

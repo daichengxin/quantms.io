@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CPTAC CDAP converter**: `qpxc convert cdap` — convert CPTAC CDAP `.psm` study directories to QPX psm/feature/pg/dataset/ontology/provenance views
 - **Full-spectra mz converter**: `qpxc convert mz` — convert a directory of mzML / `.mzML.gz` files to a single `mz.parquet`; each spectrum carries `run_file_name` + `scan` for linking back to PSM/feature
 - **pdc2qpx pipeline**: `qpxc pdc2qpx` — one-shot PDC/CPTAC download (via pridepy, `qpx[pdc]` extra) + CDAP + full-spectra conversion into an entire QPX dataset
-- **Shared channel-label resolution**: `qpx/converters/channel_labels.py` — single source for canonical TMT/iTRAQ/LFQ labels via sdrf-pipelines `channel_map`, used by both QuantMS mzTab and OpenMS `-out_qpx` paths
+- **Shared channel-label resolution**: `qpx/converters/channel_labels.py` — single source for canonical TMT/iTRAQ/LFQ labels via sdrf-pipelines `channel_map`, used by the OpenMS `consensusXML` and `-out_qpx` paths
 - **openms-consensus interim protein intensity**: the `openms-consensus` converter now fills `pg.intensity` with an interim, **unnormalized sum of each group's unique peptides** per `(protein group, grouped_runs, label)` (the quantms `unique_peptides` policy) instead of leaving it null, until OpenMS `-out_qpx` ships the authoritative quant. Every quantified row is stamped with a `quantification_method` cv_param; `--pg-top N` bounds the peptides used (`0` = all; `3` mirrors the ProteomicsLFQ/IsobaricWorkflow default)
 - **openms-consensus channel/SDRF consistency check**: when an SDRF is provided, the converter compares the isobaric channels read from the consensusXML maps against the SDRF `comment[label]` set and logs a warning for any channel present in one but not the other (e.g. a mis-declared plex or the wrong SDRF)
 
@@ -32,13 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `duplicate_pk` error; the key is within-file only.
 - **Parquet output size**: writers now apply `BYTE_STREAM_SPLIT` encoding to high-entropy float columns (rt, rt_start/stop, predicted_rt, calculated/observed m/z, intensity arrays) and raise the ZSTD level to 9. Encoding-only and fully lossless — no schema change; output reads unchanged with pyarrow and DuckDB. Measured ~16% smaller on a 14 GB feature.parquet.
 
+### Removed
+
+- **BREAKING — QuantMS/mzTab converter**: removed `qpxc convert quantms`, `QuantMSConverter`, its adapters, and the mzTab+MSstats loader. Use `qpxc convert openms` for native OpenMS `-out_qpx` output or `qpxc convert openms-consensus` for `consensusXML`.
+
 ### Fixed
 
 - **openms-consensus isobaric detection**: real quantms `IsobaricWorkflow` output stamps TMT/iTRAQ consensusXML with `experiment_type="label-free"` while the maps still carry `tmt6plex_*`/`itraq*plex_*` labels. The converter now detects channels from the **map label** (not `experiment_type`), so real quantms TMT no longer collapses all reporter channels into a single `LFQ` label. Verified on real cluster output (PXD000001 TMT → TMT126–131; BSA/PXD002395 LFQ unchanged)
 - **RT unit conversion**: DIA-NN and MaxQuant converters now correctly convert retention time from minutes to seconds in feature and PSM parquet output
 - **Code quality**: Spectronaut converter refactored to reduce cyclomatic complexity, fix logging f-string interpolation, remove unused arguments, and eliminate duplicate code
 - **CDAP label-free intensity label**: label-free `PrecursorArea` intensities are now emitted with the `"LFQ"` label (aligned with the FragPipe/MaxQuant converters) so downstream label-free consumers (mokume) recognize them as primary intensities
-- **QPX TMT/iTRAQ channel labels**: QuantMS mzTab feature `intensities[].label` now uses plex-aware canonical reporter names (TMT10 ch10 = `TMT131` not `TMT131N`, iTRAQ properly mapped); OpenMS `-out_qpx` enrichment relabels feature/pg intensities from filenames/bare indices to canonical names; `run.samples[].label` normalized to match — all from the shared sdrf-pipelines `channel_map` vocabulary
+- **QPX TMT/iTRAQ channel labels**: OpenMS `-out_qpx` enrichment relabels feature/pg intensities from filenames/bare indices to plex-aware canonical reporter names; `run.samples[].label` is normalized to match — all from the shared sdrf-pipelines `channel_map` vocabulary
 
 ## [1.0.0] - 2025-03-22
 

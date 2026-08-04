@@ -1,8 +1,7 @@
-"""Plex-aware channel-label resolution for the QuantMS feature adapter.
+"""Plex-aware channel-label resolution for the OpenMS QPX paths.
 
-Regression coverage for the qpx intensity-label bug: TMT/iTRAQ channels were
-labeled from a plex-agnostic table (TMT10 channel 10 wrongly labeled TMT131N)
-and iTRAQ was not mapped at all. Labels now come from the shared sdrf-pipelines
+Regression coverage for canonical TMT/iTRAQ labels shared by the OpenMS
+consensusXML and ``-out_qpx`` paths. Labels come from the shared sdrf-pipelines
 channel_map and are plex-aware.
 """
 
@@ -480,46 +479,3 @@ def test_sdrf_labels_override_channel_count():
 def test_unresolvable_sdrf_labels_fall_back_to_count():
     labels = _resolve("TMT", list(range(1, 11)), sdrf_labels={"garbage", "nonsense"})
     assert labels[10] == "TMT131"  # fell back to count-based tmt10plex
-
-
-def test_tmt_fixture_labels_are_reporter_names(tmp_path):
-    """End-to-end: the TMT11 example converts to TMT126..TMT131C reporter labels."""
-    from pathlib import Path
-
-    import pyarrow.parquet as pq
-
-    from qpx.converters.quantms.converter import QuantMSConverter
-
-    base = Path("tests/examples/quantms/dda-plex-full")
-    mztab = base / "PXD007683TMT.sdrf_openms_design_openms.mzTab.gz"
-    msstats = base / "PXD007683TMT.sdrf_openms_design_msstats_in.csv.gz"
-    sdrf = base / "PXD007683-TMT.sdrf.tsv"
-
-    out = tmp_path / "out"
-    out.mkdir()
-    QuantMSConverter(mztab_path=str(mztab), sdrf_file=str(sdrf), msstats_file=str(msstats)).convert(
-        output_folder=out, output_prefix="tmt", structures=["feature"]
-    )
-    feature_files = list(out.glob("*.feature.parquet"))
-    assert feature_files, "no feature parquet produced"
-
-    labels = set()
-    for entry in pq.read_table(feature_files[0]).column("intensities").to_pylist():
-        for ch in entry or []:
-            labels.add(ch["label"])
-    # Reporter names, never bare numeric indices.
-    assert "TMT126" in labels
-    assert labels <= {
-        "TMT126",
-        "TMT127N",
-        "TMT127C",
-        "TMT128N",
-        "TMT128C",
-        "TMT129N",
-        "TMT129C",
-        "TMT130N",
-        "TMT130C",
-        "TMT131N",
-        "TMT131C",
-    }
-    assert not any(lbl.isdigit() for lbl in labels)

@@ -1,8 +1,8 @@
 """
 Shared quantification channel-label resolution for QuantMS/OpenMS QPX.
 
-Both QPX paths for QuantMS output — the mzTab+MSstats converter
-(:mod:`qpx.converters.quantms`) and the enrichment of OpenMS ``-out_qpx``
+Both QPX paths for OpenMS output — the consensusXML converter
+(:mod:`qpx.converters.openms_consensus`) and the enrichment of OpenMS ``-out_qpx``
 (:mod:`qpx.converters.openms`) — must put the *same* canonical reporter labels
 into ``intensities[].label`` so TMT/iTRAQ/LFQ results are consistent and join
 to ``sample``/``run`` the same way DIA-NN (quantmsdiann) output does.

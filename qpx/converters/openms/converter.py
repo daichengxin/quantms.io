@@ -290,8 +290,8 @@ class OpenMSConverter(BaseOrchestrator):
         discovered = self.discover_and_validate()
 
         # Resolve canonical channel labels so the OpenMS -out_qpx run-filename /
-        # bare-index labels become TMT126.. / LFQ, consistent with the mzTab and
-        # DIA-NN (quantmsdiann) QPX paths. Prefer the consensusXML ColumnHeaders
+        # bare-index labels become TMT126.. / LFQ, consistent with the
+        # consensusXML and DIA-NN (quantmsdiann) QPX paths. Prefer the ColumnHeaders
         # (authoritative channel count/order) when available; otherwise resolve
         # from the SDRF-declared plex.
         sdrf_labels = read_sdrf_labels(self.sdrf_path)

@@ -38,12 +38,6 @@ class TestGetFieldMappings:
         assert pg["pg_accessions"] == ["Protein IDs"]
         assert "andromeda_score" in pg
 
-    def test_quantms_feature(self):
-        from qpx.converters.mappings import get_field_mappings
-
-        feature = get_field_mappings("quantms", "feature")
-        assert feature["peptidoform"] == ["PeptideSequence", "peptidoform", "Peptide"]
-
     def test_unknown_tool_raises(self):
         from qpx.converters.mappings import get_field_mappings
 
@@ -84,13 +78,6 @@ class TestGetToolMeta:
 
 class TestGetExtra:
     """get_extra returns tool-specific config sections."""
-
-    def test_quantms_phospho_site_columns(self):
-        from qpx.converters.mappings import get_extra
-
-        phospho = get_extra("quantms", "phospho_site_columns")
-        assert isinstance(phospho, dict)
-        assert phospho["opt_global_phosphors_score"] == "phosphors_site_probability"
 
     def test_missing_extra_returns_none(self):
         from qpx.converters.mappings import get_extra

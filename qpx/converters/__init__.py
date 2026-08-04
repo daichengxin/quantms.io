@@ -2,7 +2,7 @@
 
 Each converter:
     1. Creates its own DuckDB connection (NOT shared with Dataset)
-    2. Loads tool output into DuckDB (TSV, mzTab, etc.)
+    2. Loads tool output into DuckDB
     3. Transforms via SQL into QPX schema
     4. Pipes results into a Writer (FeatureWriter, PsmWriter, PgWriter, etc.)
 """
@@ -26,10 +26,6 @@ from qpx.converters.maxquant.psm_adapter import MaxQuantPsmAdapter
 from qpx.converters.mzidentml.psm_adapter import MzIdentMLPsmAdapter
 from qpx.converters.openms.converter import OpenMSConverter
 from qpx.converters.orchestrator import BaseOrchestrator, build_dataset_record
-from qpx.converters.quantms.converter import QuantMSConverter
-from qpx.converters.quantms.feature_adapter import QuantmsFeatureAdapter
-from qpx.converters.quantms.pg_adapter import QuantmsPgAdapter
-from qpx.converters.quantms.psm_adapter import QuantmsPsmAdapter
 from qpx.converters.sdrf import SdrfConverter
 from qpx.converters.spectronaut.converter import SpectronautConverter
 from qpx.converters.spectronaut.feature_adapter import SpectronautFeatureAdapter
@@ -47,11 +43,6 @@ __all__ = [
     "CdapFeatureAdapter",
     "CdapPgAdapter",
     "CdapConverter",
-    # QuantMS (mzTab)
-    "QuantmsPsmAdapter",
-    "QuantmsFeatureAdapter",
-    "QuantmsPgAdapter",
-    "QuantMSConverter",
     # DIA-NN
     "DiannFeatureAdapter",
     "DiannPgAdapter",

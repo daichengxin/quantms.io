@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 
@@ -29,7 +28,7 @@ def parse_uniprot_id(entry: str) -> tuple[str, str]:
 
     ``sp|P12345|PROT_HUMAN`` -> ``("P12345", "PROT_HUMAN")``. With only two
     pipe-fields the accession doubles as the name; with none the whole ``entry``
-    is both. Shared by the FragPipe/quantms protein-field parsers.
+    is both. Used by the FragPipe protein-field parser.
     """
     parts = entry.split("|")
     if len(parts) >= 3:
@@ -52,44 +51,6 @@ def strip_uniprot_prefix(accession: str) -> str:
         if len(parts) >= 2:
             return parts[1]
     return accession
-
-
-# ------------------------------------------------------------------
-# mzTab spectra_ref helpers
-# ------------------------------------------------------------------
-
-
-def parse_scan_numbers(spectra_ref: str) -> list[int]:
-    """Extract scan numbers from an mzTab spectra_ref value.
-
-    Examples:
-        ``ms_run[1]:scan=1234``        -> ``[1234]``
-        ``ms_run[1]:index=42``         -> ``[42]``
-        ``ms_run[1]:spectrum=5``       -> ``[5]``
-    """
-    if not spectra_ref or spectra_ref == "null":
-        return []
-    match = re.search(r"(?:scan|index|spectrum)=(\d+)", spectra_ref)
-    if match:
-        return [int(match.group(1))]
-    # Fallback: try extracting any trailing integer after ':'
-    parts = spectra_ref.split(":")
-    if len(parts) >= 2:
-        try:
-            return [int(parts[-1])]
-        except ValueError:
-            pass
-    return []
-
-
-def resolve_run_file(spectra_ref: str, ms_runs: dict[int, str]) -> Optional[str]:
-    """Map spectra_ref to its run file stem via ms_runs dict."""
-    if not spectra_ref or spectra_ref == "null":
-        return None
-    m = re.search(r"\[(\d+)\]", spectra_ref)
-    if m:
-        return ms_runs.get(int(m.group(1)))
-    return None
 
 
 # ------------------------------------------------------------------
