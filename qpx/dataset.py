@@ -971,7 +971,7 @@ class Dataset:
                 # Project onto the writer's schema (adds any absent columns such
                 # as a derived id or optional cross-refs, then casts to normalize
                 # nullability/types). write_table stamps the derived id.
-                writer.write_table(writer._align_table_to_schema(data))
+                writer.write_table(writer.align_table_to_schema(data))
             else:
                 writer.write_dataframe(data)
 

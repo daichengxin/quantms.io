@@ -235,7 +235,7 @@ class BaseWriter:
         """The single-column identity primary key (the id field), else None."""
         if not self._identity_composite:
             return None
-        pk = self._schema_class._primary_key
+        pk = self._schema_class.primary_key
         return pk[0] if len(pk) == 1 else None
 
     def _derive_record_ids(self, records: list[dict]) -> None:
@@ -289,7 +289,7 @@ class BaseWriter:
             return table.set_column(table.schema.get_field_index(id_field), id_arrow_field, id_array)
         return table.add_column(0, id_arrow_field, id_array)
 
-    def _align_table_to_schema(self, table: pa.Table) -> pa.Table:
+    def align_table_to_schema(self, table: pa.Table) -> pa.Table:
         """Project *table* onto ``arrow_schema``: keep matching columns, fill
         absent ones (e.g. the derived id or the optional cross-ref columns) with
         nulls, then cast to normalize types/nullability."""

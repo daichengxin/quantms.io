@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Writer id-override mode**: `Writer(..., override_provided_ids=True)` re-derives the library id even when a producer supplied one, stashing the original as a `provided_<id>` cv_param and exposing `overridden_id_count` (so the converter can trace the override in provenance). Default off — producer-supplied ids are kept as-is. Primary-key clashes remain `warning`-level in non-strict validation (during/after conversion)
 
 ### Changed
+
 - **Feature/PSM/PG primary key is now the derived id** (`feature_id` / `psm_id` / `pg_id`) instead of the composite tuple; the previous composite is retained as the footer-declared `identity_composite` the id is derived from
 
 - **BREAKING — Feature/PSM primary keys** (format 1.1, issue #217): feature PK

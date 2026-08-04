@@ -21,8 +21,8 @@ import hashlib
 # Unit Separator between composite fields, and a NUL sentinel for None, so that
 # the canonical byte string is unambiguous (no ordinary field value contains
 # these control characters).
-FIELD_SEP = "\x1f"
-NULL_TOKEN = "\x00"
+FIELD_SEP = chr(0x1F)  # ASCII Unit Separator
+NULL_TOKEN = chr(0x00)  # ASCII NUL — sentinel for a None composite value
 
 
 def canonical(values: list) -> bytes:

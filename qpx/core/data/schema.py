@@ -270,6 +270,11 @@ class ViewSchema:
         self._arrow_schema_cache: pa.Schema | None = None
 
     @property
+    def primary_key(self) -> tuple[str, ...]:
+        """The view's primary-key column(s)."""
+        return self._primary_key
+
+    @property
     def identity_composite(self) -> tuple[str, ...] | None:
         """Composite of existing fields the single-column identity id is derived
         from, as declared by the schema's ``identity_composite`` key. ``None``
