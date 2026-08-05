@@ -2,6 +2,7 @@
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from qpx.core.data import FeatureSchema, PgSchema, PsmSchema
 from qpx.core.data.identity import canonical, derive_id
@@ -48,6 +49,12 @@ def test_schema_identity_metadata():
     assert tuple(PsmSchema.identity_composite) == ("peptidoform", "charge", "run_file_name", "scan")
     assert tuple(PgSchema._primary_key) == ("pg_id",)
     assert tuple(PgSchema.identity_composite) == ("anchor_protein", "grouped_runs", "label")
+
+
+def test_writer_rejects_unknown_identity_composite_field(tmp_path):
+    """A converter typo must fail instead of hashing an implicit null column."""
+    with pytest.raises(ValueError, match="outside the feature schema.*missing_field"):
+        FeatureWriter(tmp_path / "invalid.feature.parquet", identity_composite=("run_file_name", "missing_field"))
 
 
 def test_feature_roundtrip_derives_id(tmp_path):

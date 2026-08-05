@@ -190,6 +190,19 @@ class BaseWriter:
         # the footer stamps the effective composite via the ``_identity_composite``
         # property below.
         self._identity_composite_override = tuple(identity_composite) if identity_composite else None
+        effective_composite = self._identity_composite
+        if effective_composite:
+            identity_schema = (
+                self._schema_class.get_extended_arrow_schema(self._extra_columns)
+                if self._extra_columns
+                else self._schema_class.get_arrow_schema()
+            )
+            available_fields = set(identity_schema.names)
+            unknown_fields = [field for field in effective_composite if field not in available_fields]
+            if unknown_fields:
+                raise ValueError(
+                    f"identity_composite contains fields outside the {self._schema_class._view_name} schema: {unknown_fields}"
+                )
 
         # Build Parquet footer metadata. Two distinct versions are stamped:
         #   qpx_version    — the on-disk *specification* version (QPX_SPEC_VERSION),
