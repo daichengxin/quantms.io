@@ -179,10 +179,18 @@ Every QPX Parquet file includes metadata as key-value pairs stored in the Parque
 | `project_accession` | ProteomeXchange or project accession (e.g., `PXD012345`) |
 | `project_title` | Human-readable title of the project |
 | `scan_format` | Format of scan identifiers: `scan`, `index`, or `nativeId` |
+| `primary_key` | Primary-key column for identity-bearing views (`feature_id`, `psm_id`, or `pg_id`) |
+| `identity_composite` | Comma-separated producer properties used when QPX derives the row ID |
 | `creator` | Name of the tool or person who created the file |
 | `file_type` | QPX view type (e.g., `psm_file`, `feature_file`, `pg_file`) |
 | `creation_date` | ISO 8601 date when the file was created |
 | `compression_format` | Compression algorithm used: `zstd`, `snappy`, `gzip`, `lzo`, or `none` |
+
+For QPX-derived identity columns, the ordered `identity_composite` values are
+encoded as compact canonical JSON with escaped strings and JSON `null` values.
+QPX hashes those bytes with BLAKE2b using an 8-byte digest and stores the result
+as a signed, big-endian `int64`. `grouped_runs` is sorted for identity hashing;
+ordered lists such as `scan` retain their order.
 
 !!! tip "Writing Parquet with metadata in Python"
     ```python

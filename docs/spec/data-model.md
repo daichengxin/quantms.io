@@ -29,7 +29,8 @@ Define these once; the rest of the spec uses them consistently.
 | **grouped_runs** | The **set of raw files aggregated into one quantification unit** — the fractions of one sample+channel context, aggregated together. `list<string>` of `run_file_name`. Single-element for unfractionated or DIA data. | `pg.grouped_runs` |
 | **quantification unit** | The thing a protein quantity is measured *over*: one `grouped_runs` set. A protein abundance exists per quantification unit, **not** per single raw file, because a protein quantity only emerges after aggregating its peptides across the sample's fractions. | `pg` (one row per `(anchor_protein, grouped_runs, label)`) |
 | **peptidoform** | Peptide sequence + modifications in ProForma notation. The identity thread linking PSM ↔ feature ↔ pepmap. | `psm`, `feature`, `pepmap` |
-| **anchor_protein** | The representative (leading) protein of a protein group. Join key from `feature` to `pg`. On `feature` it is an *annotation* (not part of feature identity); on `pg` it is part of the primary key. | `feature`, `pg` |
+| **entity ID** | Mandatory opaque primary key for a PSM, Feature, or protein-group row: `psm_id`, `feature_id`, or `pg_id`. It may be supplied by the producer or derived by QPX from the file's footer-declared `identity_composite`. | `psm`, `feature`, `pg` |
+| **anchor_protein** | The representative (leading) protein of a protein group. On `feature` it is an annotation used for semantic protein mapping; an explicit Feature-to-PG link uses `feature.pg_ids[]` → `pg.pg_id`. On `pg` it participates in the default identity composite. | `feature`, `pg` |
 | **intensities** | Primary/raw abundance measurements. On **feature** a `list<{label, intensity}>` (one element per channel). On **pg** it is **flattened** to a scalar `label` + `intensity`, one row per label. | `feature.intensities`, `pg.label`/`pg.intensity` |
 | **additional_intensities** | Tool-computed derived values (normalized, LFQ, iBAQ, MaxLFQ) read from upstream output — never computed by QPX. | `feature`, `pg` |
 
@@ -58,19 +59,22 @@ graph LR
 
 - **run** — one raw file was acquired on the instrument.
 - **PSM** — a search engine matched a single MS/MS spectrum (one `scan`) to a
-  peptidoform. PK `[peptidoform, charge, run_file_name, scan]`. Primarily DDA.
+  peptidoform. PK `psm_id`; schema-default identity composite
+  `[peptidoform, charge, run_file_name, scan]`. Primarily DDA.
 - **feature** — one quantified chromatographic peak: a peptidoform+charge in one
-  run, with an intensity per channel. PK `[peptidoform, charge, run_file_name, rt]`.
-  Covers DDA **and** DIA.
+  run, with an intensity per channel. PK `feature_id`; schema-default identity
+  composite `[peptidoform, charge, run_file_name, rt]`, which converters may
+  override for their producer's Feature entity. Covers DDA **and** DIA.
 - **pg** — a protein group quantified over one **quantification unit**
-  (`grouped_runs`) for one **label**. PK `[anchor_protein, grouped_runs, label]`,
-  **one row per label** (flattened since QPX 1.1).
+  (`grouped_runs`) for one **label**. PK `pg_id`; schema-default identity
+  composite `[anchor_protein, grouped_runs, label]`. There is **one row per
+  label** (flattened since QPX 1.1).
 
 !!! note "Granularity shifts at each step"
-    PSM is **per spectrum** (keyed by `scan`); feature is **per peak per run**
-    (keyed by `rt`); pg is **per quantification unit per label** (keyed by
-    `grouped_runs` + `label`). The join key that carries you across the
-    single-run → aggregated-runs boundary is `feature.run_file_name ∈ pg.grouped_runs`.
+    PSM is **per spectrum**; feature is **per upstream Feature entity**; pg is
+    **per quantification unit per label**. Their primary keys are the mandatory
+    opaque ID columns. The footer-declared identity composite records the
+    producer properties used when QPX derives an ID.
 
 ## Entity-relationship diagram
 
@@ -86,10 +90,10 @@ erDiagram
     RUN ||--o{ FEATURE : "run_file_name"
     RUN ||--o{ MZ : "run_file_name"
     PG }o--|{ RUN : "grouped_runs[] contains run_file_name"
-    FEATURE }o--o{ PG : "anchor_protein + run_file_name in grouped_runs + label"
+    FEATURE }o--o{ PG : "pg_ids[] → pg_id"
     PEPMAP ||--o{ PSM : "peptidoform"
     PEPMAP ||--o{ FEATURE : "peptidoform"
-    PSM }o--o{ FEATURE : "peptidoform+charge+run_file_name"
+    PSM }o--o{ FEATURE : "feature_id / psm_ids[]"
     MZ }o--o{ PSM : "run_file_name+scan"
 
     SAMPLE {
@@ -110,23 +114,29 @@ erDiagram
         int technical_replicate
     }
     PSM {
-        string peptidoform PK
-        int charge PK
-        string run_file_name PK
-        list scan PK
+        int64 psm_id PK
+        int64 feature_id FK
+        string peptidoform
+        int charge
+        string run_file_name
+        list scan
     }
     FEATURE {
-        string peptidoform PK
-        int charge PK
-        string run_file_name PK
-        float rt PK
+        int64 feature_id PK
+        list psm_ids FK
+        list pg_ids FK
+        string peptidoform
+        int charge
+        string run_file_name
+        float rt
         string anchor_protein
         list intensities "list of label+intensity"
     }
     PG {
-        string anchor_protein PK
-        list grouped_runs PK
-        string label PK
+        int64 pg_id PK
+        string anchor_protein
+        list grouped_runs
+        string label
         float intensity
     }
     PEPMAP {
@@ -145,10 +155,10 @@ The join keys, spelled out:
 
 | From | To | Join predicate |
 |------|----|----------------|
-| `feature` | `pg` | `feature.anchor_protein = pg.anchor_protein` **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** `unnest(feature.intensities).label = pg.label` (one PG row per channel since QPX 1.1) |
+| `feature` | `pg` | When populated, `unnest(feature.pg_ids) = pg.pg_id`. Without explicit IDs, the semantic association is `feature.anchor_protein = pg.anchor_protein` **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** `unnest(feature.intensities).label = pg.label`. |
 | `feature` / `pg` | `run` | `run_file_name = run.run_file_name` (for pg: any file in `grouped_runs`) |
 | `(file, label)` | `sample` | unnest `run.samples[]`, match `label`, take `sample_accession`; then `sample.sample_accession` |
-| `psm` ↔ `feature` | — | shared `peptidoform + charge + run_file_name` (feature also stores best PSM's `scan`, `id_run_file_name`) |
+| `psm` ↔ `feature` | — | `psm.feature_id = feature.feature_id` or `psm.psm_id ∈ feature.psm_ids`; when explicit references are absent, shared identification fields can be used for semantic matching but are not a guaranteed row-level link. |
 | `psm` / `feature` | `pepmap` | shared `peptidoform` |
 | `mz` ↔ `psm`/`feature` | — | `run_file_name + scan` |
 
@@ -262,6 +272,8 @@ returned once per sample and label.
 | Peptide identity | `peptidoform` | psm, feature, pepmap |
 | Precursor charge | `charge` | psm, feature |
 | Protein representative | `anchor_protein` | feature, pg |
+| Row identity | `psm_id` / `feature_id` / `pg_id` | psm / feature / pg |
+| Explicit cross-reference | `psm.feature_id`, `feature.psm_ids`, `feature.pg_ids` | psm ↔ feature → pg |
 
 ## Related pages
 
@@ -274,5 +286,3 @@ returned once per sample and label.
 - [Peptide-Protein Map](pepmap.md) — deduplicated peptidoform → protein mapping.
 - [API Views](views.md) — on-demand summaries derived by joining these views.
 - [Versioning](versioning.md) — the 1.1 flatten + primary-key changelog.
-</content>
-</invoke>

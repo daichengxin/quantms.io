@@ -428,7 +428,13 @@ class GeneMappingTransform:
             include_accessions=include_accessions,
         )
 
-        with FeatureWriter(output_path) as writer:
+        source_composite = dataset.feature.file_metadata.get("identity_composite")
+        identity_composite = tuple(source_composite.split(",")) if source_composite else None
+        with FeatureWriter(
+            output_path,
+            override_provided_ids=False,
+            identity_composite=identity_composite,
+        ) as writer:
             writer.write_dataframe(annotated_df)
 
         logger.info(f"Wrote gene-annotated features to {output_path}")

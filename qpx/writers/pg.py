@@ -3,7 +3,9 @@
 Since QPX 1.1 the pg view is **flattened**: instead of one row per
 ``(anchor_protein, grouped_runs)`` carrying an ``intensities: list<{label,
 intensity}>`` column, there is **one row per label** with scalar ``label`` and
-``intensity`` columns and PK ``(anchor_protein, grouped_runs, label)``. Converters
+``intensity`` columns. Since the mandatory-identity change the primary key is the
+single derived ``pg_id`` (hashed from the ``identity_composite``
+``(anchor_protein, grouped_runs, label)``). Converters
 still build the natural ``intensities`` list per protein group; the writer is the
 single place that materializes the flat physical layout, so no converter needs to
 know about the on-disk shape. Identification-only groups (no intensity, e.g.
@@ -71,7 +73,9 @@ class PgWriter(BaseWriter):
         """Explode a pg table that still carries the ``intensities`` list column."""
         if "intensities" in table.schema.names:
             exploded = _explode_pg_records(table.to_pylist())
-            batch = pa.RecordBatch.from_pylist(exploded, schema=self.arrow_schema)
-            super().write_table(pa.Table.from_batches([batch], schema=self.arrow_schema))
+            # Build with a nullable id; super().write_table derives pg_id.
+            relaxed = self._relaxed_id_schema()
+            batch = pa.RecordBatch.from_pylist(exploded, schema=relaxed)
+            super().write_table(pa.Table.from_batches([batch], schema=relaxed))
             return
         super().write_table(table)

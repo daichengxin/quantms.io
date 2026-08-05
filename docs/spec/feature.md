@@ -1,20 +1,27 @@
 # Feature View
 
-The feature view captures quantified peptide information at the MS run level. Each row represents a peptide feature -- a quantified peptidoform in a specific run file -- including its intensity across labels and protein group mappings.
+The feature view captures quantified peptide information, including intensity
+across labels and protein-group mappings. Each row has a mandatory opaque
+`feature_id`, which is the primary key. For identified Features, QPX derives the
+ID from the upstream properties recorded in the Parquet footer's
+`identity_composite`; any producer ID remains traceable in `cv_params`. For
+unidentified Features, a producer-supplied ID is required and QPX namespaces it
+by its run or quantification unit; the original ID remains traceable in
+`cv_params`.
+Converters may override the schema default when their producer represents a
+different Feature-level entity.
 
 For a de novo workflow without a database search, set `is_decoy` to `false` and
 record a `de_novo_peptide_sequencing` step in `provenance.parquet`. Protein-mapping
-fields may be null; `anchor_protein` is an annotation and is not part of a feature's
-identity. A feature is a physical chromatographic peak, uniquely identified by its
-primary key `[peptidoform, charge, run_file_name, rt]` — the apex `rt` resolves the
-distinct peaks that a single peptidoform+charge produces within one run (isomers,
-split peaks, repeated elution). `rt` should be finite and populated wherever the
-producer reports per-feature retention time (DIA-NN, OpenMS/quantms, TMT); some
-tools (e.g. FragPipe `combined_ion`) do not, leaving `rt` null. A null `rt` is
-still a key value (it does not drop `rt` from the key), so those producers must
-emit at most one feature per `(peptidoform, charge, run_file_name)` — any residual
-collision is reported as a `duplicate_pk` validation error, not silent. The key is
-meaningful within a file only — never join across files or tools on `rt`.
+fields may be null; `anchor_protein` is an annotation and is not part of a
+feature's identity. The schema default composite is `[peptidoform, charge,
+run_file_name, rt]`. FragPipe `combined_ion`, which has no per-feature RT and may
+separate the same precursor by FAIMS voltage, instead declares
+`[quantification_unit_id, peptidoform, charge, compensation_voltage]`. Identity
+OpenMS consensusXML declares `[peptidoform, charge, run_file_name, rt, scan,
+observed_mz, consensus_rt]`, where `scan` contains every spectrum reference for
+the run. Identity is meaningful within a file only; distinct QPX files must not
+be joined on `feature_id` alone.
 
 ## Use Cases
 
@@ -23,6 +30,12 @@ meaningful within a file only — never join across files or tools on `rt`.
 - **Integration with sample metadata**: Each feature carries label information, connecting quantification data to experimental design described in the SDRF.
 
 ## Schema
+
+### Identity
+
+| Field | Description | Type | Required |
+|-------|-------------|------|----------|
+| `feature_id` | Opaque primary key, supplied by the producer or derived by QPX from the footer-declared `identity_composite` | int64 | yes |
 
 ### Core Identification Fields
 
@@ -41,12 +54,14 @@ These fields are shared with the PSM view and describe the peptide identificatio
 | `mass_error_ppm` | Mass error in ppm: 1e6 × (observed_mz − calculated_mz) / calculated_mz | float32, null | no |
 | `missed_cleavages` | Number of missed enzymatic cleavages | int16, null | no |
 | `rt` | Precursor retention time (in seconds) | float32, null | no |
+| `consensus_rt` | Parent OpenMS `ConsensusFeature` retention time | float32, null | optional |
 | `rt_start` | Start of the retention time window for the feature | float32, null | no |
 | `rt_stop` | End of the retention time window for the feature | float32, null | no |
 | `predicted_rt` | Predicted retention time of the peptide (in seconds) | float32, null | no |
 | `ion_mobility` | Ion mobility value for the precursor ion | float32, null | no |
 | `ion_mobility_start` | Start ion mobility value for the precursor ion | float32, null | no |
 | `ion_mobility_stop` | Stop ion mobility value for the precursor ion | float32, null | no |
+| `compensation_voltage` | FAIMS compensation voltage; `0` for non-FAIMS FragPipe units | float32, null | optional |
 | `additional_scores` | List of score structures with name, value, and direction indicator | array[struct], null | no |
 | `cv_params` | Optional list of controlled vocabulary parameters for additional metadata | array[struct], null | no |
 
@@ -57,6 +72,7 @@ These fields are shared with the PSM view and describe the peptide identificatio
 | `intensities` | Primary intensity-based abundance of the feature across labels | array[struct], null | no |
 | `additional_intensities` | Pre-computed intensity values from the upstream tool (e.g., normalized, LFQ, iBAQ) as named key-value pairs per label | array[struct], null | no |
 | `run_file_name` | The run file name that contains the feature | string | yes |
+| `quantification_unit_id` | Quantification unit represented by the quantity when it may aggregate multiple raw runs | string, null | optional |
 
 !!! tip "Intensity structure"
     For details on the `intensities` and `additional_intensities` data structures, including examples for LFQ and TMT experiments, see [Intensities](intensities.md).
@@ -82,7 +98,7 @@ Each entry in `pg_positions` contains:
 | `end` | 1-based end position of the peptide in the protein sequence (inclusive) | `int` |
 
 !!! note "Gene and protein inference data"
-    Gene accessions, gene names, and unique peptide indicators are optionally included in the feature file for convenience. Protein-level scores are stored in the [Protein Group View](pg.md). For the complete protein-level perspective with aggregated intensities and peptide counts, join the protein mapping (for example, `anchor_protein`) and require `feature.run_file_name` to be a member of `pg.grouped_runs`.
+    Gene accessions, gene names, and unique peptide indicators are optionally included in the feature file for convenience. Protein-level scores are stored in the [Protein Group View](pg.md). When `pg_ids` is populated, join it directly to `pg.pg_id`. Otherwise use the semantic protein mapping (for example, `anchor_protein`) and require `feature.run_file_name` to be a member of `pg.grouped_runs`.
 
 !!! info "Optional vs nullable"
     `pg_global_qvalue` is **optional** — the column may be absent from the file entirely if the search engine does not provide a protein group q-value. When present, individual values may be null.
@@ -93,6 +109,13 @@ Each entry in `pg_positions` contains:
 |-------|-------------|------|----------|
 | `id_run_file_name` | The run file containing the best PSM that identified the feature (may differ from `run_file_name`) | string, null | no |
 | `scan` | Scan identifier of the best PSM that identified the feature, as an array of integer components (e.g., `[43920]` for single-scan instruments, `[10, 1, 345]` for Waters function/process/scan) | array[int32] | yes |
+
+### Optional Cross-References
+
+| Field | Description | Type | Required |
+|-------|-------------|------|----------|
+| `psm_ids` | References to PSM rows through `psm.psm_id`; null when no explicit links are available | array[int64], null | no |
+| `pg_ids` | References to protein-group rows through `pg.pg_id`; null when no explicit links are available | array[int64], null | no |
 
 ## Shared Fields
 
@@ -109,6 +132,7 @@ Several fields in the feature view use structures shared across other QPX views:
 
 ```json
 {
+  "feature_id": 8049980460766804816,
   "sequence": "AADLLTSFLGHK",
   "peptidoform": "AADLLTSFLGHK",
   "modifications": null,
@@ -169,6 +193,7 @@ Several fields in the feature view use structures shared across other QPX views:
 
 ```json
 {
+  "feature_id": -5948337580339590069,
   "sequence": "VLHPLEGAVVIIFK",
   "peptidoform": "[UniMod:1]-VLHPLEGAVVIIFK",
   "modifications": [

@@ -14,7 +14,7 @@ fragpipe:
       gg_names: ["Gene"]
       observed_mz: ["M/Z"]
       charge: ["Charge"]
-      charges: ["Charges"]
+      compensation_voltage: ["Compensation Voltage"]
       modifications: ["Assigned Modifications"]
     psm:
       sequence: ["Peptide"]

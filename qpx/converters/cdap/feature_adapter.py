@@ -26,6 +26,12 @@ from qpx.writers.feature import FeatureWriter
 
 _FEATURE_MAP = get_field_mappings("cdap", "feature")
 
+# Producer-specific feature identity composite (bigbio/qpx#229). CDAP reports one
+# feature per precursor per run, so the measured key is just peptidoform + charge +
+# run (all in feature.yaml). Passed to FeatureWriter so feature_id hashes exactly
+# these columns instead of the schema default.
+_FEATURE_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name")
+
 # Reporter-ion meta column suffixes (per channel prefix) skipped during the
 # channel auto-detection.  Channels of interest end with the reporter-ion m/z
 # token (e.g. ``-127N``, ``-131C``, or ``114``..``117`` for iTRAQ).
@@ -73,7 +79,12 @@ class CdapFeatureAdapter(CdapBaseAdapter):
         agg_sql = self._build_aggregation_sql(actual_cols, channel_cols)
 
         self.logger.info("Transforming CDAP features ...")
-        with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
+        with FeatureWriter(
+            output_path,
+            creator=creator,
+            compression=self._compression,
+            identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+        ) as writer:
             self._stream_transform_write(agg_sql, writer, chunksize)
 
         self.logger.info("CDAP feature conversion complete -> %s", output_path)

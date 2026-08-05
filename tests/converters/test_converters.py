@@ -1,6 +1,7 @@
 """Converter adapter tests with synthetic data."""
 
 import pyarrow.parquet as pq
+import pytest
 
 # ---------------------------------------------------------------------------
 # ProForma conversion unit tests
@@ -166,18 +167,36 @@ class TestFragPipeFeatureAdapter:
         assert "sequence" in table.schema.names
         assert "anchor_protein" in table.schema.names
 
-    def test_convert_combined_peptide(self, tmp_path):
+    def test_faims_voltage_distinguishes_fragpipe_features(self, tmp_path):
+        """The same precursor at two FAIMS voltages is two Feature entities."""
+        from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
+
+        tsv = tmp_path / "combined_ion.tsv"
+        tsv.write_text(
+            "Peptide Sequence\tCharge\tM/Z\tProtein\tAssigned Modifications\t"
+            "Compensation Voltage\texperiment_1 Intensity\n"
+            "PEPTIDEK\t2\t450.25\tP12345\t\t-45\t1000\n"
+            "PEPTIDEK\t2\t450.25\tP12345\t\t-65\t2000\n"
+        )
+        output = tmp_path / "test.feature.parquet"
+        with FragPipeFeatureAdapter() as adapter:
+            adapter.convert(feature_path=str(tsv), output_path=str(output))
+
+        table = pq.read_table(output)
+        assert set(table.column("quantification_unit_id").to_pylist()) == {"experiment_1"}
+        assert set(table.column("compensation_voltage").to_pylist()) == {-45.0, -65.0}
+        assert len(set(table.column("feature_id").to_pylist())) == 2
+        assert table.schema.metadata[b"identity_composite"] == (b"quantification_unit_id,peptidoform,charge,compensation_voltage")
+
+    def test_rejects_combined_peptide(self, tmp_path):
         from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
 
         tsv = self._write_peptide_tsv(tmp_path)
         output = tmp_path / "test.feature.parquet"
         with FragPipeFeatureAdapter() as adapter:
-            adapter.convert(feature_path=str(tsv), output_path=str(output))
-        assert output.exists()
-        table = pq.read_table(output)
-        # 1 peptide x 2 experiments x 2 charges = 4 rows
-        assert table.num_rows == 4
-        assert "sequence" in table.schema.names
+            with pytest.raises(ValueError, match="combined_peptide.tsv.*peptide-level.*combined_ion.tsv"):
+                adapter.convert(feature_path=str(tsv), output_path=str(output))
+        assert not output.exists()
 
     def test_ion_modifications_parsed(self, tmp_path):
         from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
