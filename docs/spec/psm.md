@@ -117,6 +117,7 @@ Several fields in the PSM view use structures shared across other QPX views:
 
 ```json
 {
+  "psm_id": -4279600662514899531,
   "sequence": "AAAAAAAAAAGAAGGR",
   "peptidoform": "[Acetyl]-AAAAAAAAAAGAAGGR",
   "charge": 2,
@@ -172,6 +173,7 @@ When spectral arrays are included, the record also contains peak-level data:
 
 ```json
 {
+  "psm_id": -4279600662514899531,
   "sequence": "AAAAAAAAAAGAAGGR",
   "peptidoform": "[Acetyl]-AAAAAAAAAAGAAGGR",
   "charge": 2,

@@ -100,6 +100,7 @@ Each entry in `peptides` contains:
 
 ```json
 {
+  "pg_id": 2937018471546916399,
   "pg_accessions": ["P04217", "A0A024R4E5"],
   "pg_names": ["Alpha-1B-glycoprotein", "Alpha-1B-glycoprotein variant"],
   "gg_accessions": ["A1BG"],

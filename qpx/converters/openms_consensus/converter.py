@@ -34,7 +34,15 @@ _STRUCTURE_ALL = ("feature", "psm", "pg", "run", "sample")
 # (measured keys agreed in bigbio/qpx#229). Passed to the FeatureWriter so the
 # derived feature_id hashes exactly these columns (all present in feature.yaml)
 # instead of the schema default.
-_FEATURE_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "rt", "scan", "observed_mz")
+_FEATURE_IDENTITY_COMPOSITE = (
+    "peptidoform",
+    "charge",
+    "run_file_name",
+    "rt",
+    "scan",
+    "observed_mz",
+    "consensus_rt",
+)
 # The psm view's schema identity_composite (psm.yaml) — used to derive the
 # psm_id we cross-reference from feature.psm_ids / psm.feature_id.
 _PSM_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "scan")

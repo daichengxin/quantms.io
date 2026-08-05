@@ -186,6 +186,12 @@ Every QPX Parquet file includes metadata as key-value pairs stored in the Parque
 | `creation_date` | ISO 8601 date when the file was created |
 | `compression_format` | Compression algorithm used: `zstd`, `snappy`, `gzip`, `lzo`, or `none` |
 
+For QPX-derived identity columns, the ordered `identity_composite` values are
+encoded as compact canonical JSON with escaped strings and JSON `null` values.
+QPX hashes those bytes with BLAKE2b using an 8-byte digest and stores the result
+as a signed, big-endian `int64`. `grouped_runs` is sorted for identity hashing;
+ordered lists such as `scan` retain their order.
+
 !!! tip "Writing Parquet with metadata in Python"
     ```python
     import pyarrow as pa

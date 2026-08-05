@@ -539,6 +539,7 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             # Producer-specific optional fields not emitted by DIA-NN.
             "quantification_unit_id",
             "compensation_voltage",
+            "consensus_rt",
         }
         select_parts: list[str] = []
         for field in target_schema:

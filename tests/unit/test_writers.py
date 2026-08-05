@@ -85,6 +85,7 @@ def test_writer_schema_validation(tmp_path):
         wrong_fields = [pa.field("charge", pa.string()) if f.name == "charge" else f for f in schema]
         wrong_schema = pa.schema(wrong_fields)
         arrays = {f.name: pa.nulls(1, type=f.type) for f in wrong_schema}
+        arrays["peptidoform"] = pa.array(["PEPTIDE"], type=pa.string())
         arrays["charge"] = pa.array(["wrong"], type=pa.string())
         table = pa.table(arrays, schema=wrong_schema)
         with pytest.raises(ValueError, match="Schema validation failed"):

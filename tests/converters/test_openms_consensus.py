@@ -75,6 +75,17 @@ def _write_tmt_consensusxml(path):
     path.write_text(_TMT_CONSENSUSXML)
 
 
+def _write_multi_reference_consensusxml(path):
+    """Write one ConsensusFeature supported by two spectrum references."""
+    second_pid = """
+			<PeptideIdentification identification_run_ref="PI_0" score_type="" higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100" spectrum_reference="controllerType=0 controllerNumber=1 scan=43" >
+				<PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
+					<UserParam type="string" name="target_decoy" value="target"/>
+				</PeptideHit>
+			</PeptideIdentification>"""
+    path.write_text(_TMT_CONSENSUSXML.replace("\n\t\t</consensusElement>", f"{second_pid}\n\t\t</consensusElement>"))
+
+
 def test_streaming_matches_pyopenms(tmp_path):
     """The low-memory streaming reader produces the same parquet as pyopenms."""
     import json
@@ -192,3 +203,23 @@ def test_openms_consensus_cross_refs_resolve(tmp_path, streaming):
     assert referenced_psm_ids, "expected at least one feature.psm_ids element to be populated"
     for pid in referenced_psm_ids:
         assert pid in psm_ids, f"feature.psm_ids element {pid} does not resolve to a psm.psm_id"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_openms_consensus_identity_retains_all_spectrum_references(tmp_path, streaming):
+    """The Feature identity keeps every supporting scan and the parent consensus RT."""
+    import pyarrow.parquet as pq
+
+    cx = tmp_path / "multi.consensusXML"
+    _write_multi_reference_consensusxml(cx)
+    written = OpenMSConsensusConverter().convert(
+        str(cx),
+        str(tmp_path / ("stream" if streaming else "mem")),
+        output_prefix="t",
+        structures=("feature",),
+        streaming=streaming,
+    )
+    table = pq.read_table(written["feature"])
+    assert table.column("scan").to_pylist() == [[42, 43]]
+    assert table.column("consensus_rt").to_pylist() == pytest.approx([100.123456])
+    assert table.schema.metadata[b"identity_composite"] == (b"peptidoform,charge,run_file_name,rt,scan,observed_mz,consensus_rt")

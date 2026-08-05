@@ -77,6 +77,11 @@ fields:
     type: float32
     nullable: true
     doc: "Retention time (seconds); may participate in a producer-specific identity composite when it identifies the upstream Feature entity"
+  consensus_rt:
+    type: float32
+    nullable: true
+    optional: true
+    doc: "Parent ConsensusFeature retention time; populated by the OpenMS consensusXML converter"
   ion_mobility:
     type: float32
     doc: "Ion mobility"

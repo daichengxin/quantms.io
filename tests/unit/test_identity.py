@@ -134,14 +134,27 @@ def test_identified_feature_id_is_derived_by_default(tmp_path):
     assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in table.column("cv_params").to_pylist()[0]
 
 
-def test_unidentified_feature_keeps_provided_id(tmp_path):
-    """An unidentified Feature retains its producer identity."""
+def test_unidentified_feature_namespaces_provided_id(tmp_path):
+    """An unidentified Feature namespaces its required producer identity by run."""
     path = tmp_path / "unidentified.feature.parquet"
-    rec = make_feature_record(sequence="", peptidoform="")
-    rec["feature_id"] = 123456789
+    records = [make_feature_record(sequence="", peptidoform="", run_file_name=run) for run in ("run_01", "run_02")]
+    for record in records:
+        record["feature_id"] = 123456789
     with FeatureWriter(path) as writer:
-        writer.write_batch([rec])
-    assert pq.read_table(path).column("feature_id").to_pylist() == [123456789]
+        writer.write_batch(records)
+    table = pq.read_table(path)
+    assert table.column("feature_id").to_pylist() == [derive_id([record["run_file_name"], 123456789]) for record in records]
+    for params in table.column("cv_params").to_pylist():
+        assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in params
+
+
+def test_unidentified_feature_requires_provided_id(tmp_path):
+    """QPX must not invent a natural identity for an unidentified Feature."""
+    path = tmp_path / "missing-unidentified-id.feature.parquet"
+    rec = make_feature_record(sequence="", peptidoform="")
+    with pytest.raises(ValueError, match="requires a producer-supplied feature_id"):
+        with FeatureWriter(path) as writer:
+            writer.write_batch([rec])
 
 
 def test_provided_psm_id_kept_by_default(tmp_path):

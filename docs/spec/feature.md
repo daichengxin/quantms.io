@@ -5,7 +5,9 @@ across labels and protein-group mappings. Each row has a mandatory opaque
 `feature_id`, which is the primary key. For identified Features, QPX derives the
 ID from the upstream properties recorded in the Parquet footer's
 `identity_composite`; any producer ID remains traceable in `cv_params`. For
-unidentified Features, a producer-supplied ID is preserved when available.
+unidentified Features, a producer-supplied ID is required and QPX namespaces it
+by its run or quantification unit; the original ID remains traceable in
+`cv_params`.
 Converters may override the schema default when their producer represents a
 different Feature-level entity.
 
@@ -16,8 +18,10 @@ feature's identity. The schema default composite is `[peptidoform, charge,
 run_file_name, rt]`. FragPipe `combined_ion`, which has no per-feature RT and may
 separate the same precursor by FAIMS voltage, instead declares
 `[quantification_unit_id, peptidoform, charge, compensation_voltage]`. Identity
-is meaningful within a file only; distinct QPX files must not be joined on
-`feature_id` alone.
+OpenMS consensusXML declares `[peptidoform, charge, run_file_name, rt, scan,
+observed_mz, consensus_rt]`, where `scan` contains every spectrum reference for
+the run. Identity is meaningful within a file only; distinct QPX files must not
+be joined on `feature_id` alone.
 
 ## Use Cases
 
@@ -50,6 +54,7 @@ These fields are shared with the PSM view and describe the peptide identificatio
 | `mass_error_ppm` | Mass error in ppm: 1e6 × (observed_mz − calculated_mz) / calculated_mz | float32, null | no |
 | `missed_cleavages` | Number of missed enzymatic cleavages | int16, null | no |
 | `rt` | Precursor retention time (in seconds) | float32, null | no |
+| `consensus_rt` | Parent OpenMS `ConsensusFeature` retention time | float32, null | optional |
 | `rt_start` | Start of the retention time window for the feature | float32, null | no |
 | `rt_stop` | End of the retention time window for the feature | float32, null | no |
 | `predicted_rt` | Predicted retention time of the peptide (in seconds) | float32, null | no |
@@ -127,6 +132,7 @@ Several fields in the feature view use structures shared across other QPX views:
 
 ```json
 {
+  "feature_id": 8049980460766804816,
   "sequence": "AADLLTSFLGHK",
   "peptidoform": "AADLLTSFLGHK",
   "modifications": null,
@@ -187,6 +193,7 @@ Several fields in the feature view use structures shared across other QPX views:
 
 ```json
 {
+  "feature_id": -5948337580339590069,
   "sequence": "VLHPLEGAVVIIFK",
   "peptidoform": "[UniMod:1]-VLHPLEGAVVIIFK",
   "modifications": [
