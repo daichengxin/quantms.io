@@ -42,7 +42,7 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | Converter | Typical inputs |
 |-----------|----------------|
 | MaxQuant | msms.txt, evidence.txt, proteinGroups.txt |
-| FragPipe | psm.tsv, combined_ion/combined_peptide, combined_protein |
+| FragPipe | psm.tsv, combined_ion, combined_protein |
 | DIA-NN | report (tsv), pg_matrix (optional) |
 | Spectronaut | report.tsv; optional SDRF |
 | OpenMS native QPX | `-out_qpx` Parquet directory; SDRF; optional companion consensusXML |

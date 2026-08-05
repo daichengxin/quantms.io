@@ -442,11 +442,6 @@ def convert_maxquant_cmd(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
-    "--peptide-file",
-    help="FragPipe combined_peptide.tsv file (for feature conversion)",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-)
-@click.option(
     "--pg-file",
     help="FragPipe combined_protein.tsv file (for PG conversion)",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -507,7 +502,6 @@ def convert_maxquant_cmd(
 def convert_fragpipe_cmd(
     psm_file: Optional[Path],
     ion_file: Optional[Path],
-    peptide_file: Optional[Path],
     pg_file: Optional[Path],
     sdrf_file: Optional[Path],
     experiment_annotation_file: Optional[Path],
@@ -524,8 +518,7 @@ def convert_fragpipe_cmd(
     """Convert FragPipe output to QPX format.
 
     Reads FragPipe result files and converts them into QPX Parquet format.
-    Supports psm.tsv, combined_ion.tsv, combined_peptide.tsv, and
-    combined_protein.tsv.
+    Supports psm.tsv, combined_ion.tsv, and combined_protein.tsv.
 
     \b
     Examples:
@@ -545,10 +538,8 @@ def convert_fragpipe_cmd(
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if not any([psm_file, ion_file, peptide_file, pg_file]):
-        raise click.ClickException(
-            "No input files provided. Supply at least one of --psm-file, --ion-file, --peptide-file, or --pg-file."
-        )
+    if not any([psm_file, ion_file, pg_file]):
+        raise click.ClickException("No input files provided. Supply at least one of --psm-file, --ion-file, or --pg-file.")
 
     output_folder.mkdir(parents=True, exist_ok=True)
 
@@ -560,7 +551,6 @@ def convert_fragpipe_cmd(
     converter.convert(
         psm_file=psm_file,
         ion_file=ion_file,
-        peptide_file=peptide_file,
         pg_file=pg_file,
         sdrf_file=sdrf_file,
         experiment_annotation_file=experiment_annotation_file,

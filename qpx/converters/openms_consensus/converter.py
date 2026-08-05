@@ -13,13 +13,15 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import pyarrow as pa
+
 from qpx.converters.openms_consensus.feature_adapter import (
     check_channels_vs_sdrf,
-    consensus_features_to_records,
     load_consensus_map,
 )
 from qpx.converters.openms_consensus.pg_adapter import accession_to_anchor, consensus_protein_groups_to_records
-from qpx.converters.openms_consensus.psm_adapter import consensus_psms_to_records
+from qpx.core.data import FeatureSchema, PsmSchema
+from qpx.core.data.identity import derive_id
 from qpx.writers.feature import FeatureWriter
 from qpx.writers.pg import PgWriter
 from qpx.writers.psm import PsmWriter
@@ -27,6 +29,60 @@ from qpx.writers.psm import PsmWriter
 _log = logging.getLogger(__name__)
 
 _STRUCTURE_ALL = ("feature", "psm", "pg", "run", "sample")
+
+# Producer-specific feature identity composite for the openms-consensus path
+# (measured keys agreed in bigbio/qpx#229). Passed to the FeatureWriter so the
+# derived feature_id hashes exactly these columns (all present in feature.yaml)
+# instead of the schema default.
+_FEATURE_IDENTITY_COMPOSITE = (
+    "peptidoform",
+    "charge",
+    "run_file_name",
+    "rt",
+    "scan",
+    "observed_mz",
+    "consensus_rt",
+)
+# The psm view's schema identity_composite (psm.yaml) — used to derive the
+# psm_id we cross-reference from feature.psm_ids / psm.feature_id.
+_PSM_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "scan")
+
+
+def _derive_persisted_record_id(record: dict, composite: tuple[str, ...], schema: pa.Schema) -> int:
+    """Derive an id from the values exactly as they will be stored by Arrow."""
+    values = [pa.scalar(record.get(name), type=schema.field(name).type).as_py() for name in composite]
+    return derive_id(values)
+
+
+def _link_feature_psm(feature_records: list[dict], psm_records: list[dict]) -> None:
+    """Populate feature.psm_ids and psm.feature_id in place for one consensus feature.
+
+    Ids are derived with the SAME composites the writers use, so these converter
+    -populated cross-refs match the writer-derived primary keys byte-for-byte
+    (``derive_id`` is deterministic). A consensus feature yields one feature
+    record per run; each PSM links to the feature record of its own run. PSMs
+    whose run has no feature record keep ``feature_id`` null (resolves #182).
+    """
+    feature_schema = FeatureSchema.get_arrow_schema()
+    psm_schema = PsmSchema.get_arrow_schema()
+    feat_by_run: dict[str, tuple[int, list[int]]] = {}
+    for rec in feature_records:
+        feat_id = _derive_persisted_record_id(rec, _FEATURE_IDENTITY_COMPOSITE, feature_schema)
+        feat_by_run[rec["run_file_name"]] = (feat_id, [])
+    for prec in psm_records:
+        entry = feat_by_run.get(prec.get("run_file_name"))
+        if entry is None:
+            continue
+        feat_id, psm_ids = entry
+        prec["feature_id"] = feat_id
+        psm_id = _derive_persisted_record_id(prec, _PSM_IDENTITY_COMPOSITE, psm_schema)
+        if psm_id not in psm_ids:
+            psm_ids.append(psm_id)
+    for rec in feature_records:
+        _, psm_ids = feat_by_run[rec["run_file_name"]]
+        if psm_ids:
+            rec["psm_ids"] = psm_ids
+
 
 # Above this consensusXML size, auto-select the streaming reader: the pyopenms
 # in-memory load needs ~0.8x the file in RAM, so ~4 GB (≈3 GB RAM) is a safe point
@@ -88,23 +144,42 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     with ExitStack() as stack:
         fw = pw = None
         if want_feature:
-            fw = stack.enter_context(FeatureWriter(str(out / f"{output_prefix}.feature.parquet"), creator=creator))
+            fw = stack.enter_context(
+                FeatureWriter(
+                    str(out / f"{output_prefix}.feature.parquet"),
+                    creator=creator,
+                    identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+                )
+            )
         if want_psm:
-            pw = stack.enter_context(PsmWriter(str(out / f"{output_prefix}.psm.parquet"), creator=creator))
+            pw = stack.enter_context(
+                PsmWriter(
+                    str(out / f"{output_prefix}.psm.parquet"),
+                    creator=creator,
+                    identity_composite=_PSM_IDENTITY_COMPOSITE,
+                )
+            )
         feat_buf: list[dict] = []
         psm_buf: list[dict] = []
         for kind, obj in cm.iter_all():
             if kind == "element":
-                if fw is not None:
-                    feat_buf.extend(feature_records_for_cf(obj, map_info, anchor_map))
+                cf_feats = feature_records_for_cf(obj, map_info, anchor_map) if fw is not None else []
+                cf_psms: list[dict] = []
                 if pw is not None:
                     for pid in obj.getPeptideIdentifications():
-                        psm_buf.extend(psm_records_for_pid(pid, resolve_run, seen))
+                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen))
+                # Cross-reference the feature<->psm ids only when both views are
+                # emitted; each PSM links to the feature record of its own run.
+                if fw is not None and pw is not None:
+                    _link_feature_psm(cf_feats, cf_psms)
+                feat_buf.extend(cf_feats)
+                psm_buf.extend(cf_psms)
                 if maps is not None:
                     accumulate_cf_maps(obj, map_run, maps)
                     accumulate_cf_intensity(obj, map_info, pep_intensity)
             else:  # unassigned peptide identification
                 if pw is not None:
+                    # Unassigned PSMs map to no feature -> feature_id stays null.
                     psm_buf.extend(psm_records_for_pid(obj, resolve_run, seen))
                 if maps is not None:
                     accumulate_unassigned_maps(obj, resolve_run, maps)
@@ -226,26 +301,51 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
     @staticmethod
     def _convert_in_memory(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top) -> dict:
         """feature/psm/pg via the in-memory pyopenms map (loaded once, iterated cheaply)."""
+        from qpx.converters.openms_consensus.feature_adapter import feature_map_info, feature_records_for_cf
+        from qpx.converters.openms_consensus.psm_adapter import _run_resolver, psm_records_for_pid
+
         cm = load_consensus_map(consensusxml_path)
         if sdrf_path:
             for msg in check_channels_vs_sdrf(cm, sdrf_path):
                 _log.warning("consensusXML/SDRF channel mismatch: %s", msg)
         written: dict[str, Path] = {}
-        if "feature" in structures:
+        want_feature, want_psm = "feature" in structures, "psm" in structures
+        if want_feature or want_psm:
+            # Build feature and psm per consensus feature (mirroring the streaming
+            # path's element loop) so their cross-refs can be linked identically:
+            # assigned PSMs first (cf order), then the unassigned PSMs.
+            map_info = feature_map_info(cm)
             # Share the protein-group leader map so feature.anchor_protein matches pg.
-            recs = consensus_features_to_records(cm=cm, anchor_map=accession_to_anchor(cm))
-            path = out / f"{output_prefix}.feature.parquet"
-            with FeatureWriter(str(path), creator=creator) as w:
-                if recs:
-                    w.write_batch(recs)
-            written["feature"] = path
-        if "psm" in structures:
-            recs = consensus_psms_to_records(cm=cm)
-            path = out / f"{output_prefix}.psm.parquet"
-            with PsmWriter(str(path), creator=creator) as w:
-                if recs:
-                    w.write_batch(recs)
-            written["psm"] = path
+            anchor_map = accession_to_anchor(cm) if want_feature else None
+            resolve_run = _run_resolver(cm) if want_psm else None
+            seen: set = set()
+            feat_recs: list[dict] = []
+            psm_recs: list[dict] = []
+            for cf in cm:
+                cf_feats = feature_records_for_cf(cf, map_info, anchor_map) if want_feature else []
+                cf_psms: list[dict] = []
+                if want_psm:
+                    for pid in cf.getPeptideIdentifications():
+                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen))
+                if want_feature and want_psm:
+                    _link_feature_psm(cf_feats, cf_psms)
+                feat_recs.extend(cf_feats)
+                psm_recs.extend(cf_psms)
+            if want_psm:
+                for pid in cm.getUnassignedPeptideIdentifications():
+                    psm_recs.extend(psm_records_for_pid(pid, resolve_run, seen))
+            if want_feature:
+                path = out / f"{output_prefix}.feature.parquet"
+                with FeatureWriter(str(path), creator=creator, identity_composite=_FEATURE_IDENTITY_COMPOSITE) as w:
+                    if feat_recs:
+                        w.write_batch(feat_recs)
+                written["feature"] = path
+            if want_psm:
+                path = out / f"{output_prefix}.psm.parquet"
+                with PsmWriter(str(path), creator=creator, identity_composite=_PSM_IDENTITY_COMPOSITE) as w:
+                    if psm_recs:
+                        w.write_batch(psm_recs)
+                written["psm"] = path
         if "pg" in structures:
             recs = consensus_protein_groups_to_records(sdrf_path=sdrf_path, cm=cm, top=pg_top)
             path = out / f"{output_prefix}.pg.parquet"

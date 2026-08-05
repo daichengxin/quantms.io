@@ -62,6 +62,12 @@ _CV_MAPPINGS = [
 
 _RT_SECONDS_FACTOR = 60.0
 
+# Producer-specific feature identity composite (bigbio/qpx#229). DIA-NN reports one
+# feature per precursor per run, so the measured key is just peptidoform + charge +
+# run (all in feature.yaml). Passed to FeatureWriter so feature_id hashes exactly
+# these columns instead of the schema default.
+_FEATURE_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name")
+
 
 def _safe_float_sql(column: str) -> str:
     """Build a SQL expression that converts a finite value to FLOAT."""
@@ -143,7 +149,12 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         run_names = self._discover_runs(mzml_info_folder)
 
         # 9. Process in batches → Arrow tables → write directly
-        with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
+        with FeatureWriter(
+            output_path,
+            creator=creator,
+            compression=self._compression,
+            identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+        ) as writer:
             for i in range(0, len(run_names), file_num):
                 batch_runs = run_names[i : i + file_num]
                 self.logger.info(f"Processing runs {i + 1}-{min(i + file_num, len(run_names))} of {len(run_names)}")
@@ -519,6 +530,16 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             "peptide_qvalue",
             "pg_accessions",
             "pg_positions",
+            # Derived identity + optional cross-refs are not produced by the
+            # channel row SQL: feature_id is stamped by the writer, psm_ids/pg_ids
+            # stay null. Skip them here; they are filled as NULL in final assembly.
+            "feature_id",
+            "psm_ids",
+            "pg_ids",
+            # Producer-specific optional fields not emitted by DIA-NN.
+            "quantification_unit_id",
+            "compensation_voltage",
+            "consensus_rt",
         }
         select_parts: list[str] = []
         for field in target_schema:

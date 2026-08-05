@@ -1,9 +1,17 @@
 name: feature
 file_type: feature_file
-primary_key: [peptidoform, charge, run_file_name, rt]
-doc: "Quantified peptide features per MS run; unmapped features are keyed by sequence, charge, and run_file_name"
+primary_key: [feature_id]
+identity_composite: [peptidoform, charge, run_file_name, rt]
+doc: "Quantified peptide features with a mandatory opaque feature_id and a footer-declared producer identity composite"
 
 fields:
+  # Identity
+  feature_id:
+    type: int64
+    required: true
+    nullable: false
+    doc: "Opaque identity of the feature (int64), supplied by the producer or derived from the identity_composite declared in the footer; the primary key of this view."
+
   # Core identification
   sequence:
     type: string
@@ -53,6 +61,11 @@ fields:
     type: string
     required: true
     doc: "Run file name"
+  quantification_unit_id:
+    type: string
+    nullable: true
+    optional: true
+    doc: "Producer-reported or QPX-mapped quantification unit; used when one quantity can aggregate multiple raw runs"
   cv_params:
     type: "list<cv_param>"
     doc: "CV parameters"
@@ -63,10 +76,20 @@ fields:
   rt:
     type: float32
     nullable: true
-    doc: "Retention time (seconds); the RT component of the feature primary key. Finite when present, but nullable: populated where the producer reports it (DIA-NN, OpenMS/quantms, TMT); some tools (e.g. FragPipe combined_ion) do not report per-feature RT, leaving it null. A null rt is still a key value, so those producers must emit at most one feature per (peptidoform, charge, run_file_name); any residual collision is reported as a duplicate_pk validation error."
+    doc: "Retention time (seconds); may participate in a producer-specific identity composite when it identifies the upstream Feature entity"
+  consensus_rt:
+    type: float32
+    nullable: true
+    optional: true
+    doc: "Parent ConsensusFeature retention time; populated by the OpenMS consensusXML converter"
   ion_mobility:
     type: float32
     doc: "Ion mobility"
+  compensation_voltage:
+    type: float32
+    nullable: true
+    optional: true
+    doc: "FAIMS compensation voltage; 0 for a producer's non-FAIMS quantification unit when used in its identity composite"
   missed_cleavages:
     type: int16
     doc: "Number of missed enzymatic cleavages (MS:1003044)"
@@ -128,3 +151,15 @@ fields:
   rt_stop:
     type: float32
     doc: "RT window end"
+
+  # Optional cross-references
+  psm_ids:
+    type: "list<int64>"
+    optional: true
+    nullable: true
+    doc: "Optional references to the psm rows this feature maps to (list of psm_id)."
+  pg_ids:
+    type: "list<int64>"
+    optional: true
+    nullable: true
+    doc: "Optional references to the pg rows this feature maps to (list of pg_id)."

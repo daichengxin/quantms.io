@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 # Derive field map from central mappings
 _FEATURE_MAP = get_field_mappings("maxquant", "feature")
 
+# Producer-specific feature identity composite (bigbio/qpx#229). MaxQuant reports
+# an RT window per feature, so its measured key uses rt_start/rt_stop (both in
+# feature.yaml) rather than a single rt. Passed to FeatureWriter so feature_id
+# hashes exactly these columns instead of the schema default.
+_FEATURE_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "rt_start", "rt_stop", "scan")
+
 
 class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
     """Convert MaxQuant ``evidence.txt`` to ``feature.parquet``.
@@ -98,7 +104,12 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         self.logger.info("Transforming MaxQuant features ...")
         evidence_query = self._deduplicated_evidence_query(actual_cols)
 
-        with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
+        with FeatureWriter(
+            output_path,
+            creator=creator,
+            compression=self._compression,
+            identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+        ) as writer:
             for batch in self._query_batched(evidence_query, chunksize):
                 df = batch.to_pandas()
                 records = self._transform_batch(

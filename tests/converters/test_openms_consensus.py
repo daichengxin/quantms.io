@@ -58,10 +58,10 @@ _TMT_CONSENSUSXML = """<?xml version="1.0" encoding="ISO-8859-1"?>
   </mapList>
   <consensusElementList>
     <consensusElement id="e_0" quality="0.0" charge="2">
-      <centroid rt="100.0" mz="450.25" it="0.0"/>
+      <centroid rt="100.123456" mz="450.251234" it="0.0"/>
       <groupedElementList>
-        <element map="0" id="0" rt="100.0" mz="450.25" it="1000.0"/>
-        <element map="1" id="1" rt="100.0" mz="450.25" it="2000.0"/>
+        <element map="0" id="0" rt="100.123456" mz="450.251234" it="1000.0"/>
+        <element map="1" id="1" rt="100.123456" mz="450.251234" it="2000.0"/>
       </groupedElementList>
       <PeptideIdentification identification_run_ref="PI_0" score_type=""
         higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100"
@@ -232,6 +232,19 @@ def test_pg_uses_id_merge_index_after_unmapped_map_index():
     assert protein_maps.acc_to_feat == {"P1": {("PEPTIDE", 2)}}
 
 
+def _write_multi_reference_consensusxml(path):
+    """Write one ConsensusFeature supported by two spectrum references."""
+    second_pid = """
+      <PeptideIdentification identification_run_ref="PI_0" score_type=""
+        higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100"
+        spectrum_reference="controllerType=0 controllerNumber=1 scan=43">
+        <PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
+          <UserParam type="string" name="target_decoy" value="target"/>
+        </PeptideHit>
+      </PeptideIdentification>"""
+    path.write_text(_TMT_CONSENSUSXML.replace("\n    </consensusElement>", f"{second_pid}\n    </consensusElement>"))
+
+
 def test_streaming_matches_pyopenms(tmp_path):
     """The low-memory streaming reader produces the same parquet as pyopenms."""
     import json
@@ -347,3 +360,57 @@ def test_label_free_consensusxml_uses_lfq_labels(tmp_path):
 
     assert {label for (label,) in feature_labels} == {"LFQ"}
     assert {label for (label,) in pg_labels} == {"LFQ"}
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_openms_consensus_cross_refs_resolve(tmp_path, streaming):
+    """Every psm.feature_id and every feature.psm_ids element resolves to a real
+    sibling id — the converter-populated FK matches the writer-derived PK (both
+    the in-memory and streaming paths)."""
+    cx = tmp_path / "test.consensusXML"
+    _write_tmt_consensusxml(cx)
+    out = tmp_path / ("stream" if streaming else "mem")
+    written = OpenMSConsensusConverter().convert(
+        str(cx), str(out), output_prefix="t", structures=("feature", "psm"), streaming=streaming
+    )
+    con = duckdb.connect()
+
+    feature_ids = {r[0] for r in con.execute(f"SELECT feature_id FROM read_parquet('{written['feature']}')").fetchall()}
+    psm_ids = {r[0] for r in con.execute(f"SELECT psm_id FROM read_parquet('{written['psm']}')").fetchall()}
+
+    # At least one link was actually populated (guards against a silently null FK).
+    linked_feature_ids = [
+        r[0] for r in con.execute(f"SELECT feature_id FROM read_parquet('{written['psm']}')").fetchall() if r[0] is not None
+    ]
+    assert linked_feature_ids, "expected at least one psm.feature_id to be populated"
+    for fid in linked_feature_ids:
+        assert fid in feature_ids, f"psm.feature_id {fid} does not resolve to a feature.feature_id"
+
+    referenced_psm_ids = [
+        pid
+        for (ids,) in con.execute(f"SELECT psm_ids FROM read_parquet('{written['feature']}')").fetchall()
+        for pid in (ids or [])
+    ]
+    assert referenced_psm_ids, "expected at least one feature.psm_ids element to be populated"
+    for pid in referenced_psm_ids:
+        assert pid in psm_ids, f"feature.psm_ids element {pid} does not resolve to a psm.psm_id"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_openms_consensus_identity_retains_all_spectrum_references(tmp_path, streaming):
+    """The Feature identity keeps every supporting scan and the parent consensus RT."""
+    import pyarrow.parquet as pq
+
+    cx = tmp_path / "multi.consensusXML"
+    _write_multi_reference_consensusxml(cx)
+    written = OpenMSConsensusConverter().convert(
+        str(cx),
+        str(tmp_path / ("stream" if streaming else "mem")),
+        output_prefix="t",
+        structures=("feature",),
+        streaming=streaming,
+    )
+    table = pq.read_table(written["feature"])
+    assert table.column("scan").to_pylist() == [[42, 43]]
+    assert table.column("consensus_rt").to_pylist() == pytest.approx([100.123456])
+    assert table.schema.metadata[b"identity_composite"] == (b"peptidoform,charge,run_file_name,rt,scan,observed_mz,consensus_rt")

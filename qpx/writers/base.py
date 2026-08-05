@@ -5,12 +5,15 @@ from __future__ import annotations
 import datetime
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Sequence
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from qpx._version import __version__
+from qpx.core.data.identity import derive_id
+from qpx.core.sql import sql_build, validate_identifier
 from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
@@ -167,6 +170,8 @@ class BaseWriter:
         batch_size: int = 1_000_000,
         scan_format: str | None = None,
         extra_columns: list[str] | None = None,
+        override_provided_ids: bool = False,
+        identity_composite: Optional[Sequence[str]] = None,
     ):
         self._path = Path(path)
         self._compression = compression
@@ -174,6 +179,32 @@ class BaseWriter:
         self._buffer: list[dict] = []
         self._writer: pq.ParquetWriter | None = None
         self._extra_columns = extra_columns or []
+        # Override mode (e.g. consensusXML): re-derive the id even when the
+        # producer supplied one, stashing the original as a cv_param so it is
+        # preserved/traceable. ``overridden_id_count`` lets the converter record
+        # the override in provenance.
+        self._override_provided_ids = override_provided_ids
+        self.overridden_id_count = 0
+        # Producer-specific identity composite override. When set, the writer
+        # hashes THIS composite into the derived id (feature_id / psm_id / pg_id)
+        # instead of the schema default, letting each converter declare the
+        # measured keys its producer emits (bigbio/qpx#229). Stored as a tuple so
+        # the footer stamps the effective composite via the ``_identity_composite``
+        # property below.
+        self._identity_composite_override = tuple(identity_composite) if identity_composite else None
+        effective_composite = self._identity_composite
+        if effective_composite:
+            identity_schema = (
+                self._schema_class.get_extended_arrow_schema(self._extra_columns)
+                if self._extra_columns
+                else self._schema_class.get_arrow_schema()
+            )
+            available_fields = set(identity_schema.names)
+            unknown_fields = [field for field in effective_composite if field not in available_fields]
+            if unknown_fields:
+                raise ValueError(
+                    f"identity_composite contains fields outside the {self._schema_class._view_name} schema: {unknown_fields}"
+                )
 
         # Build Parquet footer metadata. Two distinct versions are stamped:
         #   qpx_version    — the on-disk *specification* version (QPX_SPEC_VERSION),
@@ -193,6 +224,161 @@ class BaseWriter:
         if scan_format:
             self._file_metadata[b"scan_format"] = scan_format.encode()
 
+        # Views with a footer-declared identity_composite carry a single-column
+        # derived-identity primary key (feature_id / psm_id / pg_id). Stamp the
+        # footer so every file self-describes its key and how the id is derived.
+        identity_composite = self._identity_composite
+        if identity_composite:
+            self._file_metadata[b"primary_key"] = self._id_field.encode()
+            self._file_metadata[b"identity_composite"] = ",".join(identity_composite).encode()
+
+    # --- Derived identity --------------------------------------------------
+
+    @property
+    def _identity_composite(self) -> tuple[str, ...] | None:
+        """The effective identity_composite the id is derived from.
+
+        A converter-supplied override (producer-specific composite) wins over the
+        schema class attribute; ``None`` for views without any derived identity.
+        """
+        if self._identity_composite_override is not None:
+            return self._identity_composite_override
+        return getattr(self._schema_class, "identity_composite", None)
+
+    @property
+    def _id_field(self) -> str | None:
+        """The single-column identity primary key (the id field), else None."""
+        if not self._identity_composite:
+            return None
+        pk = self._schema_class.primary_key
+        return pk[0] if len(pk) == 1 else None
+
+    def _relaxed_id_schema(self) -> pa.Schema:
+        """``arrow_schema`` with the derived-id field made nullable, so a batch or
+        table can be materialized before :meth:`_fill_identity_table` fills the id
+        (casting a null id to the required non-nullable field would otherwise fail).
+        """
+        id_field = self._id_field
+        if id_field is None:
+            return self.arrow_schema
+        return pa.schema([f.with_nullable(True) if f.name == id_field else f for f in self.arrow_schema])
+
+    def _check_required_non_null(self, obj) -> None:
+        """Raise if any non-nullable schema column has nulls (Table or RecordBatch)."""
+        for i, field in enumerate(self.arrow_schema):
+            if not field.nullable and obj.column(i).null_count > 0:
+                raise ValueError(
+                    f"Column '{field.name}' has {obj.column(i).null_count} null(s) but is marked as required in the schema"
+                )
+
+    def _persisted_composite_values(self, table: pa.Table, composite: Sequence[str]) -> dict[str, list]:
+        """Return composite columns cast to their persisted schema types."""
+        names = set(table.schema.names)
+        schema = self.arrow_schema
+        values: dict[str, list] = {}
+        for field_name in composite:
+            if field_name not in names:
+                values[field_name] = [None] * table.num_rows
+                continue
+            column = table.column(field_name)
+            field_type = schema.field(field_name).type
+            if column.type != field_type:
+                try:
+                    column = column.cast(field_type)
+                except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError):
+                    # Schema validation below reports incompatible source types.
+                    pass
+            values[field_name] = column.to_pylist()
+        return values
+
+    def _identity_values(
+        self,
+        existing: list,
+        composite_values: dict[str, list],
+        composite: Sequence[str],
+        cv_lists: list | None,
+        id_field: str,
+    ) -> list[int]:
+        """Preserve or derive row IDs, recording overridden producer IDs."""
+        ids: list[int] = []
+        unordered_list_indices = tuple(index for index, field in enumerate(composite) if field == "grouped_runs")
+        for index, provided in enumerate(existing):
+            if provided is not None and not self._should_override_provided_id(index, composite_values):
+                ids.append(provided)
+                continue
+            if provided is not None:
+                if cv_lists is not None:
+                    params = list(cv_lists[index] or [])
+                    params.append({"cv_name": f"provided_{id_field}", "cv_value": str(provided)})
+                    cv_lists[index] = params
+                self.overridden_id_count += 1
+            ids.append(
+                derive_id(
+                    [composite_values[field][index] for field in composite],
+                    unordered_list_indices=unordered_list_indices,
+                )
+            )
+        return ids
+
+    def _should_override_provided_id(self, _index: int, _composite_values: dict[str, list]) -> bool:
+        """Return whether a producer id should be replaced for one row."""
+        return self._override_provided_ids
+
+    def _fill_identity_table(self, table: pa.Table) -> pa.Table:
+        """Return *table* with its derived-id column present and non-null.
+
+        The table is assumed to already match ``arrow_schema`` in every other
+        column (callers build via ``arrow_schema`` or align first). Rows with a
+        non-null id keep it; the rest are derived from the composite columns.
+        In ``override_provided_ids`` mode the id is re-derived even when present,
+        stashing the original as a ``provided_<id>`` cv_param. This is the single
+        derivation point for every write path (record, table, DataFrame).
+        """
+        composite = self._identity_composite
+        id_field = self._id_field
+        if not composite or id_field is None:
+            return table
+        names = set(table.schema.names)
+        n = table.num_rows
+        # Hash the PERSISTED (schema-cast) value of each composite field so the id
+        # is identical regardless of which write path built the table — e.g. a
+        # float32 ``rt`` hashes to the same value whether it arrived as a raw
+        # Python float (record path) or an already-cast float32 column (table path).
+        composite_values = self._persisted_composite_values(table, composite)
+        existing = table.column(id_field).to_pylist() if id_field in names else [None] * n
+        override = self._override_provided_ids
+        cv_lists = table.column("cv_params").to_pylist() if (override and "cv_params" in names) else None
+        ids = self._identity_values(existing, composite_values, composite, cv_lists, id_field)
+        if cv_lists is not None:
+            cv_type = table.schema.field("cv_params").type
+            table = table.set_column(
+                table.schema.get_field_index("cv_params"),
+                table.schema.field("cv_params"),
+                pa.array(cv_lists, type=cv_type),
+            )
+        id_array = pa.array(ids, type=pa.int64())
+        id_arrow_field = pa.field(id_field, pa.int64(), nullable=False)
+        if id_field in names:
+            return table.set_column(table.schema.get_field_index(id_field), id_arrow_field, id_array)
+        return table.add_column(0, id_arrow_field, id_array)
+
+    def align_table_to_schema(self, table: pa.Table) -> pa.Table:
+        """Project *table* onto the schema: keep matching columns, fill absent ones
+        (e.g. the derived id or the optional cross-ref columns) with nulls, then
+        cast. The id is left nullable here so a not-yet-derived (null) id is valid;
+        :meth:`write_table` is the single place that derives it, so the id is never
+        derived twice (which in override mode would double-stash the provided id).
+        """
+        relaxed = self._relaxed_id_schema()
+        present = set(table.schema.names)
+        n = table.num_rows
+        columns = [table.column(f.name) if f.name in present else pa.nulls(n, type=f.type) for f in relaxed]
+        intermediate = pa.Table.from_arrays(
+            columns,
+            schema=pa.schema([pa.field(f.name, columns[i].type) for i, f in enumerate(relaxed)]),
+        )
+        return intermediate.cast(relaxed)
+
     @property
     def arrow_schema(self) -> pa.Schema:
         if self._extra_columns:
@@ -210,35 +396,97 @@ class BaseWriter:
             self._write_arrow_batch(batch)
 
     def write_table(self, table: pa.Table):
-        """Write a complete Arrow table. Validates schema."""
-        errors = self._schema_class.validate(table)
+        """Write a complete Arrow table. Validates schema.
+
+        For views with a derived identity, the id column is stamped
+        (derived from the identity_composite) before validation, so callers may
+        pass tables whose id column is absent or null.
+        """
+        table = self._fill_identity_table(table)
+        errors = self._schema_class.validate(table, strict=True)
         if errors:
             raise ValueError("Schema validation failed:\n" + "\n".join(errors))
         self._ensure_writer()
         self._writer.write_table(table)
 
     def write_dataframe(self, df: "pd.DataFrame"):
-        """Write a pandas DataFrame. Converts to Arrow and validates."""
-        table = pa.Table.from_pandas(df, schema=self.arrow_schema, preserve_index=False)
+        """Write a pandas DataFrame. Converts to Arrow and validates.
+
+        Built against a schema whose derived-id field is **nullable**, so a frame
+        without a precomputed id is accepted; :meth:`write_table` then derives the
+        id before validating against the strict schema. Only columns the schema
+        declares as nullable — plus the derived id — are backfilled when the frame
+        omits them; a genuinely missing *required* column is left absent so
+        ``from_pandas`` surfaces it as a clear error.
+        """
+        id_field = self._id_field
+        relaxed = self._relaxed_id_schema()
+        missing = [f.name for f in relaxed if f.name not in df.columns and (f.nullable or f.name == id_field)]
+        if missing:
+            df = df.copy()
+            for name in missing:
+                df[name] = None
+        table = pa.Table.from_pandas(df, schema=relaxed, preserve_index=False)
         self.write_table(table)
 
     def close(self):
-        """Flush remaining buffer and close the Parquet file."""
+        """Flush buffered rows, close the file, and validate its identity PK."""
+        self._close(validate=True)
+
+    def _close(self, *, validate: bool) -> None:
+        """Close the writer, optionally skipping validation after a body error."""
         if self._buffer:
             self._write_arrow_batch(self._buffer)
             self._buffer = []
+        wrote_file = self._writer is not None
         if self._writer:
             self._writer.close()
             self._writer = None
+        if validate and wrote_file:
+            self._validate_identity_uniqueness()
+
+    def _validate_identity_uniqueness(self) -> None:
+        """Reject duplicate or null identity ids across the complete output file."""
+        id_field = self._id_field
+        if id_field is None:
+            return
+        quoted_id = validate_identifier(id_field)
+        query = sql_build(
+            """
+            SELECT
+                COUNT(*) AS total_count,
+                COUNT(DISTINCT $id_field) AS unique_count,
+                COUNT(*) FILTER (WHERE $id_field IS NULL) AS null_count
+            FROM read_parquet(?)
+            """,
+            id_field=quoted_id,
+        )
+        connection = duckdb.connect()
+        try:
+            total_count, unique_count, null_count = connection.execute(query, [str(self._path)]).fetchone()
+        finally:
+            connection.close()
+
+        if null_count:
+            raise ValueError(f"Primary key ({id_field}) contains {null_count} null row(s) out of {total_count}")
+        if unique_count != total_count:
+            duplicate_count = total_count - unique_count
+            raise ValueError(
+                f"Primary key ({id_field}) has {duplicate_count} duplicate row(s) ({unique_count} unique out of {total_count})"
+            )
 
     def _write_arrow_batch(self, records: list[dict]):
+        if self._identity_composite and self._id_field is not None:
+            # Build with a nullable id, then derive from the persisted (cast)
+            # values via _fill_identity_table — the same path table/DataFrame
+            # writes use, so a row's id is identical no matter how it was written.
+            table = self._fill_identity_table(pa.Table.from_pylist(records, schema=self._relaxed_id_schema()))
+            self._check_required_non_null(table)
+            self._ensure_writer()
+            self._writer.write_table(table)
+            return
         batch = pa.RecordBatch.from_pylist(records, schema=self.arrow_schema)
-        # Validate non-nullable columns
-        for i, field in enumerate(self.arrow_schema):
-            if not field.nullable and batch.column(i).null_count > 0:
-                raise ValueError(
-                    f"Column '{field.name}' has {batch.column(i).null_count} null(s) but is marked as required in the schema"
-                )
+        self._check_required_non_null(batch)
         self._ensure_writer()
         self._writer.write_batch(batch)
 
@@ -355,5 +603,7 @@ class BaseWriter:
     def __enter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    def __exit__(self, exc_type, _exc_value, _traceback):
+        # Preserve an exception raised inside the context instead of masking it
+        # with validation of a partial output file.
+        self._close(validate=exc_type is None)

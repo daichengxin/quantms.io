@@ -157,11 +157,12 @@ class _SubFeature:
 
 
 class _ConsensusFeature:
-    __slots__ = ("_charge", "_mz", "_subs", "_pids")
+    __slots__ = ("_charge", "_mz", "_rt", "_subs", "_pids")
 
-    def __init__(self, charge, mz, subs, pids):
+    def __init__(self, charge, mz, rt, subs, pids):
         self._charge = charge
         self._mz = mz
+        self._rt = rt
         self._subs = subs
         self._pids = pids
 
@@ -170,6 +171,11 @@ class _ConsensusFeature:
 
     def getMZ(self):
         return self._mz
+
+    @property
+    def consensus_rt(self):
+        """Parent ConsensusFeature retention time."""
+        return self._rt
 
     def getFeatureList(self):
         return self._subs
@@ -251,12 +257,14 @@ def _parse_peptide_id(pid_el, ph_to_acc: dict[str, str]) -> _PeptideIdentificati
 def _parse_consensus_element(el, ph_to_acc: dict[str, str]) -> _ConsensusFeature:
     charge = int(el.attrib.get("charge") or 0)
     mz = 0.0
+    rt = 0.0
     subs: list[_SubFeature] = []
     pids: list[_PeptideIdentification] = []
     for child in el:
         tag = _localname(child.tag)
         if tag == "centroid":
             mz = float(child.attrib.get("mz") or 0.0)
+            rt = float(child.attrib.get("rt") or 0.0)
         elif tag == "groupedElementList":
             for e in child:
                 if _localname(e.tag) == "element":
@@ -269,7 +277,7 @@ def _parse_consensus_element(el, ph_to_acc: dict[str, str]) -> _ConsensusFeature
                     )
         elif tag == "PeptideIdentification":
             pids.append(_parse_peptide_id(child, ph_to_acc))
-    return _ConsensusFeature(charge, mz, subs, pids)
+    return _ConsensusFeature(charge, mz, rt, subs, pids)
 
 
 # ---------------------------------------------------------------------------

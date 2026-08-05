@@ -28,7 +28,6 @@ class FragPipeConverter(BaseOrchestrator):
         self,
         psm_file=None,
         ion_file=None,
-        peptide_file=None,
         pg_file=None,
         sdrf_file=None,
         output_prefix=None,
@@ -61,15 +60,14 @@ class FragPipeConverter(BaseOrchestrator):
             produced_structures.append(PSM)
             logger.info("FragPipe PSM conversion complete")
 
-        if ion_file or peptide_file:
+        if ion_file:
             from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
 
-            feature_path = str(ion_file or peptide_file)
             with FragPipeFeatureAdapter(
                 duckdb_memory=self._memory, duckdb_threads=self._cpus, compression=self._compression
             ) as adapter:
                 adapter.convert(
-                    feature_path=feature_path,
+                    feature_path=str(ion_file),
                     output_path=str(out / f"{prefix}.feature.parquet"),
                     sdrf_path=str(sdrf_file) if sdrf_file else None,
                     psm_path=str(psm_file) if psm_file else None,

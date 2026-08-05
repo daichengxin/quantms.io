@@ -15,19 +15,30 @@ from qpx.core.data import (
     ValidationIssue,
     ValidationResult,
 )
+from qpx.core.data.identity import derive_id
 from tests.conftest import _valid_arrays
 
 
-def _pg_table(anchor, grouped_runs):
-    """Build a minimal valid PG table, overriding only the PK columns."""
+def _pg_table(anchor, grouped_runs, label=None):
+    """Build a minimal valid PG table, overriding only the identity columns.
+
+    The primary key is the derived ``pg_id``; it is stamped here the same way
+    the writer would, from the (anchor_protein, grouped_runs, label) composite.
+    """
     schema = PgSchema.get_arrow_schema()
     n = len(anchor)
+    labels = label if label is not None else [None] * n
+    pg_ids = [derive_id([anchor[i], grouped_runs[i], labels[i]], unordered_list_indices=(1,)) for i in range(n)]
     arrays = {}
     for f in schema:
-        if f.name == "anchor_protein":
+        if f.name == "pg_id":
+            arrays[f.name] = pa.array(pg_ids, type=f.type)
+        elif f.name == "anchor_protein":
             arrays[f.name] = pa.array(anchor, type=f.type)
         elif f.name == "grouped_runs":
             arrays[f.name] = pa.array(grouped_runs, type=f.type)
+        elif f.name == "label":
+            arrays[f.name] = pa.array(labels, type=f.type)
         else:
             arrays[f.name] = pa.nulls(n, type=f.type)
     return pa.table(arrays, schema=schema)
@@ -35,12 +46,11 @@ def _pg_table(anchor, grouped_runs):
 
 def test_strict_duplicate_pk_pg():
     """Duplicate PG primary key errors under strict (qpxc validate), warns by default."""
-    # Two rows with identical (anchor_protein, grouped_runs). The grouped_runs
-    # lists are reordered to also exercise the JSON-canonical sorted-form
-    # normalization: ["r1","r2"] and ["r2","r1"] must alias to one PK.
+    # Two rows with an identical identity composite derive the same pg_id, so
+    # the derived-identity primary key collides -> duplicate_pk.
     table = _pg_table(
         anchor=["P1", "P1"],
-        grouped_runs=[["r1", "r2"], ["r2", "r1"]],
+        grouped_runs=[["r1", "r2"], ["r1", "r2"]],
     )
 
     # strict=True -> error, invalid
@@ -60,6 +70,16 @@ def test_strict_duplicate_pk_pg():
     # Distinct list PKs -> no duplicate issue at all
     ok = PgSchema.validate_full(_pg_table(anchor=["P1", "P2"], grouped_runs=[["r1"], ["r1"]]))
     assert not any(i.check == "duplicate_pk" for i in ok.issues)
+
+
+def test_grouped_runs_order_aliases_to_one_pg_id():
+    """grouped_runs list order must not change identity: ['r1','r2'] and
+    ['r2','r1'] derive the same pg_id, so they collide as a duplicate PK."""
+    table = _pg_table(anchor=["P1", "P1"], grouped_runs=[["r1", "r2"], ["r2", "r1"]])
+    # The two rows are the same logical group -> same derived pg_id.
+    assert table.column("pg_id").to_pylist()[0] == table.column("pg_id").to_pylist()[1]
+    dup = [i for i in PgSchema.validate_full(table, strict=True).issues if i.check == "duplicate_pk"]
+    assert len(dup) == 1
 
 
 def test_strict_null_in_required_pg():

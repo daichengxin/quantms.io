@@ -41,6 +41,7 @@ __all__ = [
     "parse_consensusxml_maplist",
     "channel_labels_from_consensusxml",
     "fraction_groups_from_consensusxml",
+    "relabel_intensities_table",
     "relabel_intensities_parquet",
     "normalize_label",
 ]
@@ -504,6 +505,38 @@ def _append_cv_param_column(
     return table.set_column(field_index, "cv_params", cv_array), annotated
 
 
+def relabel_intensities_table(
+    table: pa.Table,
+    channel_labels: dict[int, str],
+    is_lfq: bool,
+    columns: tuple[str, ...] = ("intensities", "label", "additional_intensities"),
+    *,
+    relabel: bool = True,
+    cv_param_name: str | None = None,
+    run_column: str | None = None,
+    cv_param_resolver=None,
+) -> tuple[pa.Table, int]:
+    """Relabel one Arrow table and return it with the annotated-row count."""
+    if relabel:
+        for column in columns:
+            if column not in table.column_names:
+                continue
+            field_index = table.schema.get_field_index(column)
+            original = table.column(column)
+            if pa.types.is_list(original.type) or pa.types.is_large_list(original.type):
+                values = _relabel_entries(original.to_pylist(), channel_labels, is_lfq)
+            elif column == "label" and pa.types.is_string(original.type):
+                values = _relabel_scalar_labels(original.to_pylist(), channel_labels, is_lfq)
+            else:
+                continue
+            table = table.set_column(field_index, column, pa.array(values, type=original.type))
+
+    do_cv_param = cv_param_resolver is not None and run_column is not None and cv_param_name is not None
+    if not do_cv_param:
+        return table, 0
+    return _append_cv_param_column(table, run_column, cv_param_name, cv_param_resolver)
+
+
 def relabel_intensities_parquet(
     src_path: str,
     dst_path: str,
@@ -554,29 +587,17 @@ def relabel_intensities_parquet(
     try:
         for group in range(parquet.num_row_groups):
             table = parquet.read_row_group(group)
-            if relabel:
-                for column in columns:
-                    if column not in table.column_names:
-                        continue
-                    field_index = table.schema.get_field_index(column)
-                    original = table.column(column)
-                    if pa.types.is_list(original.type) or pa.types.is_large_list(original.type):
-                        relabeled = pa.array(
-                            _relabel_entries(original.to_pylist(), channel_labels, is_lfq),
-                            type=original.type,
-                        )
-                    elif column == "label" and pa.types.is_string(original.type):
-                        # Flat pg (QPX 1.1): a scalar label column, one row per label.
-                        relabeled = pa.array(
-                            _relabel_scalar_labels(original.to_pylist(), channel_labels, is_lfq),
-                            type=original.type,
-                        )
-                    else:
-                        continue
-                    table = table.set_column(field_index, column, relabeled)
-            if do_cv_param:
-                table, group_annotated = _append_cv_param_column(table, run_column, cv_param_name, cv_param_resolver)
-                annotated += group_annotated
+            table, group_annotated = relabel_intensities_table(
+                table,
+                channel_labels,
+                is_lfq,
+                columns,
+                relabel=relabel,
+                cv_param_name=cv_param_name if do_cv_param else None,
+                run_column=run_column,
+                cv_param_resolver=cv_param_resolver,
+            )
+            annotated += group_annotated
             table = table.replace_schema_metadata(output_schema.metadata)
             writer.write_table(table)
     finally:

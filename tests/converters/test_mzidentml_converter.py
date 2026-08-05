@@ -112,6 +112,8 @@ class TestXlinkEDC:
     def test_convert_produces_psms(self, tmp_path):
         table = _convert("Xlink_EDC_mzIdentML_1_3_0_draft.mzid.gz", tmp_path)
         assert table.num_rows > 0
+        psm_ids = table.column("psm_id").to_pylist()
+        assert len(psm_ids) == len(set(psm_ids))
 
     def test_has_crosslinked_psms(self, tmp_path):
         table = _convert("Xlink_EDC_mzIdentML_1_3_0_draft.mzid.gz", tmp_path)

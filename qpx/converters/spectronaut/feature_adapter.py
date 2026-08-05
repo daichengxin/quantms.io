@@ -48,6 +48,12 @@ _CV_MAPPINGS = [
 
 _RT_SECONDS_FACTOR = 60.0
 
+# Producer-specific feature identity composite (bigbio/qpx#229). Spectronaut reports
+# one feature per precursor per run, so the measured key is just peptidoform +
+# charge + run (all in feature.yaml). Passed to FeatureWriter so feature_id hashes
+# exactly these columns instead of the schema default.
+_FEATURE_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name")
+
 
 def _safe_float_sql(col: str) -> str:
     """Safe float via FIRST() aggregate — NULL/NaN → NULL."""
@@ -128,7 +134,12 @@ class SpectronautFeatureAdapter(SpectronautBaseAdapter):
         run_names = self._discover_runs()
 
         # 9. Process in batches → Arrow tables → write directly
-        with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
+        with FeatureWriter(
+            output_path,
+            creator=creator,
+            compression=self._compression,
+            identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+        ) as writer:
             for i in range(0, len(run_names), file_num):
                 batch_runs = run_names[i : i + file_num]
                 self.logger.info("Processing runs %d-%d of %d", i + 1, min(i + file_num, len(run_names)), len(run_names))

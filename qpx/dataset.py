@@ -524,9 +524,198 @@ class Dataset:
             self._check_grouped_runs_referential(results["pg"], strict=strict)
             self._check_grouped_runs_sample_mapping(results["pg"], strict=strict)
 
+        # Cross-structure invariant: the optional feature<->psm cross-references
+        # must resolve. Every non-null psm.feature_id must name a real
+        # feature.feature_id, and every feature.psm_ids element a real psm.psm_id.
+        # Unresolved references are warnings during normal use and errors under
+        # strict validation, but only when both views are present.
+        if "feature" in results and "psm" in results and self.feature is not None and self.psm is not None:
+            self._check_feature_psm_referential(results["feature"], results["psm"], strict=strict)
+
+        # feature.pg_ids is the canonical feature -> protein-group reference.
+        # When both views are present, every populated id must resolve to pg.pg_id.
+        if "feature" in results and "pg" in results and self.feature is not None and self.pg is not None:
+            self._check_feature_pg_referential(results["feature"], strict=strict)
+
         return results
 
-    def _check_grouped_runs_referential(self, pg_result: ValidationResult, *, strict: bool) -> None:
+    def _check_feature_pg_referential(self, feature_result: ValidationResult, *, strict: bool = False) -> None:
+        """Flag feature.pg_ids elements that do not resolve to pg.pg_id."""
+        severity = "error" if strict else "warning"
+        try:
+            feature_columns = {row[0] for row in self._engine.execute('DESCRIBE "feature"').fetchall()}
+            if "pg_ids" not in feature_columns:
+                return
+            dangling_pg_ids = self._engine.execute(
+                """
+                SELECT DISTINCT referenced_pg_id
+                FROM feature f, UNNEST(f.pg_ids) AS _u(referenced_pg_id)
+                WHERE referenced_pg_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM pg p WHERE p.pg_id = referenced_pg_id)
+                ORDER BY referenced_pg_id
+                """
+            ).fetchall()
+        except duckdb.Error as exc:
+            _log.warning("feature->pg referential check could not run (possible schema drift): %s", exc)
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="referential_check_skipped",
+                    severity=severity,
+                    column="pg_ids",
+                    message=f"feature->pg referential check could not run (possible schema drift): {exc}",
+                )
+            )
+            return
+
+        for (pg_id,) in dangling_pg_ids:
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="dangling_pg_id",
+                    severity=severity,
+                    column="pg_ids",
+                    message=f"feature.pg_ids contains {pg_id!r}, which does not resolve to a pg.pg_id in pg.parquet",
+                )
+            )
+
+    def _check_feature_psm_referential(
+        self, feature_result: ValidationResult, psm_result: ValidationResult, *, strict: bool = False
+    ) -> None:
+        """Flag feature<->psm cross-references that do not resolve.
+
+        Appends an issue to *psm_result* for each non-null
+        ``psm.feature_id`` that is not a ``feature.feature_id``, and to
+        *feature_result* for each ``feature.psm_ids`` element that is not a
+        ``psm.psm_id``. It also flags **reciprocal desync** — an edge that exists
+        in one direction but is contradicted by the other — but only where the
+        opposite direction is actually populated, so an unpopulated cross-ref
+        column (the common case) is never a false positive. A query failure (e.g.
+        the optional cross-ref columns are absent on older files) is surfaced as
+        ``referential_check_skipped`` rather than masking schema validation.
+        Issues are warnings normally and errors under strict validation.
+        """
+        severity = "error" if strict else "warning"
+        try:
+            feature_columns = {row[0] for row in self._engine.execute('DESCRIBE "feature"').fetchall()}
+            psm_columns = {row[0] for row in self._engine.execute('DESCRIBE "psm"').fetchall()}
+            has_feature_psm_ids = "psm_ids" in feature_columns
+            has_psm_feature_id = "feature_id" in psm_columns
+
+            dangling_feature_ids = []
+            if has_psm_feature_id:
+                dangling_feature_ids = self._engine.execute(
+                    """
+                    SELECT DISTINCT p.feature_id AS feature_id
+                    FROM psm p
+                    WHERE p.feature_id IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM feature f WHERE f.feature_id = p.feature_id)
+                    ORDER BY feature_id
+                    """
+                ).fetchall()
+
+            dangling_psm_ids = []
+            if has_feature_psm_ids:
+                dangling_psm_ids = self._engine.execute(
+                    """
+                    SELECT DISTINCT pid AS psm_id
+                    FROM feature f, UNNEST(f.psm_ids) AS _u(pid)
+                    WHERE pid IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM psm p WHERE p.psm_id = pid)
+                    ORDER BY psm_id
+                    """
+                ).fetchall()
+
+            # Reciprocal desync: a psm points at a feature whose (non-empty) psm_ids
+            # does not list it back — i.e. the two directions describe different edges.
+            desync = []
+            inverse_desync = []
+            if has_feature_psm_ids and has_psm_feature_id:
+                desync = self._engine.execute(
+                    """
+                    SELECT DISTINCT p.psm_id AS psm_id, p.feature_id AS feature_id
+                    FROM psm p JOIN feature f ON f.feature_id = p.feature_id
+                    WHERE p.feature_id IS NOT NULL
+                      AND f.psm_ids IS NOT NULL AND len(f.psm_ids) > 0
+                      AND NOT list_contains(f.psm_ids, p.psm_id)
+                    ORDER BY psm_id
+                    """
+                ).fetchall()
+                # The inverse contradiction: a feature lists a psm that explicitly
+                # points at a different feature. A null psm.feature_id means that
+                # direction is unpopulated and is therefore not a contradiction.
+                inverse_desync = self._engine.execute(
+                    """
+                    SELECT DISTINCT f.feature_id, p.psm_id, p.feature_id AS actual_feature_id
+                    FROM feature f
+                    CROSS JOIN UNNEST(f.psm_ids) AS _u(referenced_psm_id)
+                    JOIN psm p ON p.psm_id = referenced_psm_id
+                    WHERE p.feature_id IS NOT NULL
+                      AND p.feature_id <> f.feature_id
+                    ORDER BY f.feature_id, p.psm_id
+                    """
+                ).fetchall()
+        except duckdb.Error as exc:
+            _log.warning("feature<->psm referential check could not run (possible schema drift): %s", exc)
+            skipped = ValidationIssue(
+                structure="psm",
+                check="referential_check_skipped",
+                severity="error" if strict else "warning",
+                column=None,
+                message=f"feature<->psm referential check could not run (possible schema drift): {exc}",
+            )
+            psm_result.issues.append(skipped)
+            return
+
+        for (feature_id,) in dangling_feature_ids:
+            psm_result.issues.append(
+                ValidationIssue(
+                    structure="psm",
+                    check="dangling_feature_id",
+                    severity=severity,
+                    column="feature_id",
+                    message=(f"psm.feature_id {feature_id!r} does not resolve to a feature.feature_id in feature.parquet"),
+                )
+            )
+        for (psm_id,) in dangling_psm_ids:
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="dangling_psm_id",
+                    severity=severity,
+                    column="psm_ids",
+                    message=(f"feature.psm_ids contains {psm_id!r}, which does not resolve to a psm.psm_id in psm.parquet"),
+                )
+            )
+        for psm_id, feature_id in desync:
+            psm_result.issues.append(
+                ValidationIssue(
+                    structure="psm",
+                    check="feature_psm_desync",
+                    severity=severity,
+                    column="feature_id",
+                    message=(
+                        f"psm.psm_id {psm_id!r} points to feature {feature_id!r}, but that "
+                        f"feature.psm_ids does not list this psm back (reciprocal cross-ref desync)"
+                    ),
+                )
+            )
+        for feature_id, psm_id, actual_feature_id in inverse_desync:
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="feature_psm_desync",
+                    severity=severity,
+                    column="psm_ids",
+                    message=(
+                        f"feature.feature_id {feature_id!r} lists psm {psm_id!r}, but that "
+                        f"psm.feature_id points to feature {actual_feature_id!r} "
+                        "(reciprocal cross-ref desync)"
+                    ),
+                )
+            )
+
+    def _check_grouped_runs_referential(self, pg_result: ValidationResult, *, strict: bool = False) -> None:
         """Flag pg.grouped_runs values that are not present in run.run_file_name.
 
         Appends an ``error`` issue to *pg_result* for each dangling grouped-run
@@ -892,9 +1081,10 @@ class Dataset:
             if isinstance(data, list):
                 writer.write_batch(data)
             elif isinstance(data, pa.Table):
-                # Cast to the writer's schema to handle nullability/metadata differences
-                casted = data.cast(writer.arrow_schema)
-                writer.write_table(casted)
+                # Project onto the writer's schema (adds any absent columns such
+                # as a derived id or optional cross-refs, then casts to normalize
+                # nullability/types). write_table stamps the derived id.
+                writer.write_table(writer.align_table_to_schema(data))
             else:
                 writer.write_dataframe(data)
 
