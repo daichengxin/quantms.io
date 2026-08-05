@@ -93,7 +93,7 @@ erDiagram
     FEATURE }o--o{ PG : "pg_ids[] → pg_id"
     PEPMAP ||--o{ PSM : "peptidoform"
     PEPMAP ||--o{ FEATURE : "peptidoform"
-    PSM }o--o{ FEATURE : "feature_id / psm_ids[]"
+    PSM }o--o| FEATURE : "feature_id / psm_ids[]"
     MZ }o--o{ PSM : "run_file_name+scan"
 
     SAMPLE {
