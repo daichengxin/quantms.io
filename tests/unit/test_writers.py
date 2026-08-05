@@ -75,6 +75,17 @@ def test_writer_footer_metadata(tmp_path):
     assert "file_type" not in data_columns
 
 
+def test_writer_footer_supports_composite_primary_key(tmp_path):
+    """A multi-column primary key must not be treated as a derived id field."""
+    path = tmp_path / "composite.ontology.parquet"
+    with OntologyWriter(path, identity_composite=("field_name", "view")) as writer:
+        writer.write_batch([make_ontology_record()])
+
+    metadata = read_parquet_metadata(path)
+    assert metadata["identity_composite"] == "field_name,view"
+    assert "primary_key" not in metadata
+
+
 def test_writer_schema_validation(tmp_path):
     """Writer rejects bad types and accepts valid tables."""
     # Reject bad types

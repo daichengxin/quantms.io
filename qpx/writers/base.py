@@ -224,12 +224,13 @@ class BaseWriter:
         if scan_format:
             self._file_metadata[b"scan_format"] = scan_format.encode()
 
-        # Views with a footer-declared identity_composite carry a single-column
-        # derived-identity primary key (feature_id / psm_id / pg_id). Stamp the
-        # footer so every file self-describes its key and how the id is derived.
+        # Stamp the effective composite in the footer. A single-column derived
+        # identity also records its id field as the primary key.
         identity_composite = self._identity_composite
         if identity_composite:
-            self._file_metadata[b"primary_key"] = self._id_field.encode()
+            id_field = self._id_field
+            if id_field is not None:
+                self._file_metadata[b"primary_key"] = id_field.encode()
             self._file_metadata[b"identity_composite"] = ",".join(identity_composite).encode()
 
     # --- Derived identity --------------------------------------------------
