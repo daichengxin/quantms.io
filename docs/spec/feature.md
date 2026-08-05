@@ -2,10 +2,12 @@
 
 The feature view captures quantified peptide information, including intensity
 across labels and protein-group mappings. Each row has a mandatory opaque
-`feature_id`, which is the primary key. A producer-supplied ID is preserved by
-default; otherwise QPX derives the ID from the upstream properties recorded in
-the Parquet footer's `identity_composite`. Converters may override the schema
-default when their producer represents a different Feature-level entity.
+`feature_id`, which is the primary key. For identified Features, QPX derives the
+ID from the upstream properties recorded in the Parquet footer's
+`identity_composite`; any producer ID remains traceable in `cv_params`. For
+unidentified Features, a producer-supplied ID is preserved when available.
+Converters may override the schema default when their producer represents a
+different Feature-level entity.
 
 For a de novo workflow without a database search, set `is_decoy` to `false` and
 record a `de_novo_peptide_sequencing` step in `provenance.parquet`. Protein-mapping

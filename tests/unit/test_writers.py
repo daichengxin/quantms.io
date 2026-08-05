@@ -135,23 +135,23 @@ def test_writer_batching(tmp_path):
     # Batch size flush
     path = tmp_path / "batch.feature.parquet"
     with FeatureWriter(path, batch_size=2) as w:
-        records = [make_feature_record(sequence=f"SEQ{i}") for i in range(5)]
+        records = [make_feature_record(sequence=f"SEQ{i}", peptidoform=f"SEQ{i}") for i in range(5)]
         w.write_batch(records)
     assert parquet_row_count(path) == 5
 
     # Remaining buffer flushed on close
     path2 = tmp_path / "buffer.feature.parquet"
     with FeatureWriter(path2, batch_size=100) as w:
-        records = [make_feature_record(sequence=f"SEQ{i}") for i in range(3)]
+        records = [make_feature_record(sequence=f"SEQ{i}", peptidoform=f"SEQ{i}") for i in range(3)]
         w.write_batch(records)
     assert parquet_row_count(path2) == 3
 
     # Multiple write_batch calls
     path3 = tmp_path / "multi.feature.parquet"
     with FeatureWriter(path3) as w:
-        w.write_batch([make_feature_record(sequence="SEQ1")])
-        w.write_batch([make_feature_record(sequence="SEQ2")])
-        w.write_batch([make_feature_record(sequence="SEQ3")])
+        w.write_batch([make_feature_record(sequence="SEQ1", peptidoform="SEQ1")])
+        w.write_batch([make_feature_record(sequence="SEQ2", peptidoform="SEQ2")])
+        w.write_batch([make_feature_record(sequence="SEQ3", peptidoform="SEQ3")])
     assert parquet_row_count(path3) == 3
 
 

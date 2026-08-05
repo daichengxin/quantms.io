@@ -121,14 +121,48 @@ def test_pg_roundtrip_derives_id(tmp_path):
         assert got == derive_id([anchors[i], grouped[i], labels[i]])
 
 
-def test_provided_id_kept_by_default(tmp_path):
-    """Without override, a producer-supplied feature_id is preserved as-is."""
+def test_identified_feature_id_is_derived_by_default(tmp_path):
+    """An identified Feature must use the reproducible composite-derived id."""
     path = tmp_path / "t.feature.parquet"
     rec = make_feature_record(sequence="PEPTIDEK", peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
     rec["feature_id"] = 123456789
     with FeatureWriter(path) as w:
         w.write_batch([dict(rec)])
+    table = pq.read_table(path)
+    derived = derive_id([rec["peptidoform"], rec["charge"], rec["run_file_name"], rec["rt"]])
+    assert table.column("feature_id").to_pylist() == [derived]
+    assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in table.column("cv_params").to_pylist()[0]
+
+
+def test_unidentified_feature_keeps_provided_id(tmp_path):
+    """An unidentified Feature retains its producer identity."""
+    path = tmp_path / "unidentified.feature.parquet"
+    rec = make_feature_record(sequence="", peptidoform="")
+    rec["feature_id"] = 123456789
+    with FeatureWriter(path) as writer:
+        writer.write_batch([rec])
     assert pq.read_table(path).column("feature_id").to_pylist() == [123456789]
+
+
+def test_provided_psm_id_kept_by_default(tmp_path):
+    """A producer-supplied PSM id remains supported by the generic writer contract."""
+    path = tmp_path / "t.psm.parquet"
+    rec = make_psm_record()
+    rec["psm_id"] = 123456789
+    with PsmWriter(path) as writer:
+        writer.write_batch([rec])
+    assert pq.read_table(path).column("psm_id").to_pylist() == [123456789]
+
+
+def test_writer_rejects_duplicate_identity_across_batches(tmp_path):
+    """Whole-file PK validation catches collisions split across writer batches."""
+    path = tmp_path / "duplicate.feature.parquet"
+    first = make_feature_record()
+    second = make_feature_record(intensities=[{"label": "TMT126", "intensity": 2000.0}])
+
+    with pytest.raises(ValueError, match=r"Primary key \(feature_id\) has 1 duplicate row"):
+        with FeatureWriter(path, batch_size=1) as writer:
+            writer.write_batch([first, second])
 
 
 def test_override_provided_id_stashes_to_cv_params(tmp_path):

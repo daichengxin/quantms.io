@@ -7,11 +7,13 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from qpx._version import __version__
 from qpx.core.data.identity import derive_id
+from qpx.core.sql import sql_build, validate_identifier
 from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
@@ -301,7 +303,7 @@ class BaseWriter:
         ids: list[int] = []
         unordered_list_indices = tuple(index for index, field in enumerate(composite) if field == "grouped_runs")
         for index, provided in enumerate(existing):
-            if provided is not None and not self._override_provided_ids:
+            if provided is not None and not self._should_override_provided_id(index, composite_values):
                 ids.append(provided)
                 continue
             if provided is not None:
@@ -317,6 +319,10 @@ class BaseWriter:
                 )
             )
         return ids
+
+    def _should_override_provided_id(self, _index: int, _composite_values: dict[str, list]) -> bool:
+        """Return whether a producer id should be replaced for one row."""
+        return self._override_provided_ids
 
     def _fill_identity_table(self, table: pa.Table) -> pa.Table:
         """Return *table* with its derived-id column present and non-null.
@@ -397,7 +403,7 @@ class BaseWriter:
         pass tables whose id column is absent or null.
         """
         table = self._fill_identity_table(table)
-        errors = self._schema_class.validate(table)
+        errors = self._schema_class.validate(table, strict=True)
         if errors:
             raise ValueError("Schema validation failed:\n" + "\n".join(errors))
         self._ensure_writer()
@@ -424,13 +430,50 @@ class BaseWriter:
         self.write_table(table)
 
     def close(self):
-        """Flush remaining buffer and close the Parquet file."""
+        """Flush buffered rows, close the file, and validate its identity PK."""
+        self._close(validate=True)
+
+    def _close(self, *, validate: bool) -> None:
+        """Close the writer, optionally skipping validation after a body error."""
         if self._buffer:
             self._write_arrow_batch(self._buffer)
             self._buffer = []
+        wrote_file = self._writer is not None
         if self._writer:
             self._writer.close()
             self._writer = None
+        if validate and wrote_file:
+            self._validate_identity_uniqueness()
+
+    def _validate_identity_uniqueness(self) -> None:
+        """Reject duplicate or null identity ids across the complete output file."""
+        id_field = self._id_field
+        if id_field is None:
+            return
+        quoted_id = validate_identifier(id_field)
+        query = sql_build(
+            """
+            SELECT
+                COUNT(*) AS total_count,
+                COUNT(DISTINCT $id_field) AS unique_count,
+                COUNT(*) FILTER (WHERE $id_field IS NULL) AS null_count
+            FROM read_parquet(?)
+            """,
+            id_field=quoted_id,
+        )
+        connection = duckdb.connect()
+        try:
+            total_count, unique_count, null_count = connection.execute(query, [str(self._path)]).fetchone()
+        finally:
+            connection.close()
+
+        if null_count:
+            raise ValueError(f"Primary key ({id_field}) contains {null_count} null row(s) out of {total_count}")
+        if unique_count != total_count:
+            duplicate_count = total_count - unique_count
+            raise ValueError(
+                f"Primary key ({id_field}) has {duplicate_count} duplicate row(s) ({unique_count} unique out of {total_count})"
+            )
 
     def _write_arrow_batch(self, records: list[dict]):
         if self._identity_composite and self._id_field is not None:
@@ -560,5 +603,7 @@ class BaseWriter:
     def __enter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    def __exit__(self, exc_type, _exc_value, _traceback):
+        # Preserve an exception raised inside the context instead of masking it
+        # with validation of a partial output file.
+        self._close(validate=exc_type is None)

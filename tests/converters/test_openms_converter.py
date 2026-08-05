@@ -168,9 +168,9 @@ class TestOpenMSConverter:
         ]
         records[1]["posterior_error_probability"] = 0.2
         source = qpx_dir / "quantms.psm.parquet"
-        with PsmWriter(source) as writer:
-            writer.write_batch(records)
-        legacy = pq.read_table(source).drop_columns(("psm_id", "feature_id")).replace_schema_metadata(None)
+        current_schema = load_schema("psm").get_arrow_schema()
+        legacy_schema = pa.schema([field for field in current_schema if field.name not in {"psm_id", "feature_id"}])
+        legacy = pa.Table.from_pylist(records, schema=legacy_schema)
         pq.write_table(legacy, source)
 
         output = tmp_path / "output"
