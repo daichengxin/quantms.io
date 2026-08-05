@@ -424,16 +424,15 @@ class TestViewIntegration:
             manual_result = ds.sql("""
                 SELECT pg.anchor_protein AS protein_accession,
                        rs.sample_accession,
-                       i.label,
-                       i.intensity,
+                       pg.label,
+                       pg.intensity,
                        pg.global_qvalue,
                        pg.gg_names AS gene_names
                 FROM pg,
                      run r,
-                     UNNEST(r.samples) AS _t1(rs),
-                     UNNEST(pg.intensities) AS _t2(i)
+                     UNNEST(r.samples) AS _t1(rs)
                 WHERE list_contains(pg.grouped_runs, r.run_file_name)
-                  AND i.label = rs.label
+                  AND pg.label = rs.label
                   AND (pg.global_qvalue IS NULL OR pg.global_qvalue <= 0.01)
             """)
             manual_df = manual_result.to_df()

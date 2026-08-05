@@ -35,7 +35,7 @@ API views are computed by joining and aggregating the primary QPX data. For exam
 
 1. Joining `pg.parquet` with `run.parquet` to resolve sample-channel mappings.
 2. Selecting the `anchor_protein` as the representative for each protein group.
-3. Extracting intensity values per sample from `intensities`.
+3. Reading the per-label intensity directly from the flattened scalar `pg.intensity` (since QPX 1.1 the PG view has one row per label — there is no `intensities` list).
 4. Optionally aggregating peptide/PSM counts, scores, or gene annotations.
 
 ```sql
@@ -43,15 +43,15 @@ API views are computed by joining and aggregating the primary QPX data. For exam
 SELECT DISTINCT
        pg.anchor_protein AS protein_accession,
        rs.sample_accession,
-       i.intensity AS abundance,
+       pg.label,
+       pg.intensity AS abundance,
        pg.global_qvalue,
        pg.gg_names
 FROM 'PXD014414.pg.parquet' pg
 CROSS JOIN UNNEST(pg.grouped_runs) AS grouped(run_file_name)
 JOIN 'PXD014414.run.parquet' r USING (run_file_name)
 CROSS JOIN UNNEST(r.samples) AS samples(rs)
-CROSS JOIN UNNEST(pg.intensities) AS quantities(i)
-WHERE i.label = rs.label;
+WHERE pg.label = rs.label;   -- flattened: scalar pg.label/pg.intensity, no intensities list
 ```
 
 `DISTINCT` is required because several member runs can be fractions of the

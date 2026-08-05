@@ -50,29 +50,21 @@ class PG(BaseStructure):
         return self.filter("is_decoy = false")
 
     def _intensity_label_field(self) -> str:
-        """Detect whether the intensities struct uses 'label' (new) or 'channel' (old)."""
-        try:
-            stmt = sql_build("SELECT typeof(intensities) FROM $src LIMIT 1", src=self._query.source)
-            row = self._engine.execute(stmt).fetchone()
-            if row:
-                type_str = row[0].lower()
-                if "channel" in type_str and "label" not in type_str:
-                    return "channel"
-        except Exception:
-            logger.debug("Failed to detect intensities struct type", exc_info=True)
+        """The pg view is flattened since 1.1 with a scalar ``label`` column."""
         return "label"
 
     def protein_intensities(self) -> QueryResult:
+        """One row per (protein, label, intensity).
+
+        Since QPX 1.1 the pg view is flattened, so ``label`` and ``intensity`` are
+        scalar columns and no ``UNNEST`` is needed. ID-only rows (null label) are
+        excluded.
         """
-        Flatten intensities: one row per (protein, label, intensity).
-        """
-        ilf = self._intensity_label_field()
         stmt = sql_build(
             """SELECT anchor_protein, pg_accessions, gg_names, grouped_runs,
-               global_qvalue, i.$ilf AS label, i.intensity
-        FROM $src,
-             UNNEST(intensities) AS _t(i)""",
-            ilf=ilf,
+               global_qvalue, label, intensity
+        FROM $src
+        WHERE label IS NOT NULL""",
             src=self._query.source,
         )
         return QueryResult(self._engine.execute(stmt))

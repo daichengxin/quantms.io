@@ -206,7 +206,7 @@ class SpectronautPgAdapter(SpectronautBaseAdapter):
 
         # Intensities
         pg_quantity = safe_float(row["pg_quantity"]) or 0.0
-        intensities = [{"label": "raw", "intensity": float(pg_quantity)}]
+        intensities = [{"label": "LFQ", "intensity": float(pg_quantity)}]
 
         # Q-values and scores
         global_qvalue, pg_qvalue, additional_scores = self._build_pg_scores(row)

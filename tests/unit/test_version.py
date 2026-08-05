@@ -68,10 +68,17 @@ def test_read_pg_raises_on_old_schema_file(tmp_path):
         qpx.read_pg(str(path))
 
 
-def test_guard_noop_on_unstamped_but_grouped_file(tmp_path):
-    """A file with grouped_runs but no qpx_version stamp is allowed (forward-only)."""
+def test_guard_noop_on_unstamped_complete_grouped_file(tmp_path):
+    """An unstamped file with the complete flattened layout is allowed."""
     path = tmp_path / "grouped.pg.parquet"
-    table = pa.table({"anchor_protein": ["P1"], "grouped_runs": [["run_01"]]})
+    table = pa.table(
+        {
+            "anchor_protein": ["P1"],
+            "grouped_runs": [["run_01"]],
+            "label": [None],
+            "intensity": [None],
+        }
+    )
     pq.write_table(table, str(path))
     check_pg_file_compatible(path)  # must not raise
 
@@ -88,8 +95,16 @@ def test_column_guard_rejects_pre_1_1_and_passes_1_1():
     # explicit pre-1.1 stamp, still missing grouped_runs -> error
     with pytest.raises(QpxVersionError):
         check_pg_columns_compatible(["anchor_protein", "run_file_name"], source="s3://b/x", version_str="1.0")
-    # 1.1 layout -> no raise
-    check_pg_columns_compatible(["anchor_protein", "grouped_runs", "intensities"], source="s3://b/x")
+    # pre-flatten 1.1: has grouped_runs but still the old intensities list and no
+    # scalar label/intensity -> error (would otherwise pass the grouped_runs check
+    # and then fail every pg query, silently)
+    with pytest.raises(QpxVersionError, match="flattened|label"):
+        check_pg_columns_compatible(["anchor_protein", "grouped_runs", "intensities"], source="s3://b/x")
+    # incomplete 1.1: grouped_runs but neither the old list nor both flat columns
+    with pytest.raises(QpxVersionError, match="label.*intensity|scalar"):
+        check_pg_columns_compatible(["anchor_protein", "grouped_runs"], source="s3://b/x")
+    # flat 1.1 layout -> no raise
+    check_pg_columns_compatible(["anchor_protein", "grouped_runs", "label", "intensity"], source="s3://b/x")
 
 
 def test_column_guard_rejects_old_s3_layout():
@@ -101,12 +116,18 @@ def test_column_guard_rejects_old_s3_layout():
         )
 
 
-def test_dataset_s3_discovery_propagates_version_error(monkeypatch):
-    """The S3 registration path must not swallow an incompatible PG layout."""
+def test_dataset_s3_discovery_fails_soft_on_version_error(monkeypatch, caplog):
+    """The S3 registration path skips an incompatible PG layout with a warning.
+
+    Dataset construction must not throw at __init__ because one structure file
+    is an old/incompatible version; the pg structure is simply skipped.
+    """
     from qpx.dataset import Dataset
 
     class FakeEngine:
         """Minimal DuckDBEngine replacement for the public S3 load path."""
+
+        dropped = False
 
         def __init__(self, **_kwargs):
             pass
@@ -117,11 +138,14 @@ def test_dataset_s3_discovery_propagates_version_error(monkeypatch):
             assert name == "pg"
             assert path == "s3://bucket/data/*.pg.parquet"
 
-        @staticmethod
-        def execute(sql):
+        @classmethod
+        def execute(cls, sql):
             """Validate and return the simulated DESCRIBE result."""
-            assert sql == 'DESCRIBE "pg"'
-            return FakeEngine()
+            if sql == 'DESCRIBE "pg"':
+                return cls()
+            assert sql == "DROP VIEW IF EXISTS pg"
+            cls.dropped = True
+            return cls()
 
         @staticmethod
         def fetchall():
@@ -133,21 +157,65 @@ def test_dataset_s3_discovery_propagates_version_error(monkeypatch):
 
     monkeypatch.setattr("qpx.dataset.DuckDBEngine", FakeEngine)
 
-    with pytest.raises(QpxVersionError):
-        Dataset("s3://bucket/data", structures=["pg"])
+    with caplog.at_level("WARNING"):
+        ds = Dataset("s3://bucket/data", structures=["pg"])
+
+    assert ds.pg is None
+    assert "pg" not in ds.available_structures
+    assert FakeEngine.dropped
+    assert any("pg" in rec.message for rec in caplog.records)
 
 
-def test_partitioned_pg_checks_every_part_file(tmp_path):
-    """A later old-schema partition cannot hide behind a compatible first part."""
+def test_partitioned_pg_checks_every_part_file(tmp_path, caplog):
+    """A later old-schema partition is detected and the pg structure is skipped soft."""
     from qpx.dataset import Dataset
 
     part_dir = tmp_path / "pg"
     part_dir.mkdir()
     pq.write_table(
-        pa.table({"anchor_protein": ["P1"], "grouped_runs": [["run_01"]]}),
+        pa.table(
+            {
+                "anchor_protein": ["P1"],
+                "grouped_runs": [["run_01"]],
+                "label": [None],
+                "intensity": [None],
+            }
+        ),
         part_dir / "a.parquet",
     )
     _write_old_pg_file(part_dir / "b.parquet")
 
-    with pytest.raises(QpxVersionError):
-        Dataset(tmp_path, structures=["pg"])
+    with caplog.at_level("WARNING"):
+        ds = Dataset(tmp_path, structures=["pg"])
+
+    assert ds.pg is None
+    assert any("pg" in rec.message for rec in caplog.records)
+
+
+def test_parse_spec_version_is_graceful_on_garbage():
+    """parse_spec_version never raises; garbage/partial inputs return None or a tuple."""
+    assert parse_spec_version("1.1") == (1, 1)
+    assert parse_spec_version("1") == (1, 0)
+    assert parse_spec_version("1.1.3") == (1, 1)  # stray patch ignored
+    for bad in ("v1.1", "", None, "abc", "1.x", ".", "  "):
+        assert parse_spec_version(bad) is None
+
+
+def test_dataset_with_one_bad_pg_file_still_opens_other_structures(tmp_path):
+    """A Dataset with an old pg file still opens and exposes its other structures."""
+    from qpx.dataset import Dataset
+
+    prefix = tmp_path.name
+    # A well-formed sample structure alongside a pre-1.1 pg file.
+    pq.write_table(
+        pa.table({"sample_accession": ["S1"], "condition": ["control"]}),
+        tmp_path / f"{prefix}.sample.parquet",
+    )
+    _write_old_pg_file(tmp_path / f"{prefix}.pg.parquet")
+
+    ds = Dataset(tmp_path)  # must not raise at construction
+
+    assert ds.pg is None  # bad pg skipped
+    assert ds.sample is not None  # other structure usable
+    assert "sample" in ds.available_structures
+    assert ds.sample.to_df().shape[0] == 1

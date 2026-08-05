@@ -57,10 +57,12 @@ def _valid_arrays(fields, n=1):
 
 def assert_pg_table_wellformed(table):
     """Assert a converter-produced pg table has well-formed grouped_runs,
-    pg_accessions, anchor_protein, and intensities columns.
+    pg_accessions, anchor_protein, and flat label/intensity columns.
 
     Consolidates the per-converter grouped_runs / pg_accessions /
-    anchor_protein / intensities structural checks into one assertion.
+    anchor_protein / intensity structural checks into one assertion. Since QPX
+    1.1 the pg view is flattened (scalar ``label`` + ``intensity``, one row per
+    label); identification-only rows carry null ``label``/``intensity``.
     """
     for gr in table.column("grouped_runs").to_pylist():
         assert isinstance(gr, list) and gr and all(isinstance(n, str) and n for n in gr)
@@ -68,8 +70,10 @@ def assert_pg_table_wellformed(table):
         assert accs and all(isinstance(a, str) and a for a in accs)
     for anchor in table.column("anchor_protein").to_pylist():
         assert isinstance(anchor, str) and anchor
-    for ints in table.column("intensities").to_pylist():
-        assert ints and all("label" in e and "intensity" in e for e in ints)
+    assert "label" in table.column_names and "intensity" in table.column_names
+    for lbl in table.column("label").to_pylist():
+        if lbl is not None:
+            assert isinstance(lbl, str) and lbl
 
 
 def write_lfq_consensusxml(path, maps, trailing=""):

@@ -58,8 +58,28 @@ This version defines all core serialized views (PSM, Feature, PG, MZ), the deriv
   into one quantification unit, not a single file; the sample is resolved via
   `(any file in grouped_runs, label) -> run.samples[]`. This removes and retypes
   a field, so files written by 1.1 are **not** readable by strict 1.0 tooling —
-  shipped as a minor under the pre-2.0 stabilisation rule above. The Feature and
-  PSM views keep the scalar `run_file_name`.
+  shipped as a minor under the pre-2.0 stabilisation rule above. The PG
+  `intensities` list (`list<struct<label,intensity>>`) is also **flattened** into
+  scalar `label` + `intensity` columns — one row per label. `label` participates
+  in the schema-default identity composite `[anchor_protein, grouped_runs,
+  label]`; `label`/`intensity` are null for identification-only groups. This
+  removes and retypes columns, so pg files must be regenerated under >= 1.1.
+- **1.1** (backward-incompatible): Feature, PSM, and PG now use mandatory opaque
+  `feature_id`, `psm_id`, and `pg_id` columns as their primary keys. A producer ID
+  is preserved when supplied; otherwise QPX derives the ID from the
+  footer-declared `identity_composite`. The schema-default Feature composite
+  changes from `[sequence, charge, run_file_name, anchor_protein]` to
+  `[peptidoform, charge, run_file_name, rt]`, and the PSM composite changes from
+  `[sequence, charge, run_file_name, scan]` to `[peptidoform, charge,
+  run_file_name, scan]`. Converters may declare a different producer-specific
+  Feature composite. Regenerate Feature, PSM, and PG files under >= 1.1.
+- **1.1** (OpenMS bridge): OpenMS and QPX share the *fraction_group* concept — a
+  group of fraction raw files that together quantify one protein, which is exactly
+  what `grouped_runs` encodes. Rather than change OpenMS's Arrow schema, the QPX
+  OpenMS converter stamps each pg (and feature) row with a `fraction_group`
+  cv_param carrying OpenMS's fraction_group number (read from the consensusXML
+  experimental design), so the grouping is preserved across both sides via a
+  shared cv term. No OpenMS schema change is required.
 - **1.0**: initial specification.
 
 ## Software Provider
@@ -86,8 +106,8 @@ The `software_provider` field is a free-text string in the Parquet metadata. The
 |---------------|-------------|-------------|-------|
 | 1.0 | 1.0 | Yes | Exact match |
 | 1.1 | 1.1 | Yes | Exact match |
-| 1.1 | 1.0 | No\* | 1.0 PG files use the scalar `run_file_name`; the 1.1 loader raises a clear version error rather than mis-read them. Re-convert the dataset. |
-| 1.0 | 1.1 | No | 1.1 replaces PG `run_file_name` with `grouped_runs` (backward-incompatible, per the changelog) — a strict 1.0 reader cannot read it. |
+| 1.1 | 1.0 | No\* | 1.0 core files lack the mandatory identity-ID columns, and 1.0 PG uses scalar `run_file_name`; re-convert the dataset. |
+| 1.0 | 1.1 | No | 1.1 adds mandatory identity-ID columns and replaces PG `run_file_name` with `grouped_runs`; a strict 1.0 reader cannot read it. |
 | 2.0 | 1.0/1.1 | Maybe | Major version change; check migration guide |
 | 1.x | 2.0 | No | Reader cannot handle a newer major version |
 

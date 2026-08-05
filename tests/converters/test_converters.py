@@ -147,8 +147,12 @@ class TestFragPipeFeatureAdapter:
         """Write a minimal combined_peptide.tsv."""
         tsv = tmp_path / "combined_peptide.tsv"
         lines = [
-            "Peptide Sequence\tModified Peptide\tCharges\tProtein\tProtein ID\tGene\texperiment_1 Intensity\texperiment_2 Intensity",
-            "PEPTIDEK\tPEPTIDEK\t2,3\tsp|P12345|PROT_HUMAN\tP12345\tBRCA1\t1000.0\t2000.0",
+            (
+                "Peptide Sequence\tModified Peptide\tCharges\tProtein\tProtein ID\tGene\t"
+                "experiment_1 Intensity\texperiment_1 MaxLFQ Intensity\t"
+                "experiment_2 Intensity\texperiment_2 MaxLFQ Intensity"
+            ),
+            "PEPTIDEK\tPEPTIDEK\t2,3\tsp|P12345|PROT_HUMAN\tP12345\tBRCA1\t1000.0\t900.0\t2000.0\t1800.0",
         ]
         tsv.write_text("\n".join(lines) + "\n")
         return tsv
@@ -167,18 +171,36 @@ class TestFragPipeFeatureAdapter:
         assert "sequence" in table.schema.names
         assert "anchor_protein" in table.schema.names
 
-    def test_convert_combined_peptide(self, tmp_path):
+    def test_faims_voltage_distinguishes_fragpipe_features(self, tmp_path):
+        """The same precursor at two FAIMS voltages is two Feature entities."""
+        from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
+
+        tsv = tmp_path / "combined_ion.tsv"
+        tsv.write_text(
+            "Peptide Sequence\tCharge\tM/Z\tProtein\tAssigned Modifications\t"
+            "Compensation Voltage\texperiment_1 Intensity\n"
+            "PEPTIDEK\t2\t450.25\tP12345\t\t-45\t1000\n"
+            "PEPTIDEK\t2\t450.25\tP12345\t\t-65\t2000\n"
+        )
+        output = tmp_path / "test.feature.parquet"
+        with FragPipeFeatureAdapter() as adapter:
+            adapter.convert(feature_path=str(tsv), output_path=str(output))
+
+        table = pq.read_table(output)
+        assert set(table.column("quantification_unit_id").to_pylist()) == {"experiment_1"}
+        assert set(table.column("compensation_voltage").to_pylist()) == {-45.0, -65.0}
+        assert len(set(table.column("feature_id").to_pylist())) == 2
+        assert table.schema.metadata[b"identity_composite"] == (b"quantification_unit_id,peptidoform,charge,compensation_voltage")
+
+    def test_rejects_combined_peptide(self, tmp_path):
         from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
 
         tsv = self._write_peptide_tsv(tmp_path)
         output = tmp_path / "test.feature.parquet"
         with FragPipeFeatureAdapter() as adapter:
-            adapter.convert(feature_path=str(tsv), output_path=str(output))
-        assert output.exists()
-        table = pq.read_table(output)
-        # 1 peptide x 2 experiments x 2 charges = 4 rows
-        assert table.num_rows == 4
-        assert "sequence" in table.schema.names
+            with pytest.raises(ValueError, match="combined_peptide.tsv.*peptide-level.*combined_ion.tsv"):
+                adapter.convert(feature_path=str(tsv), output_path=str(output))
+        assert not output.exists()
 
     def test_ion_modifications_parsed(self, tmp_path):
         from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
@@ -475,318 +497,10 @@ class TestFragPipePgAdapter:
 
         output = tmp_path / "pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=str(tsv), output_path=str(output))
+            adapter.convert(protein_path=str(tsv), output_path=str(output), experiment_to_runs={"experiment_1": ["run_01"]})
         assert output.exists()
         table = pq.read_table(output)
         assert table.num_rows == 1
-
-
-class TestQuantmsPgAdapter:
-    def test_normalize_pg_accessions_handles_canonical_shape(self):
-        from qpx.converters.quantms.pg_adapter import QuantmsPgAdapter
-
-        normalize = QuantmsPgAdapter._normalize_pg_accessions
-        assert normalize([{"accession": "P1"}, {"accession": "P2"}, {"accession": ""}]) == ["P1", "P2"]
-
-    def test_convert_raises_when_all_groups_fail(self, tmp_path, monkeypatch):
-        import pandas as pd
-
-        from qpx.converters.quantms import pg_adapter as quantms_pg_adapter
-        from qpx.converters.quantms.pg_adapter import QuantmsPgAdapter
-
-        feature_path = tmp_path / "feature.parquet"
-        output_path = tmp_path / "output.pg.parquet"
-        mztab_path = tmp_path / "dummy.mzTab"
-        mztab_path.write_text("MTD\tmzTab-version\t1.0.0\n")
-
-        # Two groups: (P1, run1) and (P2, run1)
-        feature_df = pd.DataFrame(
-            {
-                "anchor_protein": ["P1", "P2"],
-                "run_file_name": ["run1", "run1"],
-                "pg_accessions": [["P1"], ["P2"]],
-            }
-        )
-        feature_df.to_parquet(feature_path, index=False)
-
-        def _stub_load_mztab_sections(conn, _path):
-            conn.execute("CREATE OR REPLACE TABLE proteins AS SELECT CAST(NULL AS VARCHAR) AS accession WHERE 1=0")
-
-        monkeypatch.setattr(
-            quantms_pg_adapter,
-            "load_mztab_sections",
-            _stub_load_mztab_sections,
-        )
-
-        def _always_fail(*args, **kwargs):
-            raise RuntimeError("synthetic failure")
-
-        monkeypatch.setattr(QuantmsPgAdapter, "_build_single_pg", _always_fail)
-
-        with QuantmsPgAdapter() as adapter:
-            with pytest.raises(
-                ValueError,
-                match="all protein groups were skipped or failed",
-            ):
-                adapter.convert(
-                    mztab_path=str(mztab_path),
-                    feature_path=str(feature_path),
-                    output_path=str(output_path),
-                )
-
-    def test_null_nan_keys_are_skipped(self, tmp_path, monkeypatch):
-        """Rows with None, NaN, or 'null' anchor_protein must be skipped,
-        not collapsed into a pseudo-group."""
-        import pandas as pd
-
-        from qpx.converters.quantms import pg_adapter as quantms_pg_adapter
-        from qpx.converters.quantms.pg_adapter import QuantmsPgAdapter
-
-        # Build a feature parquet with null-like anchor_protein values
-        # mixed with one valid group.
-        feature_df = pd.DataFrame(
-            {
-                "anchor_protein": [
-                    "P12345",
-                    None,
-                    float("nan"),
-                    "null",
-                    "None",
-                    "P12345",
-                ],
-                "run_file_name": ["run1", "run1", "run1", "run1", "run1", "run1"],
-                "pg_accessions": [["P12345"], ["X"], ["X"], ["X"], ["X"], ["P12345"]],
-                "sequence": [
-                    "PEPTIDEK",
-                    "BADSEQ",
-                    "BADSEQ2",
-                    "BADSEQ3",
-                    "BADSEQ4",
-                    "ANOTHERK",
-                ],
-                "peptidoform": [
-                    "PEPTIDEK",
-                    "BADSEQ",
-                    "BADSEQ2",
-                    "BADSEQ3",
-                    "BADSEQ4",
-                    "ANOTHERK",
-                ],
-                "charge": [2, 2, 2, 2, 2, 3],
-                "is_decoy": [False, False, False, False, False, False],
-                "intensities": [
-                    [{"label": "LFQ", "intensity": 1000.0}],
-                    [{"label": "LFQ", "intensity": 999.0}],
-                    [{"label": "LFQ", "intensity": 999.0}],
-                    [{"label": "LFQ", "intensity": 999.0}],
-                    [{"label": "LFQ", "intensity": 999.0}],
-                    [{"label": "LFQ", "intensity": 2000.0}],
-                ],
-            }
-        )
-        feature_path = tmp_path / "feature.parquet"
-        feature_df.to_parquet(feature_path, index=False)
-        output_path = tmp_path / "pg.parquet"
-        mztab_path = tmp_path / "dummy.mzTab"
-        mztab_path.write_text("MTD\tmzTab-version\t1.0.0\n")
-
-        def _stub_load_mztab_sections(conn, _path):
-            conn.execute("CREATE OR REPLACE TABLE proteins AS SELECT CAST(NULL AS VARCHAR) AS accession WHERE 1=0")
-
-        monkeypatch.setattr(
-            quantms_pg_adapter,
-            "load_mztab_sections",
-            _stub_load_mztab_sections,
-        )
-
-        with QuantmsPgAdapter() as adapter:
-            adapter.convert(
-                mztab_path=str(mztab_path),
-                feature_path=str(feature_path),
-                output_path=str(output_path),
-            )
-
-        table = pq.read_table(output_path)
-        df = table.to_pandas()
-        # Only one group (P12345, run1) should exist -- not a "None"/"nan"/"null" group
-        assert len(df) == 1
-        assert df.iloc[0]["anchor_protein"] == "P12345"
-
-    def test_bad_group_ratio_triggers_at_low_threshold(self, tmp_path, monkeypatch):
-        """With min_groups_for_ratio_failure=5, a dataset of 5 groups with >20%
-        bad should raise ValueError."""
-        import pandas as pd
-
-        from qpx.converters.quantms import pg_adapter as quantms_pg_adapter
-        from qpx.converters.quantms.pg_adapter import QuantmsPgAdapter
-
-        # Build 5 groups; make _build_single_pg fail for 2 of them (40% > 20%)
-        rows = []
-        for i in range(5):
-            rows.append(
-                {
-                    "anchor_protein": f"P{i}",
-                    "run_file_name": "run1",
-                    "pg_accessions": [f"P{i}"],
-                    "sequence": f"SEQ{i}",
-                    "peptidoform": f"SEQ{i}",
-                    "charge": 2,
-                    "is_decoy": False,
-                    "intensities": [{"label": "LFQ", "intensity": 1000.0}],
-                }
-            )
-        feature_df = pd.DataFrame(rows)
-        feature_path = tmp_path / "feature.parquet"
-        feature_df.to_parquet(feature_path, index=False)
-        output_path = tmp_path / "pg.parquet"
-        mztab_path = tmp_path / "dummy.mzTab"
-        mztab_path.write_text("MTD\tmzTab-version\t1.0.0\n")
-
-        def _stub_load_mztab_sections(conn, _path):
-            conn.execute("CREATE OR REPLACE TABLE proteins AS SELECT CAST(NULL AS VARCHAR) AS accession WHERE 1=0")
-
-        monkeypatch.setattr(
-            quantms_pg_adapter,
-            "load_mztab_sections",
-            _stub_load_mztab_sections,
-        )
-
-        # Make _build_single_pg fail for P3 and P4 (2 out of 5 = 40%)
-        _original_build = QuantmsPgAdapter._build_single_pg
-
-        def _patched_build(self, anchor_protein, run_file_name, features, single_meta, group_meta):
-            if anchor_protein in ("P3", "P4"):
-                raise RuntimeError("synthetic failure")
-            return _original_build(self, anchor_protein, run_file_name, features, single_meta, group_meta)
-
-        monkeypatch.setattr(QuantmsPgAdapter, "_build_single_pg", _patched_build)
-
-        with QuantmsPgAdapter() as adapter:
-            with pytest.raises(ValueError, match="too many problematic protein groups"):
-                adapter.convert(
-                    mztab_path=str(mztab_path),
-                    feature_path=str(feature_path),
-                    output_path=str(output_path),
-                )
-
-    def test_total_sequences_vs_unique_sequences(self, tmp_path, monkeypatch):
-        """When a sequence appears multiple times with different charges,
-        total_sequences > unique_sequences."""
-        import pandas as pd
-
-        from qpx.converters.quantms import pg_adapter as quantms_pg_adapter
-        from qpx.converters.quantms.pg_adapter import QuantmsPgAdapter
-
-        # Same sequence, different charges -> 2 features, 1 unique sequence
-        feature_df = pd.DataFrame(
-            {
-                "anchor_protein": ["P12345", "P12345"],
-                "run_file_name": ["run1", "run1"],
-                "pg_accessions": [["P12345"], ["P12345"]],
-                "sequence": ["PEPTIDEK", "PEPTIDEK"],
-                "peptidoform": ["PEPTIDEK", "PEPTIDEK"],
-                "charge": [2, 3],
-                "is_decoy": [False, False],
-                "intensities": [
-                    [{"label": "LFQ", "intensity": 1000.0}],
-                    [{"label": "LFQ", "intensity": 2000.0}],
-                ],
-            }
-        )
-        feature_path = tmp_path / "feature.parquet"
-        feature_df.to_parquet(feature_path, index=False)
-        output_path = tmp_path / "pg.parquet"
-        mztab_path = tmp_path / "dummy.mzTab"
-        mztab_path.write_text("MTD\tmzTab-version\t1.0.0\n")
-
-        def _stub_load_mztab_sections(conn, _path):
-            conn.execute("CREATE OR REPLACE TABLE proteins AS SELECT CAST(NULL AS VARCHAR) AS accession WHERE 1=0")
-
-        monkeypatch.setattr(
-            quantms_pg_adapter,
-            "load_mztab_sections",
-            _stub_load_mztab_sections,
-        )
-
-        with QuantmsPgAdapter() as adapter:
-            adapter.convert(
-                mztab_path=str(mztab_path),
-                feature_path=str(feature_path),
-                output_path=str(output_path),
-            )
-
-        table = pq.read_table(output_path)
-        df = table.to_pandas()
-        assert len(df) == 1
-        rec = df.iloc[0]
-        peptide_counts = rec["peptide_counts"]
-        assert peptide_counts["unique_sequences"] == 1
-        assert peptide_counts["total_sequences"] == 2
-        assert peptide_counts["total_sequences"] != peptide_counts["unique_sequences"]
-
-
-class TestQuantMSConverterPrerequisites:
-    def test_pg_requested_without_feature_prerequisite_fails(self, tmp_path, monkeypatch):
-        from qpx.converters.quantms import converter as quantms_converter
-
-        class _StubSdrfConverter:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def convert(self, **kwargs):
-                return None
-
-            def run_ontology_entries(self):
-                return []
-
-        class _StubConn:
-            def close(self):
-                return None
-
-        def _stub_connection():
-            return _StubConn()
-
-        def _stub_none(*args, **kwargs):
-            return None
-
-        def _stub_dict(*args, **kwargs):
-            return {}
-
-        def _stub_list(*args, **kwargs):
-            return []
-
-        monkeypatch.setattr(quantms_converter, "SdrfConverter", _StubSdrfConverter)
-        monkeypatch.setattr(quantms_converter, "create_converter_connection", _stub_connection)
-        monkeypatch.setattr(quantms_converter, "load_mztab_sections", _stub_none)
-        monkeypatch.setattr(quantms_converter, "load_msstats", _stub_none)
-        monkeypatch.setattr(quantms_converter, "extract_modifications", _stub_dict)
-        monkeypatch.setattr(quantms_converter, "modification_ontology_entries", _stub_list)
-        monkeypatch.setattr(quantms_converter, "field_ontology_entries", _stub_list)
-        monkeypatch.setattr(
-            quantms_converter.QuantMSConverter,
-            "_build_provenance",
-            staticmethod(_stub_list),
-        )
-
-        converter = quantms_converter.QuantMSConverter(
-            mztab_path="dummy.mzTab",
-            sdrf_file="dummy.sdrf",
-            msstats_file=None,
-        )
-        with pytest.raises(ValueError, match="PG.*feature.parquet.*msstats_file"):
-            converter.convert(
-                output_folder=tmp_path,
-                output_prefix="quantms_test",
-                structures=["pg"],
-            )
-
-
-# ---------------------------------------------------------------------------
-# P0-3: FragPipe pg_adapter is_decoy detection from protein accession prefix
-# ---------------------------------------------------------------------------
 
 
 class TestFragPipePgAdapterIsDecoy:
@@ -824,7 +538,7 @@ class TestFragPipePgAdapterIsDecoy:
         tsv = self._make_tsv(tmp_path, [self._normal_row("sp|P12345|PROT_HUMAN")])
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         is_decoy_vals = table.column("is_decoy").to_pylist()
         assert all(v is False for v in is_decoy_vals), f"Expected False, got: {is_decoy_vals}"
@@ -836,7 +550,7 @@ class TestFragPipePgAdapterIsDecoy:
         tsv = self._make_tsv(tmp_path, [self._normal_row("rev_sp|P12345|PROT_HUMAN")])
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         is_decoy_vals = table.column("is_decoy").to_pylist()
         assert all(v is True for v in is_decoy_vals), f"Expected True, got: {is_decoy_vals}"
@@ -848,7 +562,7 @@ class TestFragPipePgAdapterIsDecoy:
         tsv = self._make_tsv(tmp_path, [self._normal_row("DECOY_P12345")])
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         is_decoy_vals = table.column("is_decoy").to_pylist()
         assert all(v is True for v in is_decoy_vals), f"Expected True, got: {is_decoy_vals}"
@@ -866,7 +580,7 @@ class TestFragPipePgAdapterIsDecoy:
         )
         output = tmp_path / "test.pg.parquet"
         with FragPipePgAdapter() as adapter:
-            adapter.convert(protein_path=tsv, output_path=str(output))
+            adapter.convert(protein_path=tsv, output_path=str(output), experiment_to_runs={"exp1": ["run_01"]})
         table = pq.read_table(str(output))
         df = table.to_pandas()
         normal_rows = df[df["anchor_protein"] == "sp|P12345|PROT_HUMAN"]

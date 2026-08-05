@@ -1,6 +1,12 @@
 # PSM View
 
-The PSM (Peptide Spectrum Match) view captures spectrum-level identification results. Each row represents a single match between a mass spectrum and a peptide sequence, including the identification scores, optional spectral data, and protein mappings.
+The PSM (Peptide Spectrum Match) view captures spectrum-level identification
+results. Each row represents a single match between a mass spectrum and a
+peptide sequence, including the identification scores, optional spectral data,
+and protein mappings. Its mandatory opaque `psm_id` is the primary key. A
+producer-supplied ID is preserved by default; otherwise QPX derives the ID from
+the footer-declared `identity_composite`, whose schema default is
+`[peptidoform, charge, run_file_name, scan]`.
 
 De novo sequencing workflows set `is_decoy` to `false` and may omit
 `protein_accessions`. Record the workflow with a `de_novo_peptide_sequencing`
@@ -13,6 +19,12 @@ step in `provenance.parquet`.
 - **DDA identification results**: Designed primarily for data-dependent acquisition (DDA) workflows where each spectrum yields one or more peptide identifications.
 
 ## Schema
+
+### Identity
+
+| Field | Description | Type | Required |
+|-------|-------------|------|----------|
+| `psm_id` | Opaque primary key, supplied by the producer or derived by QPX from the footer-declared `identity_composite` | int64 | yes |
 
 ### Core Identification Fields
 
@@ -49,6 +61,7 @@ These fields are optional and may not exist in the file at all. They are include
 | `charge_array` | Array of fragment ion charge values                                                                                                                     | array[int32], null | no |
 | `ion_type_array` | Array of fragment ion type annotations (e.g., b1, y2, a2)                                                                                               | array[string], null | no |
 | `ion_mobility_array` | Array of fragment ion mobility values                                                                                                                   | array[float32], null | no |
+| `feature_id` | Reference to the linked Feature row through `feature.feature_id`; null when unlinked | int64, null | no |
 
 !!! note "Nullable vs Optional"
     Core fields marked as "not required" are **nullable** -- the column always exists in the file but individual values may be null. Optional fields (protein accessions, spectral data) may be **absent from the file entirely**, depending on conversion settings. Protein mappings can be recovered by joining with the feature and protein group views.
@@ -104,6 +117,7 @@ Several fields in the PSM view use structures shared across other QPX views:
 
 ```json
 {
+  "psm_id": -4279600662514899531,
   "sequence": "AAAAAAAAAAGAAGGR",
   "peptidoform": "[Acetyl]-AAAAAAAAAAGAAGGR",
   "charge": 2,
@@ -159,6 +173,7 @@ When spectral arrays are included, the record also contains peak-level data:
 
 ```json
 {
+  "psm_id": -4279600662514899531,
   "sequence": "AAAAAAAAAAGAAGGR",
   "peptidoform": "[Acetyl]-AAAAAAAAAAGAAGGR",
   "charge": 2,

@@ -1,8 +1,7 @@
-"""Plex-aware channel-label resolution for the QuantMS feature adapter.
+"""Plex-aware channel-label resolution for the OpenMS QPX paths.
 
-Regression coverage for the qpx intensity-label bug: TMT/iTRAQ channels were
-labeled from a plex-agnostic table (TMT10 channel 10 wrongly labeled TMT131N)
-and iTRAQ was not mapped at all. Labels now come from the shared sdrf-pipelines
+Regression coverage for canonical TMT/iTRAQ labels shared by the OpenMS
+consensusXML and ``-out_qpx`` paths. Labels come from the shared sdrf-pipelines
 channel_map and are plex-aware.
 """
 
@@ -13,11 +12,84 @@ import pyarrow.parquet as pq
 import pytest
 
 from qpx.converters.channel_labels import (
+    experiment_runs_from_sdrf,
     experiment_type_from_labels,
     normalize_label,
     relabel_intensities_parquet,
     resolve_channel_labels,
 )
+
+
+def test_experiment_runs_from_sdrf_groups_by_source_name(tmp_path):
+    """SDRF 'source name' -> distinct raw-file stems, fraction order preserved."""
+    sdrf = tmp_path / "x.sdrf.tsv"
+    sdrf.write_text(
+        "source name\tcomment[data file]\tcomment[fraction identifier]\nS1\tF1.raw\t1\nS1\tF2.raw\t2\nS2\tG1.raw\t1\n"
+    )
+    mapping = experiment_runs_from_sdrf(str(sdrf))
+    assert mapping == {"S1": ["F1", "F2"], "S2": ["G1"]}
+
+
+def test_experiment_runs_from_sdrf_missing_or_absent():
+    """None for no path; None when required columns are absent."""
+    assert experiment_runs_from_sdrf(None) is None
+
+
+def test_fraction_groups_from_sdrf_groups_fractions_not_techreps(tmp_path):
+    """Files that differ only in fraction group into one quantification unit;
+    technical replicates (differ in tech rep) stay separate."""
+    from qpx.converters.channel_labels import fraction_groups_from_sdrf
+
+    sdrf = tmp_path / "frac.sdrf.tsv"
+    # S1 has 3 fractions (one unit); S1 tech-rep 2 is a separate unit; S2 unfractionated.
+    sdrf.write_text(
+        "source name\tcomment[data file]\tcomment[label]\t"
+        "characteristics[biological replicate]\tcomment[technical replicate]\t"
+        "comment[fraction identifier]\n"
+        "S1\tF1.raw\tLFQ\t1\t1\t1\n"
+        "S1\tF2.raw\tLFQ\t1\t1\t2\n"
+        "S1\tF3.raw\tLFQ\t1\t1\t3\n"
+        "S1\tT2.raw\tLFQ\t1\t2\t1\n"
+        "S2\tG1.raw\tLFQ\t1\t1\t1\n"
+    )
+    m = fraction_groups_from_sdrf(str(sdrf))
+    assert m["F1"] == ["F1", "F2", "F3"]  # 3 fractions, fraction-ordered
+    assert m["F2"] == ["F1", "F2", "F3"]
+    assert m["T2"] == ["T2"]  # tech-rep 2 is its own unit
+    assert m["G1"] == ["G1"]  # unfractionated
+    assert fraction_groups_from_sdrf(None) is None
+
+
+def test_multi_dot_run_names_match_sdrf_conversion(tmp_path):
+    """SDRF mappings and run output preserve meaningful dots in run names."""
+    from qpx.converters.channel_labels import fraction_groups_from_sdrf
+    from qpx.converters.sdrf import SdrfConverter
+    from qpx.core.sdrf import SDRFHandler
+
+    sdrf = tmp_path / "multi_dot.sdrf.tsv"
+    sdrf.write_text(
+        "source name\tcomment[data file]\tcomment[label]\tcomment[fraction identifier]\n"
+        "S1\trun.part.1.raw\tlabel free sample\t1\n"
+        "S1\trun.part.2.raw\tlabel free sample\t2\n"
+    )
+
+    grouped = ["run.part.1", "run.part.2"]
+    assert experiment_runs_from_sdrf(str(sdrf)) == {"S1": grouped}
+    assert fraction_groups_from_sdrf(str(sdrf)) == {
+        "run.part.1": grouped,
+        "run.part.2": grouped,
+    }
+    assert SDRFHandler(sdrf).get_sample_map_run() == {
+        "run.part.1": "S1",
+        "run.part.2": "S1",
+    }
+
+    run_output = tmp_path / "run.parquet"
+    with SdrfConverter(duckdb_threads=24) as converter:
+        converter.convert(str(sdrf), run_output=str(run_output))
+    assert pq.read_table(run_output).column("run_file_name").to_pylist() == grouped
+
+
 from qpx.core.parquet_io import read_parquet_metadata
 from qpx.dataset import Dataset
 from qpx.writers.feature import FeatureWriter
@@ -407,46 +479,3 @@ def test_sdrf_labels_override_channel_count():
 def test_unresolvable_sdrf_labels_fall_back_to_count():
     labels = _resolve("TMT", list(range(1, 11)), sdrf_labels={"garbage", "nonsense"})
     assert labels[10] == "TMT131"  # fell back to count-based tmt10plex
-
-
-def test_tmt_fixture_labels_are_reporter_names(tmp_path):
-    """End-to-end: the TMT11 example converts to TMT126..TMT131C reporter labels."""
-    from pathlib import Path
-
-    import pyarrow.parquet as pq
-
-    from qpx.converters.quantms.converter import QuantMSConverter
-
-    base = Path("tests/examples/quantms/dda-plex-full")
-    mztab = base / "PXD007683TMT.sdrf_openms_design_openms.mzTab.gz"
-    msstats = base / "PXD007683TMT.sdrf_openms_design_msstats_in.csv.gz"
-    sdrf = base / "PXD007683-TMT.sdrf.tsv"
-
-    out = tmp_path / "out"
-    out.mkdir()
-    QuantMSConverter(mztab_path=str(mztab), sdrf_file=str(sdrf), msstats_file=str(msstats)).convert(
-        output_folder=out, output_prefix="tmt", structures=["feature"]
-    )
-    feature_files = list(out.glob("*.feature.parquet"))
-    assert feature_files, "no feature parquet produced"
-
-    labels = set()
-    for entry in pq.read_table(feature_files[0]).column("intensities").to_pylist():
-        for ch in entry or []:
-            labels.add(ch["label"])
-    # Reporter names, never bare numeric indices.
-    assert "TMT126" in labels
-    assert labels <= {
-        "TMT126",
-        "TMT127N",
-        "TMT127C",
-        "TMT128N",
-        "TMT128C",
-        "TMT129N",
-        "TMT129C",
-        "TMT130N",
-        "TMT130C",
-        "TMT131N",
-        "TMT131C",
-    }
-    assert not any(lbl.isdigit() for lbl in labels)

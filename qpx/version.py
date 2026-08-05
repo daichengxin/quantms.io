@@ -28,15 +28,22 @@ class QpxVersionError(ValueError):
     """Raised when a QPX file's format version is incompatible with this reader."""
 
 
-def parse_spec_version(value: str) -> tuple[int, int]:
+def parse_spec_version(value: str | None) -> tuple[int, int] | None:
     """Parse a ``{major}.{minor}`` spec-version string into an ``(int, int)`` tuple.
 
     Extra components (a stray patch segment) are ignored; a missing minor is
-    treated as ``0``. Raises :class:`ValueError` on a non-numeric version.
+    treated as ``0``. Returns ``None`` (never raises) for anything that is not a
+    parseable numeric spec version — ``None``, ``""``, ``"v1.1"``, ``"abc"`` —
+    leaving it to the caller to decide what an unrecognisable version means.
     """
+    if not value:
+        return None
     parts = value.strip().split(".")
-    major = int(parts[0])
-    minor = int(parts[1]) if len(parts) > 1 else 0
+    try:
+        major = int(parts[0])
+        minor = int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        return None
     return (major, minor)
 
 
@@ -98,13 +105,27 @@ def _guard_pg_layout(source: str, columns: set[str], version_str: str | None) ->
     """Raise :class:`QpxVersionError` if ``columns``/``version_str`` describe a pre-1.1 PG layout."""
     has_grouped = "grouped_runs" in columns
     has_scalar_run = "run_file_name" in columns
+    has_flat_intensity = "label" in columns and "intensity" in columns
+    parsed_version = parse_spec_version(version_str)
+    too_old_version = parsed_version is not None and parsed_version < _PG_MIN_VERSION
 
-    too_old_version = False
-    if version_str is not None:
-        try:
-            too_old_version = parse_spec_version(version_str) < _PG_MIN_VERSION
-        except ValueError:
-            too_old_version = False
+    # A grouped-runs PG still needs the flattened scalar label/intensity columns.
+    # Without them every 1.1 consumer query fails, regardless of whether the old
+    # intensities list is also present.
+    if has_grouped and not has_flat_intensity:
+        found = version_str or "unknown (incomplete 1.1 layout)"
+        raise QpxVersionError(
+            "Incompatible PG (protein-group) file: "
+            f"'{source}'\n"
+            f"  file qpx_version : {found}\n"
+            f"  reader requires  : >= {_PG_MIN_VERSION[0]}.{_PG_MIN_VERSION[1]} "
+            f"(this build stamps {QPX_SPEC_VERSION})\n"
+            "  breaking change  : QPX 1.1 flattened the PG 'intensities' list into "
+            "scalar 'label' + 'intensity' columns (one row per label); this file "
+            "does not expose both scalar columns, so pg queries cannot run.\n"
+            "  fix              : regenerate this PG file with qpx >= 1.1. See "
+            "docs/spec/versioning.md (changelog 1.1)."
+        )
 
     # Old layout: no grouped_runs and only the scalar run_file_name, or an
     # explicitly pre-1.1 stamp on a file still missing grouped_runs.

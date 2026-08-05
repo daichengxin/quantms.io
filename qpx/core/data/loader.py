@@ -137,10 +137,5 @@ def load_schema(name: str) -> ViewSchema:
         fields=fields,
         doc=spec.get("doc", ""),
         extra_columns=spec.get("extra_columns", False),
+        identity_composite=spec.get("identity_composite"),
     )
-
-
-def load_yaml_schema(yaml_path: str | Path) -> dict:
-    """Load a raw YAML schema spec file (for validation/inspection)."""
-    with open(yaml_path) as f:
-        return yaml.safe_load(f)

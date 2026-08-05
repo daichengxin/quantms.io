@@ -75,6 +75,17 @@ def test_writer_footer_metadata(tmp_path):
     assert "file_type" not in data_columns
 
 
+def test_writer_footer_supports_composite_primary_key(tmp_path):
+    """A multi-column primary key must not be treated as a derived id field."""
+    path = tmp_path / "composite.ontology.parquet"
+    with OntologyWriter(path, identity_composite=("field_name", "view")) as writer:
+        writer.write_batch([make_ontology_record()])
+
+    metadata = read_parquet_metadata(path)
+    assert metadata["identity_composite"] == "field_name,view"
+    assert "primary_key" not in metadata
+
+
 def test_writer_schema_validation(tmp_path):
     """Writer rejects bad types and accepts valid tables."""
     # Reject bad types
@@ -85,6 +96,7 @@ def test_writer_schema_validation(tmp_path):
         wrong_fields = [pa.field("charge", pa.string()) if f.name == "charge" else f for f in schema]
         wrong_schema = pa.schema(wrong_fields)
         arrays = {f.name: pa.nulls(1, type=f.type) for f in wrong_schema}
+        arrays["peptidoform"] = pa.array(["PEPTIDE"], type=pa.string())
         arrays["charge"] = pa.array(["wrong"], type=pa.string())
         table = pa.table(arrays, schema=wrong_schema)
         with pytest.raises(ValueError, match="Schema validation failed"):
@@ -135,24 +147,36 @@ def test_writer_batching(tmp_path):
     # Batch size flush
     path = tmp_path / "batch.feature.parquet"
     with FeatureWriter(path, batch_size=2) as w:
-        records = [make_feature_record(sequence=f"SEQ{i}") for i in range(5)]
+        records = [make_feature_record(sequence=f"SEQ{i}", peptidoform=f"SEQ{i}") for i in range(5)]
         w.write_batch(records)
     assert parquet_row_count(path) == 5
 
     # Remaining buffer flushed on close
     path2 = tmp_path / "buffer.feature.parquet"
     with FeatureWriter(path2, batch_size=100) as w:
-        records = [make_feature_record(sequence=f"SEQ{i}") for i in range(3)]
+        records = [make_feature_record(sequence=f"SEQ{i}", peptidoform=f"SEQ{i}") for i in range(3)]
         w.write_batch(records)
     assert parquet_row_count(path2) == 3
 
     # Multiple write_batch calls
     path3 = tmp_path / "multi.feature.parquet"
     with FeatureWriter(path3) as w:
-        w.write_batch([make_feature_record(sequence="SEQ1")])
-        w.write_batch([make_feature_record(sequence="SEQ2")])
-        w.write_batch([make_feature_record(sequence="SEQ3")])
+        w.write_batch([make_feature_record(sequence="SEQ1", peptidoform="SEQ1")])
+        w.write_batch([make_feature_record(sequence="SEQ2", peptidoform="SEQ2")])
+        w.write_batch([make_feature_record(sequence="SEQ3", peptidoform="SEQ3")])
     assert parquet_row_count(path3) == 3
+
+
+def test_writer_discards_buffer_when_context_body_fails(tmp_path):
+    """A body error must not flush incomplete buffered records."""
+    path = tmp_path / "failed.feature.parquet"
+
+    with pytest.raises(RuntimeError, match="body failure"):
+        with FeatureWriter(path, batch_size=2) as writer:
+            writer.write_batch([make_feature_record()])
+            raise RuntimeError("body failure")
+
+    assert not path.exists()
 
 
 def test_writer_compression(tmp_path):

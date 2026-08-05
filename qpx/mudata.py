@@ -9,7 +9,7 @@ mapping is stored as a boolean sparse adjacency matrix in
 from __future__ import annotations
 
 import logging
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -18,6 +18,7 @@ import pandas as pd
 from scipy import sparse
 
 from qpx._version import __version__
+from qpx.core.files import run_file_stem
 from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
@@ -73,18 +74,20 @@ def _pivot_to_sparse(
     return mat.tocsr()
 
 
+# pg is flattened since 1.1 (scalar ``label``), so its label queries read the
+# column directly; feature keeps the intensities list<struct>.
 _LABEL_FIELD_QUERIES: dict[tuple[str, str], str] = {
     ("channel", "feature"): "SELECT i.channel FROM feature, UNNEST(intensities) AS _t(i) LIMIT 1",
-    ("channel", "pg"): "SELECT i.channel FROM pg, UNNEST(intensities) AS _t(i) LIMIT 1",
+    ("channel", "pg"): "SELECT label FROM pg WHERE label IS NOT NULL LIMIT 1",
     ("label", "feature"): "SELECT i.label FROM feature, UNNEST(intensities) AS _t(i) LIMIT 1",
-    ("label", "pg"): "SELECT i.label FROM pg, UNNEST(intensities) AS _t(i) LIMIT 1",
+    ("label", "pg"): "SELECT label FROM pg WHERE label IS NOT NULL LIMIT 1",
 }
 
 _MULTIPLEXED_QUERIES: dict[tuple[str, str], str] = {
     ("channel", "feature"): "SELECT COUNT(DISTINCT i.channel) FROM feature, UNNEST(intensities) AS _t(i)",
-    ("channel", "pg"): "SELECT COUNT(DISTINCT i.channel) FROM pg, UNNEST(intensities) AS _t(i)",
+    ("channel", "pg"): "SELECT COUNT(DISTINCT label) FROM pg WHERE label IS NOT NULL",
     ("label", "feature"): "SELECT COUNT(DISTINCT i.label) FROM feature, UNNEST(intensities) AS _t(i)",
-    ("label", "pg"): "SELECT COUNT(DISTINCT i.label) FROM pg, UNNEST(intensities) AS _t(i)",
+    ("label", "pg"): "SELECT COUNT(DISTINCT label) FROM pg WHERE label IS NOT NULL",
 }
 
 
@@ -128,54 +131,56 @@ _PRECURSOR_ALL_QUERIES: dict[str, str] = {
 # grouped_runs so EVERY member run receives the group's intensity, rather than
 # only the first element (the old ``grouped_runs[1]``, which silently dropped all
 # but one run of a genuine multi-run group).
+# Since QPX 1.1 the pg view is flattened: scalar ``label`` / ``intensity`` columns,
+# one row per label, so there is no intensities list to UNNEST. grouped_runs is
+# exploded through ``list_distinct`` so a member run counts once even if a producer
+# repeated it. ID-only rows (null label) are excluded by the label predicate. The
+# ``channel`` and ``label`` keys are identical now (pg carries only ``label``); both
+# are kept so the shared label-field dispatch does not need a pg special-case.
 _PROTEIN_QUERIES: dict[str, str] = {
     "channel": """
     SELECT gr AS run_file_name,
            pg.anchor_protein,
-           i.intensity
+           pg.intensity AS intensity
     FROM pg,
-         UNNEST(pg.grouped_runs) AS _g(gr),
-         UNNEST(pg.intensities) AS _t(i)
-    WHERE i.channel = $1
+         UNNEST(list_distinct(pg.grouped_runs)) AS _g(gr)
+    WHERE pg.label = $1
     """,
     "label": """
     SELECT gr AS run_file_name,
            pg.anchor_protein,
-           i.intensity
+           pg.intensity AS intensity
     FROM pg,
-         UNNEST(pg.grouped_runs) AS _g(gr),
-         UNNEST(pg.intensities) AS _t(i)
-    WHERE i.label = $1
+         UNNEST(list_distinct(pg.grouped_runs)) AS _g(gr)
+    WHERE pg.label = $1
     """,
 }
 
 _PROTEIN_ALL_QUERIES: dict[str, str] = {
     "channel": """
     SELECT gr AS run_file_name,
-           CAST(i.channel AS VARCHAR) AS intensity_label,
+           CAST(pg.label AS VARCHAR) AS intensity_label,
            pg.anchor_protein,
-           i.intensity
+           pg.intensity AS intensity
     FROM pg,
-         UNNEST(pg.grouped_runs) AS _g(gr),
-         UNNEST(pg.intensities) AS _t(i)
-    WHERE i.channel IS NOT NULL
+         UNNEST(list_distinct(pg.grouped_runs)) AS _g(gr)
+    WHERE pg.label IS NOT NULL
     """,
     "label": """
     SELECT gr AS run_file_name,
-           CAST(i.label AS VARCHAR) AS intensity_label,
+           CAST(pg.label AS VARCHAR) AS intensity_label,
            pg.anchor_protein,
-           i.intensity
+           pg.intensity AS intensity
     FROM pg,
-         UNNEST(pg.grouped_runs) AS _g(gr),
-         UNNEST(pg.intensities) AS _t(i)
-    WHERE i.label IS NOT NULL
+         UNNEST(list_distinct(pg.grouped_runs)) AS _g(gr)
+    WHERE pg.label IS NOT NULL
     """,
 }
 
 
 _TYPEOF_QUERIES: dict[str, str] = {
     "feature": "SELECT typeof(intensities) FROM feature LIMIT 1",
-    "pg": "SELECT typeof(intensities) FROM pg LIMIT 1",
+    "pg": "SELECT typeof(label) FROM pg LIMIT 1",
 }
 
 
@@ -275,7 +280,7 @@ def _load_run_obs(
     labels_by_stem: dict[str, set[str]] = {}
     for record in df.to_dict("records"):
         run_name = str(record["run_file_name"])
-        stem = PurePosixPath(run_name).stem
+        stem = run_file_stem(run_name)
         label = str(record["label"])
         exact.setdefault((run_name, label), record)
         stem_exact.setdefault((stem, label), record)
@@ -287,7 +292,7 @@ def _load_run_obs(
     rows: list[dict] = []
     for _, key in observation_keys.iterrows():
         run_name = str(key["run_file_name"])
-        stem = PurePosixPath(run_name).stem
+        stem = run_file_stem(run_name)
         label = str(key["intensity_label"])
         record = exact.get((run_name, label))
         if record is None:

@@ -20,6 +20,7 @@ import duckdb
 import pandas as pd
 
 from qpx.converters.base import resolve_columns
+from qpx.converters.channel_labels import experiment_runs_from_sdrf
 from qpx.converters.mappings import get_field_mappings
 from qpx.converters.maxquant.base_adapter import MaxQuantBaseAdapter
 from qpx.converters.maxquant.constants import TMT_LABEL_TO_MQ_COL
@@ -48,6 +49,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._experiment_to_runs: dict[str, list[str]] = {}
+        self._sdrf_experiment_to_runs: dict[str, list[str]] | None = None
 
     def convert(
         self,
@@ -68,14 +70,17 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
                 map each MaxQuant *Experiment* (the token that names the intensity
                 columns in ``proteinGroups.txt``) to its member *Raw file* names,
                 so ``grouped_runs`` holds real ``run_file_name`` values. When it is
-                absent, ``grouped_runs`` falls back to the single experiment token,
-                which only matches ``run.parquet`` when Experiment == raw-file name
-                (i.e. no fraction/replicate grouping).
+                absent, the SDRF (``sdrf_path``) is used as a fallback to map each
+                Experiment (matched to a ``source name``) to its raw files. If
+                neither evidence.txt nor the SDRF resolves an Experiment, conversion
+                raises rather than emitting a dangling experiment token.
             chunksize: Rows per batch.
             creator: Creator tag in Parquet metadata.
         """
-        # Step 0: Build Experiment -> [run_file_name] mapping from evidence.txt.
+        # Step 0: Build Experiment -> [run_file_name] mapping from evidence.txt,
+        # with the SDRF source-name grouping as a fallback source.
         self._experiment_to_runs = self._build_experiment_to_runs(evidence_path)
+        self._sdrf_experiment_to_runs = experiment_runs_from_sdrf(sdrf_path)
 
         # Step 1: Load proteinGroups.txt into DuckDB
         self._load_protein_groups(protein_groups_path)
@@ -94,6 +99,19 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
 
         # Step 4: Detect intensity columns in the data
         intensity_cols = self._detect_intensity_columns(experiment_type)
+        self._validate_experiment_run_mappings(intensity_cols)
+
+        # Step 4b: Require every detected Experiment to resolve to raw files
+        # (evidence.txt first, then SDRF) — fail early with the full list rather
+        # than letting the per-row guard silently drop unmapped protein groups.
+        missing = sorted(exp for exp in self._detect_experiments(intensity_cols) if self._lookup_runs(exp) is None)
+        if missing:
+            raise ValueError(
+                "Cannot build grouped_runs for MaxQuant Experiment(s) "
+                + ", ".join(repr(m) for m in missing)
+                + ": no Experiment->runs mapping. Provide evidence.txt (evidence_path) "
+                "or an SDRF (sdrf_path) whose 'source name' matches the Experiment(s)."
+            )
 
         # Step 5: Stream and transform
         self.logger.info("Transforming MaxQuant protein groups ...")
@@ -106,7 +124,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
                     self._track_scores(records)
                     writer.write_batch(records)
 
-        self.logger.info(f"MaxQuant PG conversion complete -> {output_path}")
+        self.logger.info("MaxQuant PG conversion complete -> %s", output_path)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -120,7 +138,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
             [path],
         )
         count = self._conn.execute("SELECT COUNT(*) FROM protein_groups").fetchone()[0]
-        self.logger.info(f"Loaded {count:,} MaxQuant protein groups")
+        self.logger.info("Loaded %s MaxQuant protein groups", f"{count:,}")
 
     def _build_experiment_to_runs(self, evidence_path: Optional[str]) -> dict[str, list[str]]:
         """Map each MaxQuant *Experiment* to its member *Raw file* names.
@@ -133,8 +151,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
         files to survive the sample join.
 
         Returns an empty dict when *evidence_path* is ``None`` or lacks the
-        required columns, in which case callers fall back to the bare Experiment
-        token.
+        required columns, in which case callers try the SDRF mapping.
         """
         if not evidence_path:
             return {}
@@ -150,8 +167,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
             ).fetchall()
         except duckdb.Error:
             self.logger.warning(
-                "Could not read Experiment/Raw file from evidence.txt; pg.grouped_runs "
-                "will fall back to per-experiment tokens (not real run file names)",
+                "Could not read Experiment/Raw file from evidence.txt; trying the SDRF mapping",
                 exc_info=True,
             )
             return {}
@@ -168,12 +184,52 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
         self.logger.info("Mapped %d MaxQuant experiment(s) to raw files", len(mapping))
         return mapping
 
+    def _lookup_runs(self, experiment: str) -> list[str] | None:
+        """Resolve an Experiment token to its member run files, or ``None``.
+
+        evidence.txt mapping first, then the SDRF ``source name`` fallback.
+        Non-raising — used by the upfront validation to collect the full set of
+        unresolved experiments before any output is written.
+        """
+        runs = self._experiment_to_runs.get(experiment)
+        if runs:
+            return runs
+        if self._sdrf_experiment_to_runs:
+            runs = self._sdrf_experiment_to_runs.get(experiment)
+            if runs:
+                return runs
+        return None
+
     def _runs_for(self, experiment: str) -> list[str]:
         """Expand an Experiment token to its member run files.
 
-        Falls back to ``[experiment]`` when no evidence mapping is available.
+        evidence.txt mapping first, then the SDRF ``source name`` fallback; raises
+        when neither resolves the experiment (no dangling experiment token).
         """
-        return self._experiment_to_runs.get(experiment) or [experiment]
+        runs = self._lookup_runs(experiment)
+        if runs is not None:
+            return runs
+        raise ValueError(
+            f"Cannot build grouped_runs for MaxQuant Experiment {experiment!r}: no "
+            "Experiment->runs mapping. Provide evidence.txt (evidence_path) or an SDRF "
+            "(sdrf_path) whose 'source name' matches the Experiment."
+        )
+
+    def _detect_experiments(self, intensity_cols: dict[str, list[str]]) -> set[str]:
+        """The Experiment tokens embedded in the detected intensity columns.
+
+        TMT/iTRAQ: ``Reporter intensity N <exp>``; LFQ: ``Intensity <exp>``. This
+        is the set every emitted pg row will need a ``grouped_runs`` mapping for.
+        """
+        reporter_cols = intensity_cols.get("reporter", [])
+        if reporter_cols:
+            experiments = set()
+            for col in reporter_cols:
+                m = re.match(r"Reporter intensity \d+ (.+)", col)
+                if m:
+                    experiments.add(m.group(1))
+            return experiments
+        return {col.removeprefix("Intensity ") for col in intensity_cols.get("intensity", [])}
 
     def _detect_intensity_columns(self, experiment_type: str) -> dict[str, list[str]]:
         """Detect sample-specific intensity columns in proteinGroups.txt."""
@@ -200,6 +256,21 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
             "reporter": reporter_cols,
         }
 
+    def _validate_experiment_run_mappings(self, intensity_cols: dict[str, list[str]]) -> None:
+        """Fail before writing when an intensity experiment cannot resolve to runs."""
+        experiments = {column.removeprefix("Intensity ") for column in intensity_cols.get("intensity", [])}
+        for column in intensity_cols.get("reporter", []):
+            match = re.match(r"Reporter intensity \d+ (.+)", column)
+            if match:
+                experiments.add(match.group(1))
+        if not experiments:
+            raise ValueError(
+                "proteinGroups.txt has no per-experiment intensity columns; "
+                "the total Intensity cannot be assigned to grouped_runs"
+            )
+        for experiment in sorted(experiments):
+            self._runs_for(experiment)
+
     # ------------------------------------------------------------------
     # Transform
     # ------------------------------------------------------------------
@@ -211,22 +282,9 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
         tmt_channels: list[str] | None = None,
     ) -> list[dict]:
         records: list[dict] = []
-        skipped = 0
         for row in df.to_dict("records"):
-            try:
-                recs = self._transform_row(row, intensity_cols, tmt_channels or [])
-                records.extend(recs)
-            except Exception as e:
-                skipped += 1
-                self.logger.debug(f"Skipping MaxQuant PG row: {e}")
-        if skipped:
-            total = skipped + len(records)
-            self.logger.warning(
-                "Skipped %d / %d rows (%.1f%%) in batch",
-                skipped,
-                total,
-                100 * skipped / total if total else 0,
-            )
+            recs = self._transform_row(row, intensity_cols, tmt_channels or [])
+            records.extend(recs)
         return records
 
     @staticmethod
@@ -407,18 +465,6 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
                         self._runs_for(run_name),
                         [{"label": "LFQ", "intensity": float(intensity_val)}],
                         add_int,
-                    )
-                )
-
-        # If no per-sample intensity columns, emit one record with total Intensity
-        if not records:
-            total_intensity = safe_float(row.get(r.get("intensity", "Intensity"))) or 0.0
-            if total_intensity > 0:
-                records.append(
-                    _make_rec(
-                        ["unknown"],
-                        [{"label": "LFQ", "intensity": float(total_intensity)}],
-                        [],
                     )
                 )
 

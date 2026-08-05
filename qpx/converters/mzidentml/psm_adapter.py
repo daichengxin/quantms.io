@@ -11,7 +11,6 @@ from __future__ import annotations
 import gzip
 import logging
 import re
-from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -33,6 +32,8 @@ from qpx.core.cv_terms import (
     SITE_LOCALIZATION_ACCESSIONS,
     SKIP_SCORE_ACCESSIONS,
 )
+from qpx.core.data.identity import derive_id
+from qpx.core.files import run_file_stem
 from qpx.core.scores import is_higher_better, normalize_score_name
 from qpx.writers.psm import PsmWriter
 
@@ -106,7 +107,7 @@ class MzIdentMLPsmAdapter(BaseConverter):
         for sd in root.iter(f"{{{ns}}}SpectraData"):
             sd_id = sd.get("id")
             location = sd.get("location", "")
-            stem = Path(location.replace("file:///", "").replace("file://", "")).stem
+            stem = run_file_stem(location)
             result[sd_id] = stem
         return result
 
@@ -429,7 +430,7 @@ class MzIdentMLPsmAdapter(BaseConverter):
                 break
 
         # Build cv_params from rank, pass_threshold, and PeptideEvidence positional info
-        cv_params = []
+        psm_id, cv_params = _source_sii_identity(run_file, alpha_sii, beta_sii)
         rank = alpha_sii.get("rank", 1)
         pass_threshold = alpha_sii.get("pass_threshold", True)
         if rank > 1:
@@ -455,6 +456,7 @@ class MzIdentMLPsmAdapter(BaseConverter):
             break  # Use first PeptideEvidence for positional info
 
         record = {
+            "psm_id": psm_id,
             "sequence": sequence,
             "peptidoform": peptidoform,
             "modifications": modifications,
@@ -633,6 +635,23 @@ def _build_peptidoform(sequence: str, modifications: list[dict] | None) -> str:
             mods.append((position, tag))
 
     return build_proforma(sequence, mods)
+
+
+def _source_sii_identity(run_file: str, alpha_sii: dict, beta_sii: dict | None) -> tuple[int, list[dict]]:
+    """Map one mzIdentML SII group to a stable QPX PSM id and trace fields."""
+    source_ids = [alpha_sii["id"]]
+    if beta_sii is not None:
+        source_ids.append(beta_sii["id"])
+    if any(not source_id for source_id in source_ids):
+        raise ValueError("SpectrumIdentificationItem is missing its required id")
+    cv_params = [
+        {
+            "cv_name": "mzidentml_spectrum_identification_item_id",
+            "cv_value": source_id,
+        }
+        for source_id in source_ids
+    ]
+    return derive_id([run_file, source_ids]), cv_params
 
 
 def _parse_scan(spectrum_id: str) -> list[int]:

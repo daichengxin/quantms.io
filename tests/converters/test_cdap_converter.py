@@ -182,11 +182,11 @@ class TestCdapPgConversion:
             assert isinstance(ap, str) and len(ap) > 0
 
     def test_intensities_nonnegative(self, pg_table):
-        for row_ints in pg_table.column("intensities").to_pylist():
-            if row_ints is None:
+        # pg is flattened since 1.1: scalar intensity column (one row per label).
+        for intensity in pg_table.column("intensity").to_pylist():
+            if intensity is None:
                 continue
-            for entry in row_ints:
-                assert entry["intensity"] >= 0, f"Negative intensity: {entry}"
+            assert intensity >= 0, f"Negative intensity: {intensity}"
 
     def test_pg_accessions_contain_anchor(self, pg_table):
         """The anchor protein must appear in pg_accessions."""

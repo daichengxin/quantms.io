@@ -4,7 +4,9 @@ CDAP only emits PSM-level files; quantitative features are derived by rolling
 up PSMs that share ``(peptidoform, charge, run_file_name)``.  Reporter-ion
 intensities are summed per channel across the contributing PSMs; representative
 fields (m/z, RT, scan, scores) come from the best PSM (lowest spectral
-``Evalue``).
+``Evalue``).  Ambiguous top-ranked identifications remain available in
+``psm.parquet`` but are excluded from feature quantification because one MS2
+reporter signal cannot be assigned independently to multiple peptide matches.
 
 For LFQ studies (no reporter channels) the ``PrecursorArea`` column from the
 best PSM is emitted as a single intensity entry with label ``"LFQ"`` so
@@ -25,6 +27,12 @@ from qpx.converters.ptm import compute_precursor_mz
 from qpx.writers.feature import FeatureWriter
 
 _FEATURE_MAP = get_field_mappings("cdap", "feature")
+
+# Producer-specific feature identity composite (bigbio/qpx#229). CDAP reports one
+# feature per precursor per run, so the measured key is just peptidoform + charge +
+# run (all in feature.yaml). Passed to FeatureWriter so feature_id hashes exactly
+# these columns instead of the schema default.
+_FEATURE_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name")
 
 # Reporter-ion meta column suffixes (per channel prefix) skipped during the
 # channel auto-detection.  Channels of interest end with the reporter-ion m/z
@@ -73,7 +81,12 @@ class CdapFeatureAdapter(CdapBaseAdapter):
         agg_sql = self._build_aggregation_sql(actual_cols, channel_cols)
 
         self.logger.info("Transforming CDAP features ...")
-        with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
+        with FeatureWriter(
+            output_path,
+            creator=creator,
+            compression=self._compression,
+            identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+        ) as writer:
             self._stream_transform_write(agg_sql, writer, chunksize)
 
         self.logger.info("CDAP feature conversion complete -> %s", output_path)
@@ -149,12 +162,18 @@ class CdapFeatureAdapter(CdapBaseAdapter):
 
         typed_block = ",\n                ".join(typed_cols)
         agg_block = ",\n            ".join(agg_cols)
+        ambiguous_filter = ""
+        if "AmbiguousMatch" in actual_cols:
+            ambiguous_filter = (
+                "AND COALESCE(lower(trim(CAST(\"AmbiguousMatch\" AS VARCHAR))), '') NOT IN ('1', 'true', 't', 'y', 'yes')\n"
+            )
         return (
             f"WITH typed AS (\n"
             f"    SELECT\n                {typed_block}\n"
             f"    FROM psm\n"
             f'    WHERE "PeptideSequence" IS NOT NULL '
             f'AND "QueryCharge" IS NOT NULL\n'
+            f"    {ambiguous_filter}"
             f")\n"
             f"SELECT\n            {agg_block}\n"
             f"FROM typed\n"

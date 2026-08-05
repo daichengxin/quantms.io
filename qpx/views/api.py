@@ -18,27 +18,26 @@ class ProteinView(BaseView):
     def intensity(self, q_value_threshold: float = 0.01) -> QueryResult:
         q_value_threshold = float(q_value_threshold)
         sql = """
-        WITH numbered_pg AS (
+        WITH numbered_pg AS MATERIALIZED (
             SELECT ROW_NUMBER() OVER () AS pg_row_id, *
             FROM pg
         ),
         pg_samples AS (
             SELECT DISTINCT p.pg_row_id, rs.sample_accession, rs.label
             FROM numbered_pg p
-            CROSS JOIN UNNEST(p.grouped_runs) AS _g(run_file_name)
+            CROSS JOIN UNNEST(list_distinct(p.grouped_runs)) AS _g(run_file_name)
             JOIN run r USING (run_file_name)
             CROSS JOIN UNNEST(r.samples) AS _s(rs)
         )
         SELECT p.anchor_protein AS protein_accession,
                ps.sample_accession,
-               i.label,
-               i.intensity,
+               p.label,
+               p.intensity,
                p.global_qvalue,
                p.gg_names AS gene_names
         FROM numbered_pg p
         JOIN pg_samples ps USING (pg_row_id)
-        CROSS JOIN UNNEST(p.intensities) AS _i(i)
-        WHERE i.label = ps.label
+        WHERE p.label = ps.label
           AND (p.global_qvalue IS NULL OR p.global_qvalue <= $1)
         """
         return QueryResult(self._engine.execute(sql, [q_value_threshold]))

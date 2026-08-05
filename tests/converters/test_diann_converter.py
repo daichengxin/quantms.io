@@ -300,11 +300,12 @@ def test_plexdia_pg_preserves_each_channel_quantity(tmp_path):
             sdrf_path=str(sdrf_path),
         )
 
+    # pg is flattened since 1.1: each channel is its own row (one row per label).
     rows = pq.read_table(output_path).to_pylist()
-    assert len(rows) == 1
-    assert rows[0]["grouped_runs"] == ["run_A"]
-    assert {entry["label"]: entry["intensity"] for entry in rows[0]["intensities"]} == {"L": 1000.0, "H": 2000.0}
-    assert {entry["label"]: entry["intensities"][0]["intensity_value"] for entry in rows[0]["additional_intensities"]} == {
+    assert len(rows) == 2
+    assert all(row["grouped_runs"] == ["run_A"] for row in rows)
+    assert {row["label"]: row["intensity"] for row in rows} == {"L": 1000.0, "H": 2000.0}
+    assert {row["label"]: row["additional_intensities"][0]["intensities"][0]["intensity_value"] for row in rows} == {
         "L": 900.0,
         "H": 1800.0,
     }
@@ -357,7 +358,8 @@ def test_diann_maxlfq_fallback_keeps_experimental_label(tmp_path):
         )
 
     row = pq.read_table(output_path).to_pylist()[0]
-    assert row["intensities"] == [{"label": "LFQ", "intensity": 700.0}]
+    assert row["label"] == "LFQ"
+    assert row["intensity"] == 700.0
     assert row["additional_intensities"] is None
 
 

@@ -34,12 +34,14 @@ def _write_input(tmp_path):
 
 
 def _grouped_runs_by_intensity(table):
-    """Return {total_intensity: grouped_runs} so records are identifiable per experiment."""
+    """Return {intensity: grouped_runs} so records are identifiable per experiment.
+
+    pg is flattened since 1.1: scalar ``intensity`` column, one row per label.
+    """
     df = table.to_pandas()
     out = {}
     for _, row in df.iterrows():
-        total = float(row["intensities"][0]["intensity"])
-        out[total] = list(row["grouped_runs"])
+        out[float(row["intensity"])] = list(row["grouped_runs"])
     return out
 
 
@@ -61,21 +63,37 @@ def test_grouped_runs_expand_to_member_run_files(tmp_path):
     assert grouped[2000.0] == ["run_C"]
 
 
-def test_grouped_runs_fallback_to_experiment_token(tmp_path):
-    """Without a mapping, grouped_runs falls back to the single experiment token."""
+def test_no_mapping_raises_instead_of_dangling_token(tmp_path):
+    """With no results mapping and no SDRF, conversion raises rather than emitting
+    a dangling [experiment] token (bigbio/qpx#220 review item #5)."""
+    import pytest
+
     protein_path = _write_input(tmp_path)
+    out_path = tmp_path / "fragpipe.pg.parquet"
+
+    with FragPipePgAdapter() as adapter:
+        with pytest.raises(ValueError, match="grouped_runs.*experiment|experiment.*mapping"):
+            adapter.convert(protein_path=str(protein_path), output_path=str(out_path))
+
+
+def test_sdrf_fallback_maps_experiment_to_runs(tmp_path):
+    """When no experiment_annotation is given, the SDRF 'source name' grouping is
+    the fallback: each experiment resolves to that sample's raw files."""
+    protein_path = _write_input(tmp_path)
+    sdrf_path = tmp_path / "test.sdrf.tsv"
+    sdrf_path.write_text("source name\tcomment[data file]\nexp1\trun_A1.raw\nexp1\trun_A2.raw\nexp2\trun_B1.raw\n")
     out_path = tmp_path / "fragpipe.pg.parquet"
 
     with FragPipePgAdapter() as adapter:
         adapter.convert(
             protein_path=str(protein_path),
             output_path=str(out_path),
+            sdrf_path=str(sdrf_path),
         )
 
-    table = pq.read_table(str(out_path))
-    grouped = _grouped_runs_by_intensity(table)
-    assert grouped[1000.0] == ["exp1"]
-    assert grouped[2000.0] == ["exp2"]
+    grouped = _grouped_runs_by_intensity(pq.read_table(str(out_path)))
+    assert grouped[1000.0] == ["run_A1", "run_A2"]
+    assert grouped[2000.0] == ["run_B1"]
 
 
 def test_experiment_annotation_expands_and_normalizes_member_runs(tmp_path):

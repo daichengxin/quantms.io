@@ -16,6 +16,7 @@ import logging
 import pandas as pd
 
 from qpx.converters.base import BaseConverter, resolve_columns
+from qpx.converters.channel_labels import experiment_runs_from_sdrf
 from qpx.converters.mappings import get_field_mappings
 from qpx.converters.utils import safe_float
 from qpx.core.sql import escape_path, sql_build
@@ -43,6 +44,7 @@ class FragPipePgAdapter(BaseConverter):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._experiment_to_runs: dict[str, list[str]] = {}
+        self._sdrf_experiment_to_runs: dict[str, list[str]] | None = None
 
     def convert(
         self,
@@ -52,6 +54,7 @@ class FragPipePgAdapter(BaseConverter):
         creator: str = "fragpipe",
         experiment_to_runs: dict[str, list[str]] | None = None,
         experiment_annotation_path: str | None = None,
+        sdrf_path: str | None = None,
     ) -> None:
         """Run the combined_protein.tsv -> pg.parquet conversion.
 
@@ -72,6 +75,13 @@ class FragPipePgAdapter(BaseConverter):
             experiment_annotation_path: Optional FragPipe
                 ``experiment_annotation.tsv``. Its ``sample`` column names the
                 experiment and ``file`` lists the member raw files.
+            sdrf_path: Optional SDRF, used as the *fallback* source for
+                ``grouped_runs`` when a FragPipe experiment has no
+                ``experiment_annotation.tsv`` / ``experiment_to_runs`` mapping: the
+                experiment is matched to a ``source name`` and grouped_runs becomes
+                that sample's raw files. If neither the results mapping nor the
+                SDRF resolves an experiment, conversion raises rather than emitting
+                a dangling experiment token.
         """
         if experiment_to_runs is not None and experiment_annotation_path is not None:
             raise ValueError("Provide either experiment_to_runs or experiment_annotation_path, not both")
@@ -79,6 +89,7 @@ class FragPipePgAdapter(BaseConverter):
             self._experiment_to_runs = self._load_experiment_annotation(experiment_annotation_path)
         else:
             self._experiment_to_runs = self._normalize_experiment_mapping(experiment_to_runs or {})
+        self._sdrf_experiment_to_runs = experiment_runs_from_sdrf(sdrf_path)
 
         # Step 1: Load protein file into DuckDB
         self._load_protein_file(protein_path)
@@ -92,12 +103,19 @@ class FragPipePgAdapter(BaseConverter):
         }
         self._resolved = resolve_columns(_PG_MAP, actual_cols)
 
-        # Step 3: Detect per-experiment intensity columns
+        # Step 3: Detect per-experiment intensity columns and require every one to
+        # resolve to raw files (results mapping first, then SDRF) — fail early with
+        # the full list rather than emitting a dangling experiment token.
         experiment_cols = self._detect_experiment_columns()
-        if self._experiment_to_runs:
-            missing = sorted(set(experiment_cols) - self._experiment_to_runs.keys())
-            if missing:
-                raise ValueError("No raw-file mapping for FragPipe experiment(s): " + ", ".join(missing))
+        missing = sorted(exp for exp in experiment_cols if self._lookup_grouped_runs(exp) is None)
+        if missing:
+            raise ValueError(
+                "Cannot build grouped_runs for FragPipe experiment(s) "
+                + ", ".join(missing)
+                + ": no experiment->runs mapping. Provide experiment_annotation.tsv "
+                "(experiment_annotation_path), an explicit experiment_to_runs mapping, "
+                "or an SDRF (sdrf_path) whose 'source name' matches the experiment(s)."
+            )
 
         # Step 4: Stream and transform
         self.logger.info("Transforming FragPipe protein groups ...")
@@ -115,6 +133,33 @@ class FragPipePgAdapter(BaseConverter):
     # ------------------------------------------------------------------
     # Data loading
     # ------------------------------------------------------------------
+
+    def _lookup_grouped_runs(self, experiment: str) -> list[str] | None:
+        """Resolve an experiment to its raw files, or None if unmapped.
+
+        Results mapping (experiment_annotation.tsv / experiment_to_runs) first,
+        then the SDRF ``source name`` fallback. No dangling experiment token.
+        """
+        runs = self._experiment_to_runs.get(experiment)
+        if runs:
+            return runs
+        if self._sdrf_experiment_to_runs:
+            runs = self._sdrf_experiment_to_runs.get(experiment)
+            if runs:
+                return runs
+        return None
+
+    def _resolve_grouped_runs(self, experiment: str) -> list[str]:
+        """Like :meth:`_lookup_grouped_runs` but raises when unmapped."""
+        runs = self._lookup_grouped_runs(experiment)
+        if runs is None:
+            raise ValueError(
+                f"Cannot build grouped_runs for FragPipe experiment {experiment!r}: no "
+                "experiment->runs mapping. Provide experiment_annotation.tsv, an explicit "
+                "experiment_to_runs mapping, or an SDRF (sdrf_path) whose 'source name' "
+                "matches the experiment."
+            )
+        return runs
 
     @staticmethod
     def _normalize_run_name(value: str) -> str:
@@ -323,13 +368,10 @@ class FragPipePgAdapter(BaseConverter):
                 "gg_names": gg_accessions,  # Gene symbols serve as both accession and name
                 "gg_qvalue": None,
                 "anchor_protein": anchor_protein,
-                # Expand the FragPipe experiment to its member run files; the
-                # tool-reported per-experiment intensity is kept as-is (FragPipe
-                # already aggregated across the experiment's fractions).
-                "grouped_runs": self._experiment_to_runs.get(
-                    experiment,
-                    [experiment],
-                ),
+                # Expand the FragPipe experiment to its member run files (results
+                # mapping, else SDRF); the tool-reported per-experiment intensity
+                # is kept as-is (FragPipe already aggregated across the fractions).
+                "grouped_runs": self._resolve_grouped_runs(experiment),
                 "global_qvalue": None,
                 "pg_qvalue": pg_qvalue,
                 "intensities": intensities,

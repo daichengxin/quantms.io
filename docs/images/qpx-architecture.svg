@@ -21,8 +21,8 @@
   <text x="80" y="142" font-size="13" font-weight="600" fill="#94a3b8" letter-spacing="2">INPUT FORMATS</text>
 
   <rect x="80" y="158" width="195" height="72" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" filter="url(#s)"/>
-  <text x="177" y="191" text-anchor="middle" font-size="17" font-weight="700" fill="#2563eb">quantms</text>
-  <text x="177" y="212" text-anchor="middle" font-size="12" fill="#64748b">mzTab + MSstats</text>
+  <text x="177" y="191" text-anchor="middle" font-size="17" font-weight="700" fill="#2563eb">OpenMS</text>
+  <text x="177" y="212" text-anchor="middle" font-size="12" fill="#64748b">consensusXML / QPX</text>
 
   <rect x="295" y="158" width="195" height="72" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" filter="url(#s)"/>
   <text x="392" y="191" text-anchor="middle" font-size="17" font-weight="700" fill="#2563eb">DIA-NN</text>

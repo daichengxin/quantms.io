@@ -192,6 +192,27 @@ def test_yaml_loader_and_nested_types():
     assert extended.field("organism").type == pa.string()
 
 
+def test_schema_mirrors_are_byte_identical():
+    """The runtime schemas (qpx/core/data/schemas) and the published spec mirror
+    (docs/spec/schemas) MUST stay byte-identical. They have silently drifted
+    before (bigbio/qpx#220 review); this guards against re-drift so the docs
+    always describe exactly what the library enforces."""
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    runtime = repo / "qpx" / "core" / "data" / "schemas"
+    mirror = repo / "docs" / "spec" / "schemas"
+    runtime_files = {p.name for p in runtime.glob("*.yaml")}
+    mirror_files = {p.name for p in mirror.glob("*.yaml")}
+    assert runtime_files == mirror_files, (
+        f"schema file sets differ: only in runtime={runtime_files - mirror_files}, only in mirror={mirror_files - runtime_files}"
+    )
+    drifted = [name for name in sorted(runtime_files) if (runtime / name).read_bytes() != (mirror / name).read_bytes()]
+    assert not drifted, (
+        f"schema mirror drift in {drifted}: qpx/core/data/schemas and docs/spec/schemas must be byte-identical — sync them."
+    )
+
+
 def test_run_schema_acquisition_fields():
     """WS4: run schema exposes acquisition_method and additional_terms."""
     schema = RunSchema.get_arrow_schema()

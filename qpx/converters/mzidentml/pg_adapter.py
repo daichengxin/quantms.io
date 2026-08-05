@@ -17,6 +17,7 @@ except ImportError:
     etree: Any = None
 
 from qpx.converters.base import BaseConverter
+from qpx.core.files import run_file_stem
 from qpx.core.scores import normalize_score_name
 from qpx.writers.pg import PgWriter
 
@@ -25,8 +26,7 @@ logger = logging.getLogger(__name__)
 # CV accession constants
 _CV_GROUP_REPRESENTATIVE = "MS:1002403"
 _CV_LEADING_PROTEIN = "MS:1002401"
-_CV_DISTINCT_PEPTIDES = "MS:1001097"
-_CV_PROTEIN_FDR = "MS:1001364"
+_CV_PROTEIN_GROUP_QVALUE = "MS:1002373"
 
 _DECOY_PREFIXES = ("rev_", "DECOY_", "decoy_")
 
@@ -50,12 +50,13 @@ class MzIdentMLPgAdapter(BaseConverter):
         if etree is None:
             raise ImportError("lxml is required for mzIdentML conversion. Install it with: pip install qpx[mzidentml]")
         mzid_path = Path(mzid_path)
-        run_file_name = mzid_path.name.replace(".mzid.gz", "").replace(".mzid", "")
+        fallback_run = mzid_path.name.replace(".mzid.gz", "").replace(".mzid", "")
 
         root, ns = self._parse_xml(mzid_path)
         dbseq_map = self._build_dbseq_map(root, ns)
+        grouped_runs_by_list, fallback_runs = self._build_grouped_runs(root, ns, fallback_run)
 
-        records = list(self._iter_protein_groups(root, ns, dbseq_map, run_file_name))
+        records = list(self._iter_protein_groups(root, ns, dbseq_map, grouped_runs_by_list, fallback_runs))
 
         if not records:
             logger.warning("No protein group records produced from %s", mzid_path)
@@ -87,20 +88,111 @@ class MzIdentMLPgAdapter(BaseConverter):
         """Build id → accession lookup from DBSequence elements."""
         return {d.get("id"): d.get("accession", d.get("id")) for d in root.iter(f"{{{ns}}}DBSequence")}
 
+    @staticmethod
+    def _ordered_unique(values: list[str]) -> list[str]:
+        """Return non-empty values once, preserving document order."""
+        return list(dict.fromkeys(value for value in values if value))
+
+    @classmethod
+    def _build_grouped_runs(
+        cls,
+        root,
+        ns: str,
+        fallback_run: str,
+    ) -> tuple[dict[str, list[str]], list[str]]:
+        """Resolve each ProteinDetectionList to its contributing spectra runs."""
+        spectra_data = {
+            element.get("id"): run_file_stem(element.get("location", ""))
+            for element in root.iter(f"{{{ns}}}SpectraData")
+            if element.get("id")
+        }
+        fallback_runs = cls._ordered_unique(list(spectra_data.values())) or [fallback_run]
+
+        runs_by_identification_list: dict[str, list[str]] = {}
+        for identification in root.iter(f"{{{ns}}}SpectrumIdentification"):
+            list_ref = identification.get("spectrumIdentificationList_ref")
+            if not list_ref:
+                continue
+            runs = list(runs_by_identification_list.get(list_ref, []))
+            runs.extend(
+                spectra_data.get(input_spectra.get("spectraData_ref"), "")
+                for input_spectra in identification.findall(f"{{{ns}}}InputSpectra")
+            )
+            runs_by_identification_list[list_ref] = cls._ordered_unique(runs)
+
+        # Some producers omit AnalysisCollection/InputSpectra.  The result-level
+        # spectraData_ref is the authoritative fallback for those files.
+        for identification_list in root.iter(f"{{{ns}}}SpectrumIdentificationList"):
+            list_id = identification_list.get("id")
+            if not list_id:
+                continue
+            runs = list(runs_by_identification_list.get(list_id, []))
+            runs.extend(
+                spectra_data.get(result.get("spectraData_ref"), "")
+                for result in identification_list.iter(f"{{{ns}}}SpectrumIdentificationResult")
+            )
+            runs_by_identification_list[list_id] = cls._ordered_unique(runs)
+
+        runs_by_protein_list: dict[str, list[str]] = {}
+        for detection in root.iter(f"{{{ns}}}ProteinDetection"):
+            protein_list_ref = detection.get("proteinDetectionList_ref")
+            if not protein_list_ref:
+                continue
+            runs: list[str] = []
+            for input_ids in detection.findall(f"{{{ns}}}InputSpectrumIdentifications"):
+                runs.extend(runs_by_identification_list.get(input_ids.get("spectrumIdentificationList_ref", ""), []))
+            resolved = cls._ordered_unique(runs)
+            if resolved:
+                runs_by_protein_list[protein_list_ref] = resolved
+
+        return runs_by_protein_list, fallback_runs
+
     def _iter_protein_groups(
         self,
         root,
         ns: str,
         dbseq_map: dict[str, str],
-        run_file_name: str,
+        grouped_runs_by_list: dict[str, list[str]],
+        fallback_runs: list[str],
     ):
         """Yield one pg record dict per ProteinAmbiguityGroup."""
-        for pag in root.iter(f"{{{ns}}}ProteinAmbiguityGroup"):
-            record = self._build_pag_record(pag, ns, dbseq_map, run_file_name)
-            if record is not None:
-                yield record
+        for protein_list in root.iter(f"{{{ns}}}ProteinDetectionList"):
+            grouped_runs = grouped_runs_by_list.get(protein_list.get("id", ""), fallback_runs)
+            for pag in protein_list.findall(f"{{{ns}}}ProteinAmbiguityGroup"):
+                record = self._build_pag_record(pag, ns, dbseq_map, grouped_runs)
+                if record is not None:
+                    yield record
 
-    def _build_pag_record(self, pag, ns: str, dbseq_map: dict[str, str], run_file_name: str) -> dict | None:
+    @staticmethod
+    def _float_value(value: str | None) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _extract_pag_scores(cls, pag, ns: str) -> tuple[float | None, list[dict]]:
+        """Separate group-level q-value from other PAG scores."""
+        global_qvalue: float | None = None
+        additional_scores: list[dict] = []
+        for cv in pag.findall(f"{{{ns}}}cvParam"):
+            cv_acc = cv.get("accession", "")
+            score_val = cls._float_value(cv.get("value"))
+            if score_val is None:
+                continue
+            if cv_acc == _CV_PROTEIN_GROUP_QVALUE:
+                global_qvalue = score_val
+                continue
+            additional_scores.append(
+                {
+                    "score_name": normalize_score_name(cv.get("name", "") or cv_acc),
+                    "score_value": score_val,
+                    "higher_better": None,
+                }
+            )
+        return global_qvalue, additional_scores
+
+    def _build_pag_record(self, pag, ns: str, dbseq_map: dict[str, str], grouped_runs: list[str]) -> dict | None:
         """Build a single pg record from a ProteinAmbiguityGroup element."""
         pdhs = pag.findall(f"{{{ns}}}ProteinDetectionHypothesis")
         if not pdhs:
@@ -109,8 +201,7 @@ class MzIdentMLPgAdapter(BaseConverter):
         pg_accessions: list[str] = []
         anchor_protein: str | None = None
         peptides: list[dict] = []
-        pg_qvalue: float | None = None
-        additional_scores: list[dict] = []
+        global_qvalue, additional_scores = self._extract_pag_scores(pag, ns)
 
         for pdh in pdhs:
             acc = dbseq_map.get(pdh.get("dBSequence_ref", ""), pdh.get("dBSequence_ref", ""))
@@ -131,14 +222,9 @@ class MzIdentMLPgAdapter(BaseConverter):
                 if cv_acc in (_CV_GROUP_REPRESENTATIVE, _CV_LEADING_PROTEIN):
                     if anchor_protein is None:
                         anchor_protein = acc
-                elif cv_acc == _CV_PROTEIN_FDR:
-                    try:
-                        pg_qvalue = float(cv_val)
-                    except (TypeError, ValueError):
-                        pass
-                elif cv_val is not None:
-                    try:
-                        score_val = float(cv_val)
+                else:
+                    score_val = self._float_value(cv_val)
+                    if score_val is not None:
                         additional_scores.append(
                             {
                                 "score_name": normalize_score_name(cv_name or cv_acc),
@@ -146,8 +232,6 @@ class MzIdentMLPgAdapter(BaseConverter):
                                 "higher_better": None,
                             }
                         )
-                    except (TypeError, ValueError):
-                        pass
 
         if not pg_accessions:
             return None
@@ -165,9 +249,9 @@ class MzIdentMLPgAdapter(BaseConverter):
             "gg_names": None,
             "gg_qvalue": None,
             "anchor_protein": anchor_protein,
-            "grouped_runs": [run_file_name],
-            "global_qvalue": None,
-            "pg_qvalue": pg_qvalue,
+            "grouped_runs": list(grouped_runs),
+            "global_qvalue": global_qvalue,
+            "pg_qvalue": None,
             "intensities": None,
             "additional_intensities": None,
             "is_decoy": is_decoy,

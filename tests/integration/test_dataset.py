@@ -369,7 +369,9 @@ class TestIntensity:
                 ds.intensity(level="invalid")
 
     def test_legacy_channel_intensities_join_by_sample_accession(self, tmp_path):
-        """Legacy channel structs do not require a nonexistent run.samples.channel."""
+        """Legacy feature channel structs do not require a nonexistent
+        run.samples.channel. (The pg view is flattened since 1.1 and no longer
+        carries a channel-struct intensities list; legacy pg must be regenerated.)"""
         import pyarrow.parquet as pq
 
         legacy_intensity = pa.list_(
@@ -405,17 +407,6 @@ class TestIntensity:
         pq.write_table(
             pa.table(
                 {
-                    "anchor_protein": ["P1"],
-                    "grouped_runs": [["run_01"]],
-                    "is_decoy": [False],
-                    "intensities": pa.array(intensity, type=legacy_intensity),
-                }
-            ),
-            tmp_path / "legacy.pg.parquet",
-        )
-        pq.write_table(
-            pa.table(
-                {
                     "run_file_name": ["run_01"],
                     "samples": pa.array(
                         [[{"sample_accession": "S1", "label": "LFQ"}]],
@@ -428,13 +419,9 @@ class TestIntensity:
 
         with Dataset(tmp_path, file_prefix="legacy") as dataset:
             peptide = dataset.intensity("peptide").to_df()
-            protein = dataset.intensity("protein").to_df()
 
         assert peptide[["sample_accession", "feature_id", "intensity"]].to_dict("records") == [
             {"sample_accession": "S1", "feature_id": "PEPTIDE", "intensity": 42.0}
-        ]
-        assert protein[["sample_accession", "feature_id", "intensity"]].to_dict("records") == [
-            {"sample_accession": "S1", "feature_id": "P1", "intensity": 42.0}
         ]
 
 

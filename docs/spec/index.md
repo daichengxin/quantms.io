@@ -9,7 +9,7 @@ QPX organizes proteomics results into multiple **views**, each capturing a diffe
 
 ## Data model
 
-The diagram below shows the QPX views and how they relate to each other. Arrows indicate data flow from raw spectra through identification and quantification to final expression results.
+The diagram below shows the QPX views and how they relate to each other. Arrows indicate data flow from raw spectra through identification and quantification to final expression results. For the full conceptual model — every term defined, entity-relationship and quantification-unit diagrams, and how a measurement flows from raw file to protein quantity — see the [Data Model](data-model.md).
 
 ```mermaid
 graph LR
