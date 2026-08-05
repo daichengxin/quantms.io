@@ -117,13 +117,16 @@ def _pid_scans(pid) -> list[int]:
     return [int(m) for m in re.findall(r"(?:scan|index|spectrum)=(\d+)", str(ref or ""), re.IGNORECASE)]
 
 
-def _scan_by_run(pids, map_info: dict[int, tuple[str, str]]) -> dict[str, list[int]]:
+def _scan_by_run(pids, map_info: dict[int, tuple[str, str]], cf_runs: Optional[set[str]] = None) -> dict[str, list[int]]:
     """Attribute each identification's scan(s) to its own run.
 
     A consensus feature links spectra from several runs, so scans are resolved
     per ID via its ``map_index`` (falling back to the sole run only when every
     map is the same physical run, e.g. isobaric channels) rather than copying
-    one ID's scan onto every run's record.
+    one ID's scan onto every run's record. In a multi-run isobaric consensusXML
+    the PID carries only a local ``id_merge_index`` (no global ``map_index``); the
+    caller's ``cf_runs`` (the feature's positive-intensity element runs) then
+    attributes the scan — each such feature lives in a single run.
     """
     runs_in_map = {info[0] for info in map_info.values()}
     sole_run = next(iter(runs_in_map)) if len(runs_in_map) == 1 else None
@@ -135,6 +138,8 @@ def _scan_by_run(pids, map_info: dict[int, tuple[str, str]]) -> dict[str, list[i
         pid_run = None
         if pid.metaValueExists("map_index"):
             pid_run = map_info.get(int(pid.getMetaValue("map_index")), (None, None))[0]
+        if pid_run is None and cf_runs and len(cf_runs) == 1:
+            pid_run = next(iter(cf_runs))
         pid_run = pid_run or sole_run
         if pid_run is not None:
             run_scans = scan_by_run.setdefault(pid_run, [])
@@ -194,7 +199,9 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
     pids = cf.getPeptideIdentifications()
     if not pids or not pids[0].getHits():
         return []
-    scan_by_run = _scan_by_run(pids, map_info)
+    by_run = _group_subfeatures_by_run(cf, map_info)
+    cf_runs = set(by_run)
+    scan_by_run = _scan_by_run(pids, map_info, cf_runs=cf_runs)
     hit = pids[0].getHits()[0]
     seq_obj = hit.getSequence()
     peptidoform = to_proforma(seq_obj)
