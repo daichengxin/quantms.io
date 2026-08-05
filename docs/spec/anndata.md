@@ -106,6 +106,29 @@ AnnData enables integration of proteomics data with other omics modalities:
 - **muon**: Use `muon.MuData` to combine proteomics and transcriptomics AnnData objects.
 - **Lamin.ai**: Register QPX AnnData output as a Lamin Artifact with schema validation and ontology-backed labels.
 
+## MuData (`.h5mu`) {#mudata-h5mu}
+
+Converters that produce expression output also emit a single combined **MuData** container, `<prefix>.h5mu`, that bundles the per-precursor and per-protein matrices (and the standalone expression views, when present) into one multi-modal object for the scverse / `muon` ecosystem. It is written by `qpx/mudata.py` (`build_mudata`).
+
+### Modalities
+
+| Modality (`mdata.mod[...]`) | `obs` (rows) | `var` (columns) | `X` |
+|---|---|---|---|
+| `precursors` | run (`run_file_name`, joined to sample metadata) | precursor identity `peptidoform\|charge` | sparse precursor intensity matrix |
+| `proteins` | run (`run_file_name`) | `anchor_protein` (with `gene_name` carried in `var`) | sparse protein-group intensity matrix |
+| `expression` | Absolute Expression observations | AE variables | Absolute Expression matrix (loaded from the AE view when present) |
+| `differential` | Differential Expression observations | DE variables | Differential Expression matrix (loaded from the DE view when present) |
+
+A modality is included only when its source data is available, so a given `.h5mu` may carry a subset of these four.
+
+### Cross-modality mapping
+
+`mdata.varp["feature_mapping"]` is a sparse precursor↔protein adjacency matrix over the concatenated `var` axis: each non-zero entry links a `precursors` column to the `proteins` column(s) it belongs to, derived from `feature.anchor_protein`.
+
+### Identity note
+
+The `precursors` modality's `var_names` is the cross-run precursor identity `peptidoform|charge`. This intentionally collapses the per-run `feature_id` rows of the row-level `feature` view (the same precursor measured across multiple runs) into a single matrix column. `feature_id` remains the primary key of the `feature` view; the MuData `var` axis is a coarser, analysis-oriented identity. The `qpx_version` is stored under `mdata.uns` (see [Versioning](versioning.md)).
+
 ## Further reading
 
 - [Absolute Expression](absolute.md) -- AE-specific AnnData schema and examples
