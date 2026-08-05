@@ -541,6 +541,9 @@ class Dataset:
         """Flag feature.pg_ids elements that do not resolve to pg.pg_id."""
         severity = "error" if strict else "warning"
         try:
+            feature_columns = {row[0] for row in self._engine.execute('DESCRIBE "feature"').fetchall()}
+            if "pg_ids" not in feature_columns:
+                return
             dangling_pg_ids = self._engine.execute(
                 """
                 SELECT DISTINCT referenced_pg_id
@@ -592,50 +595,64 @@ class Dataset:
         """
         severity = "error" if strict else "warning"
         try:
-            dangling_feature_ids = self._engine.execute(
-                """
-                SELECT DISTINCT p.feature_id AS feature_id
-                FROM psm p
-                WHERE p.feature_id IS NOT NULL
-                  AND NOT EXISTS (SELECT 1 FROM feature f WHERE f.feature_id = p.feature_id)
-                ORDER BY feature_id
-                """
-            ).fetchall()
-            dangling_psm_ids = self._engine.execute(
-                """
-                SELECT DISTINCT pid AS psm_id
-                FROM feature f, UNNEST(f.psm_ids) AS _u(pid)
-                WHERE pid IS NOT NULL
-                  AND NOT EXISTS (SELECT 1 FROM psm p WHERE p.psm_id = pid)
-                ORDER BY psm_id
-                """
-            ).fetchall()
+            feature_columns = {row[0] for row in self._engine.execute('DESCRIBE "feature"').fetchall()}
+            psm_columns = {row[0] for row in self._engine.execute('DESCRIBE "psm"').fetchall()}
+            has_feature_psm_ids = "psm_ids" in feature_columns
+            has_psm_feature_id = "feature_id" in psm_columns
+
+            dangling_feature_ids = []
+            if has_psm_feature_id:
+                dangling_feature_ids = self._engine.execute(
+                    """
+                    SELECT DISTINCT p.feature_id AS feature_id
+                    FROM psm p
+                    WHERE p.feature_id IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM feature f WHERE f.feature_id = p.feature_id)
+                    ORDER BY feature_id
+                    """
+                ).fetchall()
+
+            dangling_psm_ids = []
+            if has_feature_psm_ids:
+                dangling_psm_ids = self._engine.execute(
+                    """
+                    SELECT DISTINCT pid AS psm_id
+                    FROM feature f, UNNEST(f.psm_ids) AS _u(pid)
+                    WHERE pid IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM psm p WHERE p.psm_id = pid)
+                    ORDER BY psm_id
+                    """
+                ).fetchall()
+
             # Reciprocal desync: a psm points at a feature whose (non-empty) psm_ids
             # does not list it back — i.e. the two directions describe different edges.
-            desync = self._engine.execute(
-                """
-                SELECT DISTINCT p.psm_id AS psm_id, p.feature_id AS feature_id
-                FROM psm p JOIN feature f ON f.feature_id = p.feature_id
-                WHERE p.feature_id IS NOT NULL
-                  AND f.psm_ids IS NOT NULL AND len(f.psm_ids) > 0
-                  AND NOT list_contains(f.psm_ids, p.psm_id)
-                ORDER BY psm_id
-                """
-            ).fetchall()
-            # The inverse contradiction: a feature lists a psm that explicitly
-            # points at a different feature. A null psm.feature_id means that
-            # direction is unpopulated and is therefore not a contradiction.
-            inverse_desync = self._engine.execute(
-                """
-                SELECT DISTINCT f.feature_id, p.psm_id, p.feature_id AS actual_feature_id
-                FROM feature f
-                CROSS JOIN UNNEST(f.psm_ids) AS _u(referenced_psm_id)
-                JOIN psm p ON p.psm_id = referenced_psm_id
-                WHERE p.feature_id IS NOT NULL
-                  AND p.feature_id <> f.feature_id
-                ORDER BY f.feature_id, p.psm_id
-                """
-            ).fetchall()
+            desync = []
+            inverse_desync = []
+            if has_feature_psm_ids and has_psm_feature_id:
+                desync = self._engine.execute(
+                    """
+                    SELECT DISTINCT p.psm_id AS psm_id, p.feature_id AS feature_id
+                    FROM psm p JOIN feature f ON f.feature_id = p.feature_id
+                    WHERE p.feature_id IS NOT NULL
+                      AND f.psm_ids IS NOT NULL AND len(f.psm_ids) > 0
+                      AND NOT list_contains(f.psm_ids, p.psm_id)
+                    ORDER BY psm_id
+                    """
+                ).fetchall()
+                # The inverse contradiction: a feature lists a psm that explicitly
+                # points at a different feature. A null psm.feature_id means that
+                # direction is unpopulated and is therefore not a contradiction.
+                inverse_desync = self._engine.execute(
+                    """
+                    SELECT DISTINCT f.feature_id, p.psm_id, p.feature_id AS actual_feature_id
+                    FROM feature f
+                    CROSS JOIN UNNEST(f.psm_ids) AS _u(referenced_psm_id)
+                    JOIN psm p ON p.psm_id = referenced_psm_id
+                    WHERE p.feature_id IS NOT NULL
+                      AND p.feature_id <> f.feature_id
+                    ORDER BY f.feature_id, p.psm_id
+                    """
+                ).fetchall()
         except duckdb.Error as exc:
             _log.warning("feature<->psm referential check could not run (possible schema drift): %s", exc)
             skipped = ValidationIssue(

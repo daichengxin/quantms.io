@@ -354,6 +354,14 @@ def _write_feature_psm_dataset(ds_dir, *, feature_psm_ids, psm_feature_id):
     return ds_dir, feature_id, psm_id
 
 
+def _drop_parquet_columns(path, columns):
+    """Model a valid external producer that omits optional schema columns."""
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path).drop_columns(columns)
+    pq.write_table(table, path)
+
+
 def test_feature_psm_cross_refs_resolve_cleanly(tmp_path):
     """When every cross-ref resolves, no dangling-reference issue is raised."""
     from qpx.dataset import Dataset
@@ -367,6 +375,45 @@ def test_feature_psm_cross_refs_resolve_cleanly(tmp_path):
 
     dangling = [i for r in results.values() for i in r.issues if i.check in ("dangling_feature_id", "dangling_psm_id")]
     assert dangling == []
+
+
+def test_missing_optional_feature_psm_cross_refs_are_valid(tmp_path):
+    """External files may omit either optional cross-reference column."""
+    from qpx.dataset import Dataset
+
+    ds_dir, _, _ = _write_feature_psm_dataset(
+        tmp_path / "without-cross-refs",
+        feature_psm_ids=None,
+        psm_feature_id=None,
+    )
+    _drop_parquet_columns(ds_dir / "exp.feature.parquet", ["psm_ids"])
+    _drop_parquet_columns(ds_dir / "exp.psm.parquet", ["feature_id"])
+
+    with Dataset(ds_dir) as dataset:
+        results = dataset.validate(structures=["feature", "psm"], strict=True)
+
+    assert results["feature"].is_valid
+    assert results["psm"].is_valid
+    assert not [issue for result in results.values() for issue in result.issues if issue.check == "referential_check_skipped"]
+
+
+def test_present_psm_cross_ref_is_checked_when_inverse_column_is_absent(tmp_path):
+    """A missing feature.psm_ids column must not disable psm.feature_id checks."""
+    from qpx.dataset import Dataset
+
+    ds_dir, _, _ = _write_feature_psm_dataset(
+        tmp_path / "one-way-cross-ref",
+        feature_psm_ids=None,
+        psm_feature_id=999999,
+    )
+    _drop_parquet_columns(ds_dir / "exp.feature.parquet", ["psm_ids"])
+
+    with Dataset(ds_dir) as dataset:
+        results = dataset.validate(structures=["feature", "psm"], strict=True)
+
+    dangling = [issue for issue in results["psm"].issues if issue.check == "dangling_feature_id"]
+    assert len(dangling) == 1
+    assert not [issue for issue in results["psm"].issues if issue.check == "referential_check_skipped"]
 
 
 def test_feature_psm_cross_refs_dangling_are_warnings(tmp_path):
@@ -508,6 +555,20 @@ def test_feature_pg_cross_refs_resolve_cleanly(tmp_path):
 
     assert not [issue for issue in results["feature"].issues if issue.check == "dangling_pg_id"]
     assert results["feature"].is_valid
+
+
+def test_missing_optional_feature_pg_cross_ref_is_valid(tmp_path):
+    """An external Feature file may omit optional pg_ids entirely."""
+    from qpx.dataset import Dataset
+
+    ds_dir, _ = _write_feature_pg_dataset(tmp_path / "without-pg-cross-ref", None)
+    _drop_parquet_columns(ds_dir / "exp.feature.parquet", ["pg_ids"])
+
+    with Dataset(ds_dir) as dataset:
+        results = dataset.validate(structures=["feature", "pg"], strict=True)
+
+    assert results["feature"].is_valid
+    assert not [issue for issue in results["feature"].issues if issue.check == "referential_check_skipped"]
 
 
 def test_feature_pg_cross_refs_dangling_warn_and_fail_strict(tmp_path):
