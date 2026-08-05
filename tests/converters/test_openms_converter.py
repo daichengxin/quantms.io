@@ -158,6 +158,33 @@ class TestOpenMSConverter:
         assert "grouped_runs" in pg_table.column_names
         assert "run_file_name" not in pg_table.column_names
 
+    def test_invalid_legacy_identity_does_not_replace_output(self, tmp_path):
+        """Strict validation happens before a rewritten core file is installed."""
+        qpx_dir = tmp_path / "openms_qpx"
+        qpx_dir.mkdir()
+        records = [
+            make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1001]),
+            make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1001]),
+        ]
+        records[1]["posterior_error_probability"] = 0.2
+        source = qpx_dir / "quantms.psm.parquet"
+        with PsmWriter(source) as writer:
+            writer.write_batch(records)
+        legacy = pq.read_table(source).drop_columns(("psm_id", "feature_id")).replace_schema_metadata(None)
+        pq.write_table(legacy, source)
+
+        output = tmp_path / "output"
+        output.mkdir()
+        destination = output / "openms.psm.parquet"
+        sentinel = b"pre-existing output"
+        destination.write_bytes(sentinel)
+
+        with pytest.raises(ValueError, match="Primary key.*duplicate"):
+            OpenMSConverter(qpx_dir=qpx_dir).convert(output_folder=output, output_prefix="openms")
+
+        assert destination.read_bytes() == sentinel
+        assert not list(output.glob(".openms.psm.parquet.*.tmp"))
+
     def test_convert_full_bundle(self, tmp_path):
         """Full enrichment: 3 core + SDRF -> 8 files."""
         qpx_dir = tmp_path / "openms_qpx"

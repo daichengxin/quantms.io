@@ -201,7 +201,7 @@ def _rewrite_core_file(
     is_lfq: bool | None,
     compression: str,
     fraction_group_lookup: dict[str, str],
-) -> tuple[int, int]:
+) -> tuple[Path, int, int]:
     """Upgrade one OpenMS core file while streaming by Parquet row group."""
     parquet = pq.ParquetFile(src_path)
     metadata = parquet.schema_arrow.metadata or {}
@@ -244,12 +244,11 @@ def _rewrite_core_file(
                     table = writer.align_table_to_schema(table)
                 writer.write_table(table)
         parquet.close()
-        temp_path.replace(dst)
     except Exception:
         parquet.close()
         temp_path.unlink(missing_ok=True)
         raise
-    return rows, annotated
+    return temp_path, rows, annotated
 
 
 def _copy_core(
@@ -275,25 +274,36 @@ def _copy_core(
     """
     fraction_group_lookup = fraction_group_lookup or {}
     output_paths: dict[str, Path] = {}
-    for view, src_path in discovered.items():
-        dst = output_folder / f"{output_prefix}.{view}.parquet"
-        rows, annotated = _rewrite_core_file(
-            view,
-            src_path,
-            dst,
-            channel_labels or {},
-            is_lfq,
-            compression,
-            fraction_group_lookup,
-        )
-        logger.info(
-            "Rewrote %s -> %s (%d source rows; stamped fraction_group on %d row(s))",
-            src_path.name,
-            dst.name,
-            rows,
-            annotated,
-        )
-        output_paths[view] = dst
+    staged: dict[str, tuple[Path, Path, Path, int, int]] = {}
+    try:
+        for view, src_path in discovered.items():
+            dst = output_folder / f"{output_prefix}.{view}.parquet"
+            temp_path, rows, annotated = _rewrite_core_file(
+                view,
+                src_path,
+                dst,
+                channel_labels or {},
+                is_lfq,
+                compression,
+                fraction_group_lookup,
+            )
+            staged[view] = (temp_path, src_path, dst, rows, annotated)
+
+        _validate_core({view: values[0] for view, values in staged.items()})
+        for view, (temp_path, src_path, dst, rows, annotated) in staged.items():
+            temp_path.replace(dst)
+            output_paths[view] = dst
+            logger.info(
+                "Rewrote %s -> %s (%d source rows; stamped fraction_group on %d row(s))",
+                src_path.name,
+                dst.name,
+                rows,
+                annotated,
+            )
+    except Exception:
+        for temp_path, *_ in staged.values():
+            temp_path.unlink(missing_ok=True)
+        raise
     return output_paths
 
 
@@ -406,7 +416,6 @@ class OpenMSConverter(BaseOrchestrator):
             self._compression,
             fraction_group_lookup,
         )
-        _validate_core(output_paths)
 
         ontology_entries = self._convert_sdrf(output_folder, output_prefix)
         ontology_entries.extend(self._collect_ontology(output_paths))
