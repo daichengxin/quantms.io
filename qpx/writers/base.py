@@ -434,10 +434,10 @@ class BaseWriter:
         self._close(validate=True)
 
     def _close(self, *, validate: bool) -> None:
-        """Close the writer, optionally skipping validation after a body error."""
-        if self._buffer:
+        """Close the writer, discarding buffered rows after a body error."""
+        if validate and self._buffer:
             self._write_arrow_batch(self._buffer)
-            self._buffer = []
+        self._buffer = []
         wrote_file = self._writer is not None
         if self._writer:
             self._writer.close()

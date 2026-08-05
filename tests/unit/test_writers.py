@@ -156,6 +156,18 @@ def test_writer_batching(tmp_path):
     assert parquet_row_count(path3) == 3
 
 
+def test_writer_discards_buffer_when_context_body_fails(tmp_path):
+    """A body error must not flush incomplete buffered records."""
+    path = tmp_path / "failed.feature.parquet"
+
+    with pytest.raises(RuntimeError, match="body failure"):
+        with FeatureWriter(path, batch_size=2) as writer:
+            writer.write_batch([make_feature_record()])
+            raise RuntimeError("body failure")
+
+    assert not path.exists()
+
+
 def test_writer_compression(tmp_path):
     """Default compression is zstd; custom compression is recorded."""
     path = tmp_path / "default.feature.parquet"
