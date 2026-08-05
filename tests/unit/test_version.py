@@ -68,10 +68,17 @@ def test_read_pg_raises_on_old_schema_file(tmp_path):
         qpx.read_pg(str(path))
 
 
-def test_guard_noop_on_unstamped_but_grouped_file(tmp_path):
-    """A file with grouped_runs but no qpx_version stamp is allowed (forward-only)."""
+def test_guard_noop_on_unstamped_complete_grouped_file(tmp_path):
+    """An unstamped file with the complete flattened layout is allowed."""
     path = tmp_path / "grouped.pg.parquet"
-    table = pa.table({"anchor_protein": ["P1"], "grouped_runs": [["run_01"]]})
+    table = pa.table(
+        {
+            "anchor_protein": ["P1"],
+            "grouped_runs": [["run_01"]],
+            "label": [None],
+            "intensity": [None],
+        }
+    )
     pq.write_table(table, str(path))
     check_pg_file_compatible(path)  # must not raise
 
@@ -93,6 +100,9 @@ def test_column_guard_rejects_pre_1_1_and_passes_1_1():
     # and then fail every pg query, silently)
     with pytest.raises(QpxVersionError, match="flattened|label"):
         check_pg_columns_compatible(["anchor_protein", "grouped_runs", "intensities"], source="s3://b/x")
+    # incomplete 1.1: grouped_runs but neither the old list nor both flat columns
+    with pytest.raises(QpxVersionError, match="label.*intensity|scalar"):
+        check_pg_columns_compatible(["anchor_protein", "grouped_runs"], source="s3://b/x")
     # flat 1.1 layout -> no raise
     check_pg_columns_compatible(["anchor_protein", "grouped_runs", "label", "intensity"], source="s3://b/x")
 
@@ -117,6 +127,8 @@ def test_dataset_s3_discovery_fails_soft_on_version_error(monkeypatch, caplog):
     class FakeEngine:
         """Minimal DuckDBEngine replacement for the public S3 load path."""
 
+        dropped = False
+
         def __init__(self, **_kwargs):
             pass
 
@@ -126,14 +138,14 @@ def test_dataset_s3_discovery_fails_soft_on_version_error(monkeypatch, caplog):
             assert name == "pg"
             assert path == "s3://bucket/data/*.pg.parquet"
 
-        @staticmethod
-        def execute(sql):
-            """Validate the DESCRIBE probe and the stale-view drop after a soft skip."""
-            if sql.startswith("DROP VIEW"):
-                assert sql == 'DROP VIEW IF EXISTS "pg"'
-                return FakeEngine()
-            assert sql == 'DESCRIBE "pg"'
-            return FakeEngine()
+        @classmethod
+        def execute(cls, sql):
+            """Validate and return the simulated DESCRIBE result."""
+            if sql == 'DESCRIBE "pg"':
+                return cls()
+            assert sql == "DROP VIEW IF EXISTS pg"
+            cls.dropped = True
+            return cls()
 
         @staticmethod
         def fetchall():
@@ -150,6 +162,7 @@ def test_dataset_s3_discovery_fails_soft_on_version_error(monkeypatch, caplog):
 
     assert ds.pg is None
     assert "pg" not in ds.available_structures
+    assert FakeEngine.dropped
     assert any("pg" in rec.message for rec in caplog.records)
 
 
@@ -160,7 +173,14 @@ def test_partitioned_pg_checks_every_part_file(tmp_path, caplog):
     part_dir = tmp_path / "pg"
     part_dir.mkdir()
     pq.write_table(
-        pa.table({"anchor_protein": ["P1"], "grouped_runs": [["run_01"]]}),
+        pa.table(
+            {
+                "anchor_protein": ["P1"],
+                "grouped_runs": [["run_01"]],
+                "label": [None],
+                "intensity": [None],
+            }
+        ),
         part_dir / "a.parquet",
     )
     _write_old_pg_file(part_dir / "b.parquet")

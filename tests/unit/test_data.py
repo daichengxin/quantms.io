@@ -322,6 +322,28 @@ def test_grouped_runs_label_resolving_to_multiple_samples_is_error(tmp_path):
     assert not results["pg"].is_valid
 
 
+def test_strict_validation_promotes_skipped_cross_structure_checks_to_errors(tmp_path):
+    """Schema drift in a cross-view check must fail strict validation."""
+    from qpx.dataset import Dataset
+
+    ds_dir = _write_pg_run_dataset(
+        tmp_path / "drift",
+        pg_grouped_runs=[["run_01"]],
+    )
+    with Dataset(ds_dir) as ds:
+        ds._engine.execute("CREATE OR REPLACE VIEW run AS SELECT 1 AS wrong_column")
+        lenient = ds.validate(structures=["pg"])["pg"]
+        strict = ds.validate(structures=["pg"], strict=True)["pg"]
+
+    lenient_skipped = [issue for issue in lenient.issues if issue.check.endswith("check_skipped")]
+    strict_skipped = [issue for issue in strict.issues if issue.check.endswith("check_skipped")]
+    assert len(lenient_skipped) == 2
+    assert all(issue.severity == "warning" for issue in lenient_skipped)
+    assert len(strict_skipped) == 2
+    assert all(issue.severity == "error" for issue in strict_skipped)
+    assert not strict.is_valid
+
+
 # ---------------------------------------------------------------------------
 # feature<->psm cross-reference referential invariant
 # ---------------------------------------------------------------------------

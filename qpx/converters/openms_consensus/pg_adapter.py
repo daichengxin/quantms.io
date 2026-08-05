@@ -29,6 +29,7 @@ from qpx.converters.openms_consensus.feature_adapter import (
     load_consensus_map,
     to_proforma,
 )
+from qpx.converters.openms_consensus.psm_adapter import _run_resolver
 
 _GENE_RE = re.compile(r"GN=([^\s]+)")
 
@@ -86,13 +87,9 @@ def accumulate_cf_maps(cf, map_run: dict[int, str], m: _ProteinMaps) -> None:
         _collect_pid(pid, runs, m)
 
 
-def accumulate_unassigned_maps(pid, map_run: dict[int, str], m: _ProteinMaps) -> None:
+def accumulate_unassigned_maps(pid, resolve_run, m: _ProteinMaps) -> None:
     """Fold one unassigned PeptideIdentification into the accession maps."""
-    run = None
-    for key in ("map_index", "id_merge_index"):
-        if pid.metaValueExists(key):
-            run = map_run.get(int(pid.getMetaValue(key)))
-            break
+    run = resolve_run(pid)
     _collect_pid(pid, {run} if run else set(), m)
 
 
@@ -100,11 +97,12 @@ def _protein_maps(cm) -> _ProteinMaps:
     """Index peptide/feature/run evidence by accession (see :class:`_ProteinMaps`)."""
     headers = cm.getColumnHeaders()
     map_run = {i: _run_stem(headers[i].filename) for i in headers}
+    resolve_run = _run_resolver(cm)
     m = _ProteinMaps()
     for cf in cm:  # assigned IDs: runs are the consensus feature's member maps
         accumulate_cf_maps(cf, map_run, m)
     for pid in cm.getUnassignedPeptideIdentifications():  # run from map_index/id_merge_index
-        accumulate_unassigned_maps(pid, map_run, m)
+        accumulate_unassigned_maps(pid, resolve_run, m)
     return m
 
 

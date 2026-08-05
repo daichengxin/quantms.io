@@ -269,8 +269,7 @@ returned once per sample and label.
 | Derived intensity | `additional_intensities` | feature, pg |
 | Sample link | `run.samples[].sample_accession` → `sample.sample_accession` | run → sample |
 | Fraction | `run.fraction` | run |
-| Peptide identity | `peptidoform` | psm, feature, pepmap |
-| Precursor charge | `charge` | psm, feature |
+| Peptide identity | `peptidoform` (plus `charge` for PSM and feature) | psm, feature, pepmap |
 | Protein representative | `anchor_protein` | feature, pg |
 | Row identity | `psm_id` / `feature_id` / `pg_id` | psm / feature / pg |
 | Explicit cross-reference | `psm.feature_id`, `feature.psm_ids`, `feature.pg_ids` | psm ↔ feature → pg |

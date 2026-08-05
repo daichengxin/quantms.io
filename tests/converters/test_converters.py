@@ -147,8 +147,12 @@ class TestFragPipeFeatureAdapter:
         """Write a minimal combined_peptide.tsv."""
         tsv = tmp_path / "combined_peptide.tsv"
         lines = [
-            "Peptide Sequence\tModified Peptide\tCharges\tProtein\tProtein ID\tGene\texperiment_1 Intensity\texperiment_2 Intensity",
-            "PEPTIDEK\tPEPTIDEK\t2,3\tsp|P12345|PROT_HUMAN\tP12345\tBRCA1\t1000.0\t2000.0",
+            (
+                "Peptide Sequence\tModified Peptide\tCharges\tProtein\tProtein ID\tGene\t"
+                "experiment_1 Intensity\texperiment_1 MaxLFQ Intensity\t"
+                "experiment_2 Intensity\texperiment_2 MaxLFQ Intensity"
+            ),
+            "PEPTIDEK\tPEPTIDEK\t2,3\tsp|P12345|PROT_HUMAN\tP12345\tBRCA1\t1000.0\t900.0\t2000.0\t1800.0",
         ]
         tsv.write_text("\n".join(lines) + "\n")
         return tsv

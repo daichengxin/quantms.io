@@ -11,10 +11,10 @@ the QPX feature schema. Protein-level quantity is not produced here.
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
 from typing import Optional
 
 from qpx.converters.channel_labels import normalize_label
+from qpx.core.files import run_file_stem as _run_stem
 
 # OpenMS isobaric channel labels look like ``tmt6plex_126`` / ``itraq4plex_114``.
 _CHANNEL_RE = re.compile(r"(tmt|itraq)\d*plex?_(\d+[NC]?)", re.IGNORECASE)
@@ -63,7 +63,7 @@ def check_channels_vs_sdrf(cm, sdrf_path) -> list[str]:
     surfacing (e.g. a mis-declared plex, or the wrong SDRF). Returns human-readable
     messages — empty when the two agree, or when the SDRF has no label column.
     """
-    from qpx.converters.channel_labels import normalize_label, read_sdrf_labels
+    from qpx.converters.channel_labels import read_sdrf_labels
 
     sdrf_raw = read_sdrf_labels(sdrf_path)
     if not sdrf_raw:
@@ -78,12 +78,6 @@ def check_channels_vs_sdrf(cm, sdrf_path) -> list[str]:
     if only_sdrf:
         messages.append(f"channel(s) in the SDRF comment[label] but not the consensusXML: {only_sdrf}")
     return messages
-
-
-def _run_stem(filename: str) -> str:
-    """Run file name = basename with the final extension stripped."""
-    name = PurePosixPath(str(filename).replace("\\", "/")).name
-    return re.sub(r"(?i)\.(mzml|mzml\.gz|raw|d|wiff|mgf)$", "", name)
 
 
 def to_proforma(aa_sequence) -> str:

@@ -60,6 +60,36 @@ def test_fraction_groups_from_sdrf_groups_fractions_not_techreps(tmp_path):
     assert fraction_groups_from_sdrf(None) is None
 
 
+def test_multi_dot_run_names_match_sdrf_conversion(tmp_path):
+    """SDRF mappings and run output preserve meaningful dots in run names."""
+    from qpx.converters.channel_labels import fraction_groups_from_sdrf
+    from qpx.converters.sdrf import SdrfConverter
+    from qpx.core.sdrf import SDRFHandler
+
+    sdrf = tmp_path / "multi_dot.sdrf.tsv"
+    sdrf.write_text(
+        "source name\tcomment[data file]\tcomment[label]\tcomment[fraction identifier]\n"
+        "S1\trun.part.1.raw\tlabel free sample\t1\n"
+        "S1\trun.part.2.raw\tlabel free sample\t2\n"
+    )
+
+    grouped = ["run.part.1", "run.part.2"]
+    assert experiment_runs_from_sdrf(str(sdrf)) == {"S1": grouped}
+    assert fraction_groups_from_sdrf(str(sdrf)) == {
+        "run.part.1": grouped,
+        "run.part.2": grouped,
+    }
+    assert SDRFHandler(sdrf).get_sample_map_run() == {
+        "run.part.1": "S1",
+        "run.part.2": "S1",
+    }
+
+    run_output = tmp_path / "run.parquet"
+    with SdrfConverter(duckdb_threads=24) as converter:
+        converter.convert(str(sdrf), run_output=str(run_output))
+    assert pq.read_table(run_output).column("run_file_name").to_pylist() == grouped
+
+
 from qpx.core.parquet_io import read_parquet_metadata
 from qpx.dataset import Dataset
 from qpx.writers.feature import FeatureWriter

@@ -9,7 +9,7 @@ mapping is stored as a boolean sparse adjacency matrix in
 from __future__ import annotations
 
 import logging
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -18,6 +18,7 @@ import pandas as pd
 from scipy import sparse
 
 from qpx._version import __version__
+from qpx.core.files import run_file_stem
 from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
@@ -279,7 +280,7 @@ def _load_run_obs(
     labels_by_stem: dict[str, set[str]] = {}
     for record in df.to_dict("records"):
         run_name = str(record["run_file_name"])
-        stem = PurePosixPath(run_name).stem
+        stem = run_file_stem(run_name)
         label = str(record["label"])
         exact.setdefault((run_name, label), record)
         stem_exact.setdefault((stem, label), record)
@@ -291,7 +292,7 @@ def _load_run_obs(
     rows: list[dict] = []
     for _, key in observation_keys.iterrows():
         run_name = str(key["run_file_name"])
-        stem = PurePosixPath(run_name).stem
+        stem = run_file_stem(run_name)
         label = str(key["intensity_label"])
         record = exact.get((run_name, label))
         if record is None:

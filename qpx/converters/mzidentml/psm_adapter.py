@@ -11,7 +11,6 @@ from __future__ import annotations
 import gzip
 import logging
 import re
-from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -34,6 +33,7 @@ from qpx.core.cv_terms import (
     SKIP_SCORE_ACCESSIONS,
 )
 from qpx.core.data.identity import derive_id
+from qpx.core.files import run_file_stem
 from qpx.core.scores import is_higher_better, normalize_score_name
 from qpx.writers.psm import PsmWriter
 
@@ -107,7 +107,7 @@ class MzIdentMLPsmAdapter(BaseConverter):
         for sd in root.iter(f"{{{ns}}}SpectraData"):
             sd_id = sd.get("id")
             location = sd.get("location", "")
-            stem = Path(location.replace("file:///", "").replace("file://", "")).stem
+            stem = run_file_stem(location)
             result[sd_id] = stem
         return result
 

@@ -224,12 +224,13 @@ class BaseWriter:
         if scan_format:
             self._file_metadata[b"scan_format"] = scan_format.encode()
 
-        # Views with a footer-declared identity_composite carry a single-column
-        # derived-identity primary key (feature_id / psm_id / pg_id). Stamp the
-        # footer so every file self-describes its key and how the id is derived.
+        # Stamp the effective composite in the footer. A single-column derived
+        # identity also records its id field as the primary key.
         identity_composite = self._identity_composite
         if identity_composite:
-            self._file_metadata[b"primary_key"] = self._id_field.encode()
+            id_field = self._id_field
+            if id_field is not None:
+                self._file_metadata[b"primary_key"] = id_field.encode()
             self._file_metadata[b"identity_composite"] = ",".join(identity_composite).encode()
 
     # --- Derived identity --------------------------------------------------
@@ -347,6 +348,8 @@ class BaseWriter:
         composite_values = self._persisted_composite_values(table, composite)
         existing = table.column(id_field).to_pylist() if id_field in names else [None] * n
         override = self._override_provided_ids
+        if override and "cv_params" not in names and any(provided is not None for provided in existing):
+            raise ValueError(f"override_provided_ids requires a 'cv_params' column to preserve provided {id_field} values")
         cv_lists = table.column("cv_params").to_pylist() if (override and "cv_params" in names) else None
         ids = self._identity_values(existing, composite_values, composite, cv_lists, id_field)
         if cv_lists is not None:
@@ -434,10 +437,10 @@ class BaseWriter:
         self._close(validate=True)
 
     def _close(self, *, validate: bool) -> None:
-        """Close the writer, optionally skipping validation after a body error."""
-        if self._buffer:
+        """Close the writer, discarding buffered rows after a body error."""
+        if validate and self._buffer:
             self._write_arrow_batch(self._buffer)
-            self._buffer = []
+        self._buffer = []
         wrote_file = self._writer is not None
         if self._writer:
             self._writer.close()

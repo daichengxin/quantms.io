@@ -25,7 +25,7 @@ from qpx.core.data import (
 )
 from qpx.core.data.schema import ValidationIssue, ValidationResult
 from qpx.core.engine import DuckDBEngine
-from qpx.core.sql import escape_path, sql_build
+from qpx.core.sql import escape_path, sql_build, validate_table
 from qpx.version import (
     QPX_SPEC_VERSION,
     QpxVersionError,
@@ -122,10 +122,12 @@ class Dataset:
                 # One incompatible/old structure file must not abort the whole
                 # dataset — skip it with a warning so the other structures stay
                 # usable. (A direct read_pg()/PG.from_file() still raises.)
-                # The view was registered before the guard ran (PyArrow cannot read
-                # an S3 glob footer), so drop it now — otherwise ds.sql("SELECT *
-                # FROM pg") would still read the incompatible data behind the guard.
-                self._engine.execute(f'DROP VIEW IF EXISTS "{name}"')
+                self._engine.execute(
+                    sql_build(
+                        "DROP VIEW IF EXISTS $view",
+                        view=validate_table(name),
+                    )
+                )
                 _log.warning("Skipping incompatible structure '%s': %s", name, exc)
             except (FileNotFoundError, duckdb.IOException):
                 pass  # Structure not present in S3
@@ -739,9 +741,6 @@ class Dataset:
                 ValidationIssue(
                     structure="pg",
                     check="referential_check_skipped",
-                    # Under strict (qpxc validate / CI) a check that cannot run due
-                    # to schema drift must fail, not silently pass — this is the
-                    # exact scenario the check exists to catch.
                     severity="error" if strict else "warning",
                     column=None,
                     message=f"grouped_runs referential check could not run (possible schema drift): {exc}",
@@ -764,7 +763,7 @@ class Dataset:
                 )
             )
 
-    def _check_grouped_runs_sample_mapping(self, pg_result: ValidationResult, *, strict: bool = False) -> None:
+    def _check_grouped_runs_sample_mapping(self, pg_result: ValidationResult, *, strict: bool) -> None:
         """Require each PG intensity label to resolve to exactly one sample."""
         try:
             rows = self._engine.execute(
@@ -818,8 +817,6 @@ class Dataset:
                 ValidationIssue(
                     structure="pg",
                     check="sample_mapping_check_skipped",
-                    # Fail under strict (CI) — a drift that blocks the check is the
-                    # very bug this check guards against (see the referential check).
                     severity="error" if strict else "warning",
                     column=None,
                     message=f"grouped_runs sample-mapping check could not run (possible schema drift): {exc}",

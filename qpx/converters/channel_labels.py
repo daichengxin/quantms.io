@@ -29,6 +29,7 @@ from sdrf_pipelines.converters.channel_map import CHANNEL_LABELS
 from sdrf_pipelines.converters.channel_map import normalize_label as _normalize_label
 from sdrf_pipelines.converters.openms.utils import infer_itraqplex, infer_tmtplex
 
+from qpx.core.files import run_file_stem
 from qpx.writers.base import parquet_write_options
 
 __all__ = [
@@ -109,7 +110,7 @@ def experiment_runs_from_sdrf(sdrf_path: Optional[str]) -> Optional[dict[str, li
         if pd.isna(source) or pd.isna(file_value):
             continue
         experiment = str(source).strip()
-        run = str(file_value).strip().split(".")[0]
+        run = run_file_stem(str(file_value))
         if not experiment or not run:
             continue
         runs = mapping.setdefault(experiment, [])
@@ -151,7 +152,7 @@ def _collect_run_signatures(df, c: dict[str, Optional[str]]):
         raw = row.get(c["file"])
         if raw is None or not str(raw).strip():
             continue
-        run = str(raw).strip().rsplit(".", 1)[0]
+        run = run_file_stem(str(raw))
         if run not in signature:
             first_seen.append(run)
         signature[run].add(tuple(str(row.get(c[k], "")).strip() if c[k] else "" for k in ("source", "label", "brep", "trep")))

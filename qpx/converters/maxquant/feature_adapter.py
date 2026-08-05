@@ -20,6 +20,7 @@ import logging
 import re
 from typing import Optional
 
+import duckdb
 import pandas as pd
 
 from qpx.converters.base import resolve_columns
@@ -32,6 +33,7 @@ from qpx.converters.maxquant.constants import (
 )
 from qpx.converters.ptm import from_proforma
 from qpx.converters.utils import mq_flag_to_bool, safe_float, strip_uniprot_prefix
+from qpx.core.sql import sql_build, validate_identifier
 from qpx.writers.feature import FeatureWriter
 
 logger = logging.getLogger(__name__)
@@ -100,6 +102,7 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
 
         # Step 4: Stream and transform
         self.logger.info("Transforming MaxQuant features ...")
+        evidence_query = self._deduplicated_evidence_query(actual_cols)
 
         with FeatureWriter(
             output_path,
@@ -107,7 +110,7 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
             compression=self._compression,
             identity_composite=_FEATURE_IDENTITY_COMPOSITE,
         ) as writer:
-            for batch in self._query_batched("SELECT * FROM evidence", chunksize):
+            for batch in self._query_batched(evidence_query, chunksize):
                 df = batch.to_pandas()
                 records = self._transform_batch(
                     df, sample_map, experiment_type, tmt_channels, pg_maps, fixed_mod_only=fixed_mod_only
@@ -117,6 +120,54 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
                     writer.write_batch(records)
 
         self.logger.info(f"MaxQuant feature conversion complete -> {output_path}")
+
+    def _deduplicated_evidence_query(self, actual_cols: set[str]) -> str:
+        """Prefer identified evidence when MaxQuant repeats an MBR feature."""
+        identity_columns = [
+            self._resolved.get("modified_sequence", "Modified sequence"),
+            self._resolved.get("charge", "Charge"),
+            self._resolved.get("run_file_name", "Raw file"),
+            self._resolved.get("rt", "Calibrated retention time"),
+        ]
+        if "Type" not in actual_cols or not all(column in actual_cols for column in identity_columns):
+            return "SELECT * FROM evidence"
+
+        partition_by = ", ".join(validate_identifier(column) for column in identity_columns)
+        type_column = validate_identifier("Type")
+        order_by = [
+            sql_build(
+                "CASE WHEN UPPER(TRIM(CAST($type_column AS VARCHAR))) = 'MULTI-MATCH' THEN 1 ELSE 0 END",
+                type_column=type_column,
+            )
+        ]
+        pep_column = self._resolved.get("posterior_error_probability", "PEP")
+        if pep_column in actual_cols:
+            order_by.append(
+                sql_build(
+                    "TRY_CAST($pep_column AS DOUBLE) ASC NULLS LAST",
+                    pep_column=validate_identifier(pep_column),
+                )
+            )
+        if "id" in actual_cols:
+            order_by.append(
+                sql_build(
+                    "TRY_CAST($id_column AS BIGINT) ASC NULLS LAST",
+                    id_column=validate_identifier("id"),
+                )
+            )
+
+        return sql_build(
+            """
+            SELECT *
+            FROM evidence
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY $partition_by
+                ORDER BY $order_by
+            ) = 1
+            """,
+            partition_by=partition_by,
+            order_by=", ".join(order_by),
+        )
 
     # ------------------------------------------------------------------
     # Data loading
@@ -158,10 +209,8 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
                 len(gene_map),
             )
             return {"qvalue": qvalue_map, "genes": gene_map}
-        except (FileNotFoundError, pd.errors.ParserError, KeyError, ValueError) as e:
+        except (FileNotFoundError, pd.errors.ParserError, KeyError, ValueError, duckdb.Error) as e:
             self.logger.warning("Could not build protein group maps: %s", e)
-        except Exception as e:
-            self.logger.warning("Could not build protein group maps: %s", e, exc_info=True)
         return {"qvalue": {}, "genes": {}}
 
     @staticmethod
@@ -239,31 +288,24 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
     ) -> list[dict]:
         """Transform a batch of evidence.txt rows into QPX feature records."""
         records: list[dict] = []
-        skipped = 0
         # Detect reporter intensity column indexing once per batch
         ri_offset = self._detect_ri_offset(df.columns)
         # Pre-extract column arrays for faster per-row access than to_dict("records")
         col_arrays = {col: df[col].values for col in df.columns}
         n_rows = len(df)
         for i in range(n_rows):
-            try:
-                row = {col: vals[i] for col, vals in col_arrays.items()}
-                rec = self._transform_row(
-                    row, sample_map, experiment_type, tmt_channels, pg_maps, ri_offset, fixed_mod_only=fixed_mod_only
-                )
-                if rec:
-                    records.append(rec)
-            except Exception as e:
-                skipped += 1
-                self.logger.debug(f"Skipping MaxQuant feature row: {e}")
-        if skipped:
-            total = skipped + len(records)
-            self.logger.warning(
-                "Skipped %d / %d rows (%.1f%%) in batch",
-                skipped,
-                total,
-                100 * skipped / total if total else 0,
+            row = {col: vals[i] for col, vals in col_arrays.items()}
+            rec = self._transform_row(
+                row,
+                sample_map,
+                experiment_type,
+                tmt_channels,
+                pg_maps,
+                ri_offset,
+                fixed_mod_only=fixed_mod_only,
             )
+            if rec:
+                records.append(rec)
         return records
 
     _FIXED_MODS_ALLOWED = frozenset({"unmodified", "carbamidomethyl (c)"})

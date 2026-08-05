@@ -7,6 +7,7 @@ from qpx.converters.ptm import (
     compute_precursor_mz,
     from_proforma,
     mass_to_unimod,
+    strip_modifications,
 )
 
 
@@ -114,6 +115,84 @@ class TestFromProforma:
                     assert pos["scores"][0]["score_value"] == 0.8
                 elif pos["position"] == 1:
                     assert pos["scores"] is None
+
+
+class TestStripModifications:
+    """A named modification must not leak its own letters into the sequence.
+
+    The naive ``re.sub(r"[^A-Z]", "", peptidoform.upper())`` upper-cases first,
+    so ``[TMTpro]`` survives as ``TMTPRO`` and welds itself onto the peptide.
+    Every TMT feature table written before this was fixed carries such
+    sequences, and they match nothing in a digested FASTA -- iBAQ silently
+    produced zero rows.
+    """
+
+    def test_nterm_and_cterm_tmtpro(self):
+        """Tags on both termini are dropped, not welded to the sequence."""
+        result = strip_modifications("[TMTpro]-GEDVETSK[TMTpro]")
+        if result != "GEDVETSK":
+            raise AssertionError(f"Unexpected: {result!r}")
+
+    def test_internal_named_mod(self):
+        """An internal named tag is dropped along with the terminal ones."""
+        result = strip_modifications("[TMTpro]-EEQQDDTVYM[Oxidation]GK[TMTpro]")
+        if result != "EEQQDDTVYMGK":
+            raise AssertionError(f"Unexpected: {result!r}")
+
+    def test_mztab_parenthetical_mod(self):
+        """mzTab writes tags in parentheses; those count too."""
+        result = strip_modifications("C(Carbamidomethyl)R")
+        if result != "CR":
+            raise AssertionError(f"Unexpected: {result!r}")
+
+    def test_numeric_mod_still_stripped(self):
+        """Numeric tags never triggered the bug; guard the path that worked."""
+        result = strip_modifications("PEPT[+57.02]IDEK")
+        if result != "PEPTIDEK":
+            raise AssertionError(f"Unexpected: {result!r}")
+
+    def test_unmodified_sequence_unchanged(self):
+        """A bare sequence passes through untouched."""
+        result = strip_modifications("PEPTIDEK")
+        if result != "PEPTIDEK":
+            raise AssertionError(f"Unexpected: {result!r}")
+
+    def test_empty_string(self):
+        """An empty peptidoform yields an empty sequence, not an error."""
+        result = strip_modifications("")
+        if result != "":
+            raise AssertionError(f"Unexpected: {result!r}")
+
+    def test_reagent_name_with_its_own_parentheses(self):
+        """SILAC/dimethyl names close a paren before the tag itself ends.
+
+        ``Label:13C(6)15N(2)`` is heavy lysine. A flat ``\\([^)]*\\)`` stops at
+        the first ``)`` and leaks ``15N`` into the sequence -- the same defect
+        this function exists to prevent, one level deeper.
+        """
+        for peptidoform in (
+            ".(Label:13C(6)15N(2))PEPTIDEK",
+            ".(Label:13C(6)15N(4))PEPTIDEK",
+            ".(Dimethyl:2H(6)13C(2))PEPTIDEK",
+            ".(Label:13C(4)15N(2)+GlyGly)PEPTIDEK",
+        ):
+            result = strip_modifications(peptidoform)
+            if result != "PEPTIDEK":
+                raise AssertionError(f"{peptidoform!r} gave {result!r}")
+
+    def test_leading_dot_nterm_form(self):
+        """mzTab writes N-term mods after a leading dot; real quantms output."""
+        result = strip_modifications(".(TMT6plex)AAALAAAVAQDPAASGAPSS")
+        if result != "AAALAAAVAQDPAASGAPSS":
+            raise AssertionError(f"Unexpected: {result!r}")
+
+    def test_mod_letters_are_not_kept(self):
+        """The exact regression: the old expression returned TMTPROAYAQGISR."""
+        result = strip_modifications("[TMTpro]-AYAQGISR")
+        if "TMTPRO" in result:
+            raise AssertionError(f"Modification name leaked into sequence: {result!r}")
+        if result != "AYAQGISR":
+            raise AssertionError(f"Unexpected: {result!r}")
 
 
 class TestNormalizePeptidoform:
