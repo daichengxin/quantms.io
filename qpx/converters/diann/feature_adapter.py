@@ -536,6 +536,9 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             "feature_id",
             "psm_ids",
             "pg_ids",
+            # Producer-specific optional fields not emitted by DIA-NN.
+            "quantification_unit_id",
+            "compensation_voltage",
         }
         select_parts: list[str] = []
         for field in target_schema:
