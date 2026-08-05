@@ -432,6 +432,48 @@ def test_feature_psm_reciprocal_desync_is_warning(tmp_path):
     assert not strict_results["psm"].is_valid
 
 
+def test_feature_psm_inverse_reciprocal_desync_is_warning(tmp_path):
+    """A feature listing a PSM that points to another existing feature is
+    flagged when both directions are populated."""
+    from qpx.core.data.identity import derive_id
+    from qpx.dataset import Dataset
+    from qpx.writers import FeatureWriter, PsmWriter
+    from tests.conftest import make_feature_record, make_psm_record
+
+    ds_dir = tmp_path / "inverse-desync"
+    ds_dir.mkdir()
+    feature_a = make_feature_record(sequence="FEATUREAK", peptidoform="FEATUREAK")
+    feature_b = make_feature_record(sequence="FEATUREBK", peptidoform="FEATUREBK")
+    feature_a["rt"] = 10.0
+    feature_b["rt"] = 20.0
+    psm = make_psm_record(sequence="PSMPEPTIDEK", peptidoform="PSMPEPTIDEK", scan=[10])
+    feature_a_id = derive_id([feature_a["peptidoform"], feature_a["charge"], feature_a["run_file_name"], feature_a["rt"]])
+    feature_b_id = derive_id([feature_b["peptidoform"], feature_b["charge"], feature_b["run_file_name"], feature_b["rt"]])
+    psm_id = derive_id([psm["peptidoform"], psm["charge"], psm["run_file_name"], psm["scan"]])
+    feature_a["psm_ids"] = [psm_id]
+    psm["feature_id"] = feature_b_id
+
+    with FeatureWriter(ds_dir / "exp.feature.parquet") as writer:
+        writer.write_batch([feature_a, feature_b])
+    with PsmWriter(ds_dir / "exp.psm.parquet") as writer:
+        writer.write_batch([psm])
+
+    with Dataset(ds_dir) as dataset:
+        results = dataset.validate(structures=["feature", "psm"])
+    issues = [issue for issue in results["feature"].issues if issue.check == "feature_psm_desync"]
+    assert len(issues) == 1
+    assert issues[0].severity == "warning"
+    assert str(feature_a_id) in issues[0].message
+    assert str(feature_b_id) in issues[0].message
+
+    with Dataset(ds_dir) as dataset:
+        strict_results = dataset.validate(structures=["feature", "psm"], strict=True)
+    strict_issues = [issue for issue in strict_results["feature"].issues if issue.check == "feature_psm_desync"]
+    assert len(strict_issues) == 1
+    assert strict_issues[0].severity == "error"
+    assert not strict_results["feature"].is_valid
+
+
 # ---------------------------------------------------------------------------
 # feature->pg cross-reference referential invariant
 # ---------------------------------------------------------------------------

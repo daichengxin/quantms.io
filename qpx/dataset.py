@@ -622,6 +622,20 @@ class Dataset:
                 ORDER BY psm_id
                 """
             ).fetchall()
+            # The inverse contradiction: a feature lists a psm that explicitly
+            # points at a different feature. A null psm.feature_id means that
+            # direction is unpopulated and is therefore not a contradiction.
+            inverse_desync = self._engine.execute(
+                """
+                SELECT DISTINCT f.feature_id, p.psm_id, p.feature_id AS actual_feature_id
+                FROM feature f
+                CROSS JOIN UNNEST(f.psm_ids) AS _u(referenced_psm_id)
+                JOIN psm p ON p.psm_id = referenced_psm_id
+                WHERE p.feature_id IS NOT NULL
+                  AND p.feature_id <> f.feature_id
+                ORDER BY f.feature_id, p.psm_id
+                """
+            ).fetchall()
         except duckdb.Error as exc:
             _log.warning("feature<->psm referential check could not run (possible schema drift): %s", exc)
             skipped = ValidationIssue(
@@ -664,6 +678,20 @@ class Dataset:
                     message=(
                         f"psm.psm_id {psm_id!r} points to feature {feature_id!r}, but that "
                         f"feature.psm_ids does not list this psm back (reciprocal cross-ref desync)"
+                    ),
+                )
+            )
+        for feature_id, psm_id, actual_feature_id in inverse_desync:
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="feature_psm_desync",
+                    severity=severity,
+                    column="psm_ids",
+                    message=(
+                        f"feature.feature_id {feature_id!r} lists psm {psm_id!r}, but that "
+                        f"psm.feature_id points to feature {actual_feature_id!r} "
+                        "(reciprocal cross-ref desync)"
                     ),
                 )
             )
