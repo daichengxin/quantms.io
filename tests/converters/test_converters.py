@@ -166,6 +166,27 @@ class TestFragPipeFeatureAdapter:
         assert "sequence" in table.schema.names
         assert "anchor_protein" in table.schema.names
 
+    def test_faims_voltage_distinguishes_fragpipe_features(self, tmp_path):
+        """The same precursor at two FAIMS voltages is two Feature entities."""
+        from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
+
+        tsv = tmp_path / "combined_ion.tsv"
+        tsv.write_text(
+            "Peptide Sequence\tCharge\tM/Z\tProtein\tAssigned Modifications\t"
+            "Compensation Voltage\texperiment_1 Intensity\n"
+            "PEPTIDEK\t2\t450.25\tP12345\t\t-45\t1000\n"
+            "PEPTIDEK\t2\t450.25\tP12345\t\t-65\t2000\n"
+        )
+        output = tmp_path / "test.feature.parquet"
+        with FragPipeFeatureAdapter() as adapter:
+            adapter.convert(feature_path=str(tsv), output_path=str(output))
+
+        table = pq.read_table(output)
+        assert set(table.column("quantification_unit_id").to_pylist()) == {"experiment_1"}
+        assert set(table.column("compensation_voltage").to_pylist()) == {-45.0, -65.0}
+        assert len(set(table.column("feature_id").to_pylist())) == 2
+        assert table.schema.metadata[b"identity_composite"] == (b"quantification_unit_id,peptidoform,charge,compensation_voltage")
+
     def test_convert_combined_peptide(self, tmp_path):
         from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
 

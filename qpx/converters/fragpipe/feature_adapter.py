@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 # Derive field map from central YAML mappings
 _FEATURE_MAP = get_field_mappings("fragpipe", "feature")
+_FEATURE_IDENTITY_COMPOSITE = (
+    "quantification_unit_id",
+    "peptidoform",
+    "charge",
+    "compensation_voltage",
+)
 
 
 def _extract_pg_proteins(
@@ -114,11 +120,12 @@ class FragPipeFeatureAdapter(BaseConverter):
         psm_lookup = self._build_psm_lookup(psm_path) if psm_path else {}
 
         # Step 5: Stream and transform
-        # NOTE: no producer-specific identity_composite is passed here — FragPipe
-        # keeps the feature.yaml schema default for now. Its true producer composite
-        # needs compensation_voltage + quantification_unit_id (bigbio/qpx#230), which
-        # do not exist in feature.yaml yet; wire it once those columns are added.
-        with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
+        with FeatureWriter(
+            output_path,
+            creator=creator,
+            compression=self._compression,
+            identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+        ) as writer:
             for batch in self._query_batched("SELECT * FROM fragpipe_features", chunksize):
                 df = batch.to_pandas()
                 records = self._transform_batch(df, experiments, format_type, psm_lookup)
@@ -383,6 +390,7 @@ class FragPipeFeatureAdapter(BaseConverter):
 
         # M/Z (from feature file — used as fallback)
         mz = safe_float(row.get(r.get("observed_mz", "M/Z"))) or 0.0
+        compensation_voltage = safe_float(row.get(r.get("compensation_voltage", "Compensation Voltage"))) or 0.0
 
         # Determine charge states
         if format_type == "ion":
@@ -434,10 +442,12 @@ class FragPipeFeatureAdapter(BaseConverter):
                     "additional_scores": None,
                     "predicted_rt": None,
                     "run_file_name": experiment,
+                    "quantification_unit_id": experiment,
                     "cv_params": None,
                     "scan": psm_info.get("scan", []),
                     "rt": None,
                     "ion_mobility": psm_info.get("ion_mobility"),
+                    "compensation_voltage": compensation_voltage,
                     "missed_cleavages": psm_info.get("missed_cleavages"),
                     "intensities": intensities,
                     "additional_intensities": None,
