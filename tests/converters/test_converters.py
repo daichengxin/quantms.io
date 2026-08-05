@@ -1,6 +1,7 @@
 """Converter adapter tests with synthetic data."""
 
 import pyarrow.parquet as pq
+import pytest
 
 # ---------------------------------------------------------------------------
 # ProForma conversion unit tests
@@ -187,18 +188,15 @@ class TestFragPipeFeatureAdapter:
         assert len(set(table.column("feature_id").to_pylist())) == 2
         assert table.schema.metadata[b"identity_composite"] == (b"quantification_unit_id,peptidoform,charge,compensation_voltage")
 
-    def test_convert_combined_peptide(self, tmp_path):
+    def test_rejects_combined_peptide(self, tmp_path):
         from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter
 
         tsv = self._write_peptide_tsv(tmp_path)
         output = tmp_path / "test.feature.parquet"
         with FragPipeFeatureAdapter() as adapter:
-            adapter.convert(feature_path=str(tsv), output_path=str(output))
-        assert output.exists()
-        table = pq.read_table(output)
-        # 1 peptide x 2 experiments x 2 charges = 4 rows
-        assert table.num_rows == 4
-        assert "sequence" in table.schema.names
+            with pytest.raises(ValueError, match="combined_peptide.tsv.*peptide-level.*combined_ion.tsv"):
+                adapter.convert(feature_path=str(tsv), output_path=str(output))
+        assert not output.exists()
 
     def test_ion_modifications_parsed(self, tmp_path):
         from qpx.converters.fragpipe.feature_adapter import FragPipeFeatureAdapter

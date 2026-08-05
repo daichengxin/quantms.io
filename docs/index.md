@@ -39,7 +39,7 @@ QPX provides a comprehensive proteomics data processing architecture with core m
 | **MaxQuant**            | msms.txt         | evidence.txt         | proteinGroups.txt        |
 | **DIA-NN**              | -                | report.tsv           | pg_matrix.tsv            |
 | **Spectronaut**         | -                | report.tsv           | report.tsv (PG.Quantity) |
-| **FragPipe**            | psm.tsv          | combined_peptide.tsv | combined_protein.tsv     |
+| **FragPipe**            | psm.tsv          | combined_ion.tsv     | combined_protein.tsv     |
 | **OpenMS native QPX**   | psm.parquet      | feature.parquet      | pg.parquet               |
 | **OpenMS consensusXML** | consensusXML     | consensusXML         | consensusXML             |
 | **CPTAC CDAP**          | .psm             | .psm reporter ions   | feature-derived          |

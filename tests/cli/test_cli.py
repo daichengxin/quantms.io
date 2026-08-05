@@ -44,10 +44,10 @@ class TestFragPipeConvertCLI:
         _assert_help(
             result,
             "--ion-file",
-            "--peptide-file",
             "--pg-file",
             "--experiment-annotation-file",
         )
+        assert "--peptide-file" not in result.output
 
 
 class TestMzIdentMLConvertCLI:
