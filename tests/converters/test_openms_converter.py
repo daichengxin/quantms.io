@@ -158,10 +158,11 @@ class TestOpenMSConverter:
         assert "grouped_runs" in pg_table.column_names
         assert "run_file_name" not in pg_table.column_names
 
-    def test_duplicate_identity_warns_and_still_converts(self, tmp_path, caplog):
-        """A duplicate identity composite — e.g. OpenMS -out_qpx writing one PSM row
-        per search engine (same peptidoform/charge/run/scan, different score) — is a
-        warning, not a failure: the conversion completes and installs the output."""
+    def test_multiengine_psms_merged_keep_lowest_pep(self, tmp_path, caplog):
+        """OpenMS -out_qpx writes one PSM row per search engine (same
+        peptidoform/charge/run/scan, different per-engine score). The converter
+        merges these collisions into one row: keep the lowest-PEP row and fold the
+        other engine's scores into additional_scores (see OpenMS#9871)."""
         import logging
 
         qpx_dir = tmp_path / "openms_qpx"
@@ -170,7 +171,10 @@ class TestOpenMSConverter:
             make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1001]),
             make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1001]),
         ]
+        records[0]["posterior_error_probability"] = 0.6
+        records[0]["additional_scores"] = [{"score_name": "comet:pep", "score_value": 0.6}]
         records[1]["posterior_error_probability"] = 0.2
+        records[1]["additional_scores"] = [{"score_name": "msgf:pep", "score_value": 0.2}]
         source = qpx_dir / "quantms.psm.parquet"
         current_schema = load_schema("psm").get_arrow_schema()
         legacy_schema = pa.schema([field for field in current_schema if field.name not in {"psm_id", "feature_id"}])
@@ -185,8 +189,15 @@ class TestOpenMSConverter:
 
         installed = output / "openms.psm.parquet"
         assert installed.exists()
-        assert pq.read_table(installed).num_rows == 2
-        assert "duplicate" in caplog.text.lower()
+        merged = pq.read_table(installed)
+        assert merged.num_rows == 1
+        row = merged.to_pylist()[0]
+        # Kept the lowest-PEP (best) row...
+        assert row["posterior_error_probability"] == 0.2
+        # ...and preserved both engines' scores.
+        names = {score["score_name"] for score in row["additional_scores"]}
+        assert {"comet:pep", "msgf:pep"} <= names
+        assert "merged" in caplog.text.lower()
         assert not list(output.glob(".openms.psm.parquet.*.tmp"))
 
     def test_convert_full_bundle(self, tmp_path):

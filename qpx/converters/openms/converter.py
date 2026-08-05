@@ -200,6 +200,66 @@ def _add_legacy_grouped_runs(table: pa.Table) -> pa.Table:
     return table.append_column("grouped_runs", pa.array(values, type=pa.list_(pa.string())))
 
 
+def _merge_multiengine_psms(table: pa.Table, composite: tuple[str, ...] | None) -> tuple[pa.Table, int]:
+    """Collapse PSM rows that collide on the identity composite into one row.
+
+    OpenMS ``-out_qpx`` emits one PSM row per search engine (e.g. Comet + MS-GF+):
+    the same spectrum matched to the same peptidoform yields rows that are
+    identical in every identity field and differ only in the per-engine score
+    (see OpenMS#9871). Keep the row with the lowest ``posterior_error_probability``
+    (best confidence) and fold the other rows' ``additional_scores`` into it so no
+    engine's score is lost. Returns the deduped table and the number of rows dropped.
+    """
+    keys = composite or _OPENMS_IDENTITY_COMPOSITES[PSM]
+    keys = [k for k in keys if k in table.column_names]
+    if not keys or table.num_rows == 0:
+        return table, 0
+
+    rows = table.to_pylist()
+
+    def _identity(row: dict) -> tuple:
+        return tuple(tuple(row[k]) if isinstance(row[k], list) else row[k] for k in keys)
+
+    def _pep(row: dict) -> float:
+        value = row.get("posterior_error_probability")
+        return value if value is not None else float("inf")
+
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for row in rows:
+        identity = _identity(row)
+        if identity not in groups:
+            groups[identity] = []
+            order.append(identity)
+        groups[identity].append(row)
+
+    dropped = 0
+    merged: list[dict] = []
+    for identity in order:
+        group = groups[identity]
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        best = min(group, key=_pep)
+        seen: set[tuple] = set()
+        combined: list = []
+        # Best row's own scores first, then the discarded engines' scores.
+        for row in sorted(group, key=lambda r: (r is not best, _pep(r))):
+            for score in row.get("additional_scores") or []:
+                marker = (score.get("score_name"), score.get("score_value"))
+                if marker not in seen:
+                    seen.add(marker)
+                    combined.append(score)
+        best = dict(best)
+        best["additional_scores"] = combined or None
+        merged.append(best)
+        dropped += len(group) - 1
+
+    if dropped == 0:
+        return table, 0
+    return pa.Table.from_pylist(merged, schema=table.schema), dropped
+
+
 def _rewrite_core_file(
     view: str,
     src_path: Path,
@@ -231,6 +291,22 @@ def _rewrite_core_file(
     fraction_group_resolver = partial(_fraction_group_for, lookup=fraction_group_lookup)
     try:
         with writer_class(temp_path, **writer_kwargs) as writer:
+            if view == PSM:
+                # Merge multi-engine PSM collisions across the whole file (duplicates
+                # may span row groups) before deriving psm_id, so identities are unique.
+                table = parquet.read()
+                table, dropped = _merge_multiengine_psms(table, identity_composite)
+                if dropped:
+                    logger.warning(
+                        "Merged %d duplicate PSM row(s) colliding on the identity composite "
+                        "(one row per search engine); kept lowest-PEP row, folded other scores "
+                        "into additional_scores.",
+                        dropped,
+                    )
+                rows += table.num_rows
+                writer.write_table(writer.align_table_to_schema(table))
+                parquet.close()
+                return temp_path, rows, annotated
             for group in range(parquet.num_row_groups):
                 table = parquet.read_row_group(group)
                 if view == PG:
