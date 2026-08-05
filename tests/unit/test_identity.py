@@ -195,6 +195,21 @@ def test_override_provided_id_stashes_to_cv_params(tmp_path):
     assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in cv
 
 
+def test_override_requires_cv_params_to_preserve_provided_id(tmp_path):
+    """Override mode rejects a table that cannot retain its producer id."""
+    path = tmp_path / "missing-cv.feature.parquet"
+    record = make_feature_record()
+    record["feature_id"] = 123456789
+    writer = FeatureWriter(path, override_provided_ids=True)
+    table = writer.align_table_to_schema(pa.Table.from_pylist([record])).drop(["cv_params"])
+
+    with pytest.raises(ValueError, match="requires a 'cv_params' column to preserve provided feature_id values"):
+        with writer:
+            writer.write_table(table)
+
+    assert not path.exists()
+
+
 def test_derive_id_preserves_ordered_list_components():
     """A multi-component scan is a tuple, not a set."""
     assert derive_id(["P1", [1, 2, 3]]) != derive_id(["P1", [3, 1, 2]])
