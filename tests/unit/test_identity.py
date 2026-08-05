@@ -148,13 +148,16 @@ def test_unidentified_feature_namespaces_provided_id(tmp_path):
         assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in params
 
 
-def test_unidentified_feature_requires_provided_id(tmp_path):
-    """QPX must not invent a natural identity for an unidentified Feature."""
-    path = tmp_path / "missing-unidentified-id.feature.parquet"
+def test_unidentified_feature_derives_id_from_composite(tmp_path):
+    """An unidentified Feature (null peptidoform) with no producer id derives a
+    feature_id from the composite (null peptidoform + measured charge/run/rt/...)
+    rather than failing the conversion."""
+    path = tmp_path / "unidentified.feature.parquet"
     rec = make_feature_record(sequence="", peptidoform="")
-    with pytest.raises(ValueError, match="requires a producer-supplied feature_id"):
-        with FeatureWriter(path) as writer:
-            writer.write_batch([rec])
+    with FeatureWriter(path) as writer:
+        writer.write_batch([rec])
+    ids = pq.read_table(path).column("feature_id").to_pylist()
+    assert ids and ids[0] is not None
 
 
 def test_provided_psm_id_kept_by_default(tmp_path):
@@ -167,15 +170,22 @@ def test_provided_psm_id_kept_by_default(tmp_path):
     assert pq.read_table(path).column("psm_id").to_pylist() == [123456789]
 
 
-def test_writer_rejects_duplicate_identity_across_batches(tmp_path):
-    """Whole-file PK validation catches collisions split across writer batches."""
+def test_writer_warns_on_duplicate_identity_across_batches(tmp_path, caplog):
+    """A duplicate primary key across batches is reported as a WARNING (not a hard
+    error), so a conversion never fails on producer data that collides on the
+    identity composite; the file is still written."""
+    import logging
+
     path = tmp_path / "duplicate.feature.parquet"
     first = make_feature_record()
     second = make_feature_record(intensities=[{"label": "TMT126", "intensity": 2000.0}])
 
-    with pytest.raises(ValueError, match=r"Primary key \(feature_id\) has 1 duplicate row"):
+    with caplog.at_level(logging.WARNING, logger="qpx.writers.base"):
         with FeatureWriter(path, batch_size=1) as writer:
             writer.write_batch([first, second])
+
+    assert "duplicate row" in caplog.text
+    assert path.exists()  # written despite the collision
 
 
 def test_override_provided_id_stashes_to_cv_params(tmp_path):

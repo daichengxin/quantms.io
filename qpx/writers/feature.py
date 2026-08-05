@@ -26,12 +26,9 @@ class FeatureWriter(BaseWriter):
         cv_lists: list | None,
         id_field: str,
     ) -> list[int]:
-        """Derive identified ids and namespace required unidentified producer ids."""
+        """Derive identified ids; for unidentified Features derive from the composite
+        when the producer supplies no id, or namespace the producer id when it does."""
         peptidoforms = composite_values["peptidoform"]
-        for index, (peptidoform, provided) in enumerate(zip(peptidoforms, existing)):
-            if not peptidoform and provided is None:
-                raise ValueError(f"Unidentified Feature at row {index} requires a producer-supplied feature_id")
-
         ids = super()._identity_values(existing, composite_values, composite, cv_lists, id_field)
         if not self._override_provided_ids:
             return ids
@@ -40,6 +37,14 @@ class FeatureWriter(BaseWriter):
             if peptidoform:
                 continue
             provided = existing[index]
+            if provided is None:
+                # Unidentified Feature with no producer id: the base has already
+                # derived an id from the composite (a null peptidoform plus the
+                # measured charge/run/rt/…), the best identity available. A residual
+                # collision surfaces as a duplicate-primary-key warning at close.
+                continue
+            # Unidentified Feature WITH a producer id: namespace it by run/unit so
+            # tool-local ids cannot collide across runs, and stash the original.
             namespace_field = "run_file_name" if "run_file_name" in composite_values else "quantification_unit_id"
             ids[index] = derive_id([composite_values[namespace_field][index], provided])
             if cv_lists is not None:
