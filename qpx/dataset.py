@@ -530,7 +530,49 @@ class Dataset:
         if "feature" in results and "psm" in results and self.feature is not None and self.psm is not None:
             self._check_feature_psm_referential(results["feature"], results["psm"], strict=strict)
 
+        # feature.pg_ids is the canonical feature -> protein-group reference.
+        # When both views are present, every populated id must resolve to pg.pg_id.
+        if "feature" in results and "pg" in results and self.feature is not None and self.pg is not None:
+            self._check_feature_pg_referential(results["feature"], strict=strict)
+
         return results
+
+    def _check_feature_pg_referential(self, feature_result: ValidationResult, *, strict: bool = False) -> None:
+        """Flag feature.pg_ids elements that do not resolve to pg.pg_id."""
+        severity = "error" if strict else "warning"
+        try:
+            dangling_pg_ids = self._engine.execute(
+                """
+                SELECT DISTINCT referenced_pg_id
+                FROM feature f, UNNEST(f.pg_ids) AS _u(referenced_pg_id)
+                WHERE referenced_pg_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM pg p WHERE p.pg_id = referenced_pg_id)
+                ORDER BY referenced_pg_id
+                """
+            ).fetchall()
+        except duckdb.Error as exc:
+            _log.warning("feature->pg referential check could not run (possible schema drift): %s", exc)
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="referential_check_skipped",
+                    severity=severity,
+                    column="pg_ids",
+                    message=f"feature->pg referential check could not run (possible schema drift): {exc}",
+                )
+            )
+            return
+
+        for (pg_id,) in dangling_pg_ids:
+            feature_result.issues.append(
+                ValidationIssue(
+                    structure="feature",
+                    check="dangling_pg_id",
+                    severity=severity,
+                    column="pg_ids",
+                    message=f"feature.pg_ids contains {pg_id!r}, which does not resolve to a pg.pg_id in pg.parquet",
+                )
+            )
 
     def _check_feature_psm_referential(
         self, feature_result: ValidationResult, psm_result: ValidationResult, *, strict: bool = False

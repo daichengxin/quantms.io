@@ -430,3 +430,59 @@ def test_feature_psm_reciprocal_desync_is_warning(tmp_path):
     assert len(strict_desync) == 1
     assert strict_desync[0].severity == "error"
     assert not strict_results["psm"].is_valid
+
+
+# ---------------------------------------------------------------------------
+# feature->pg cross-reference referential invariant
+# ---------------------------------------------------------------------------
+
+
+def _write_feature_pg_dataset(ds_dir, feature_pg_ids):
+    """Write one feature and its candidate protein-group references."""
+    from qpx.core.data.identity import derive_id
+    from qpx.writers import FeatureWriter, PgWriter
+    from tests.conftest import make_feature_record, make_pg_record
+
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    feature = make_feature_record()
+    feature["pg_ids"] = feature_pg_ids
+    pg = make_pg_record()
+    with FeatureWriter(ds_dir / "exp.feature.parquet") as writer:
+        writer.write_batch([feature])
+    with PgWriter(ds_dir / "exp.pg.parquet") as writer:
+        writer.write_batch([pg])
+    pg_id = derive_id([pg["anchor_protein"], pg["grouped_runs"], pg["intensities"][0]["label"]])
+    return ds_dir, pg_id
+
+
+def test_feature_pg_cross_refs_resolve_cleanly(tmp_path):
+    """A feature.pg_ids entry resolving to pg.pg_id produces no issue."""
+    from qpx.dataset import Dataset
+
+    _, pg_id = _write_feature_pg_dataset(tmp_path / "probe", None)
+    ds_dir, _ = _write_feature_pg_dataset(tmp_path / "good", [pg_id])
+    with Dataset(ds_dir) as dataset:
+        results = dataset.validate(structures=["feature", "pg"], strict=True)
+
+    assert not [issue for issue in results["feature"].issues if issue.check == "dangling_pg_id"]
+    assert results["feature"].is_valid
+
+
+def test_feature_pg_cross_refs_dangling_warn_and_fail_strict(tmp_path):
+    """A missing pg.pg_id is a warning normally and an error in strict mode."""
+    from qpx.dataset import Dataset
+
+    ds_dir, _ = _write_feature_pg_dataset(tmp_path / "bad", [999999])
+    with Dataset(ds_dir) as dataset:
+        results = dataset.validate(structures=["feature", "pg"])
+    dangling = [issue for issue in results["feature"].issues if issue.check == "dangling_pg_id"]
+    assert len(dangling) == 1
+    assert dangling[0].severity == "warning"
+    assert results["feature"].is_valid
+
+    with Dataset(ds_dir) as dataset:
+        strict_results = dataset.validate(structures=["feature", "pg"], strict=True)
+    strict_dangling = [issue for issue in strict_results["feature"].issues if issue.check == "dangling_pg_id"]
+    assert len(strict_dangling) == 1
+    assert strict_dangling[0].severity == "error"
+    assert not strict_results["feature"].is_valid
