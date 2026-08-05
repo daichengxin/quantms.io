@@ -232,6 +232,33 @@ def test_pg_uses_id_merge_index_after_unmapped_map_index():
     assert protein_maps.acc_to_feat == {"P1": {("PEPTIDE", 2)}}
 
 
+def test_consensus_psms_use_parent_feature_run_context(tmp_path):
+    """Assigned PSMs inherit the run represented by their parent feature."""
+    from qpx.converters.openms_consensus.psm_adapter import consensus_psms_to_records
+
+    consensusxml = _TMT_CONSENSUSXML.replace(
+        '<map id="0" name="run_01.mzML"',
+        '<map id="0" name="run_A.mzML"',
+    ).replace(
+        '<map id="1" name="run_01.mzML"',
+        '<map id="1" name="run_B.mzML"',
+    )
+    consensusxml = consensusxml.replace(
+        'map="0" id="0" rt="100.123456" mz="450.251234" it="1000.0"', 'map="0" id="0" rt="100.123456" mz="450.251234" it="0.0"'
+    )
+    consensusxml = consensusxml.replace(
+        "        </PeptideHit>\n      </PeptideIdentification>",
+        '        </PeptideHit>\n        <UserParam type="int" name="id_merge_index" value="0"/>\n      </PeptideIdentification>',
+    )
+    path = tmp_path / "multi_run.consensusXML"
+    path.write_text(consensusxml)
+
+    records = consensus_psms_to_records(str(path))
+
+    assert len(records) == 1
+    assert records[0]["run_file_name"] == "run_B"
+
+
 def _write_multi_reference_consensusxml(path):
     """Write one ConsensusFeature supported by two spectrum references."""
     second_pid = """
