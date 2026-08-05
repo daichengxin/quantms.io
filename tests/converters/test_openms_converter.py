@@ -158,8 +158,12 @@ class TestOpenMSConverter:
         assert "grouped_runs" in pg_table.column_names
         assert "run_file_name" not in pg_table.column_names
 
-    def test_invalid_legacy_identity_does_not_replace_output(self, tmp_path):
-        """Strict validation happens before a rewritten core file is installed."""
+    def test_duplicate_identity_warns_and_still_converts(self, tmp_path, caplog):
+        """A duplicate identity composite — e.g. OpenMS -out_qpx writing one PSM row
+        per search engine (same peptidoform/charge/run/scan, different score) — is a
+        warning, not a failure: the conversion completes and installs the output."""
+        import logging
+
         qpx_dir = tmp_path / "openms_qpx"
         qpx_dir.mkdir()
         records = [
@@ -175,14 +179,14 @@ class TestOpenMSConverter:
 
         output = tmp_path / "output"
         output.mkdir()
-        destination = output / "openms.psm.parquet"
-        sentinel = b"pre-existing output"
-        destination.write_bytes(sentinel)
 
-        with pytest.raises(ValueError, match="Primary key.*duplicate"):
+        with caplog.at_level(logging.WARNING):
             OpenMSConverter(qpx_dir=qpx_dir).convert(output_folder=output, output_prefix="openms")
 
-        assert destination.read_bytes() == sentinel
+        installed = output / "openms.psm.parquet"
+        assert installed.exists()
+        assert pq.read_table(installed).num_rows == 2
+        assert "duplicate" in caplog.text.lower()
         assert not list(output.glob(".openms.psm.parquet.*.tmp"))
 
     def test_convert_full_bundle(self, tmp_path):

@@ -158,16 +158,23 @@ def _validate_core(discovered: dict[str, Path]) -> None:
         schema = load_schema(_VIEW_SCHEMAS[view])
         table = pq.read_table(str(path))
         result = schema.validate_full(table, strict=True)
-        if not result.is_valid:
-            errors = "; ".join(i.message for i in result.errors)
-            raise ValueError(f"Validation failed for {path.name}: {errors}")
+        # A duplicate primary key is a warning, not a hard failure, so a conversion
+        # never fails on producer data that collides on the identity composite (e.g.
+        # OpenMS -out_qpx writing one PSM row per search engine). Every other strict
+        # issue (null in a required column, type mismatch) still fails the conversion.
+        errors = [i for i in result.errors if i.check != "duplicate_pk"]
+        dup = [i for i in result.errors if i.check == "duplicate_pk"]
+        for i in dup:
+            logger.warning("%s: %s", path.name, i.message)
+        if errors:
+            raise ValueError(f"Validation failed for {path.name}: {'; '.join(i.message for i in errors)}")
         logger.info(
             "%s: %s (%d rows, %d errors, %d warnings)",
             view,
             path.name,
             table.num_rows,
-            len(result.errors),
-            len(result.warnings),
+            len(errors),
+            len(result.warnings) + len(dup),
         )
 
 
