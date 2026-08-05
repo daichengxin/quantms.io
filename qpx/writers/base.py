@@ -409,7 +409,16 @@ class BaseWriter:
         pass tables whose id column is absent or null.
         """
         table = self._fill_identity_table(table)
-        errors = self._schema_class.validate(table, strict=True)
+        result = self._schema_class.validate_full(table, strict=True)
+        # A duplicate primary key is reported as a WARNING, not a hard error (as at
+        # close), so a conversion never fails on producer data that collides on the
+        # identity composite (e.g. OpenMS -out_qpx writing one PSM row per search
+        # engine). Every other strict issue (null in a required column, type
+        # mismatch) remains a hard error.
+        errors = [issue.message for issue in result.errors if issue.check != "duplicate_pk"]
+        for issue in result.errors:
+            if issue.check == "duplicate_pk":
+                _log.warning("%s", issue.message)
         if errors:
             raise ValueError("Schema validation failed:\n" + "\n".join(errors))
         self._ensure_writer()

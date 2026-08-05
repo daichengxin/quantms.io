@@ -297,3 +297,23 @@ def test_ids_agree_across_write_paths(tmp_path):
         written_id("d.feature.parquet", "df"),
     }
     assert len(ids) == 1
+
+
+def test_write_table_warns_on_duplicate_pk_not_raises(tmp_path, caplog):
+    """write_table (the OpenMS enrichment path) reports a duplicate PK as a WARNING,
+    not a strict Schema-validation error — so per-search-engine PSM rows that collide
+    on the identity composite still convert."""
+    import logging
+
+    path = tmp_path / "dup_table.feature.parquet"
+    r1 = make_feature_record(peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
+    r2 = make_feature_record(
+        peptidoform="PEPTIDEK", charge=2, run_file_name="run_01", intensities=[{"label": "TMT126", "intensity": 9.0}]
+    )
+    w = FeatureWriter(path)
+    table = w.align_table_to_schema(pa.Table.from_pylist([dict(r1), dict(r2)]))
+    with caplog.at_level(logging.WARNING, logger="qpx.writers.base"):
+        w.write_table(table)  # must NOT raise
+    w.close()
+    assert "duplicate row" in caplog.text
+    assert path.exists()
