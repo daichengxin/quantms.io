@@ -121,7 +121,7 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
         accumulate_unassigned_maps,
         build_pg_records,
     )
-    from qpx.converters.openms_consensus.psm_adapter import _run_resolver, psm_records_for_pid
+    from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, _run_resolver, psm_records_for_pid
     from qpx.converters.openms_consensus.streaming import StreamingConsensusMap
 
     cm = StreamingConsensusMap(consensusxml_path)
@@ -166,8 +166,11 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
                 cf_feats = feature_records_for_cf(obj, map_info, anchor_map) if fw is not None else []
                 cf_psms: list[dict] = []
                 if pw is not None:
+                    # Multi-run isobaric PIDs carry a local id_merge_index; the
+                    # feature's element runs disambiguate which run they belong to.
+                    cf_runs = _cf_element_runs(obj, map_info)
                     for pid in obj.getPeptideIdentifications():
-                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen))
+                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
                 # Cross-reference the feature<->psm ids only when both views are
                 # emitted; each PSM links to the feature record of its own run.
                 if fw is not None and pw is not None:
@@ -302,7 +305,7 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
     def _convert_in_memory(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top) -> dict:
         """feature/psm/pg via the in-memory pyopenms map (loaded once, iterated cheaply)."""
         from qpx.converters.openms_consensus.feature_adapter import feature_map_info, feature_records_for_cf
-        from qpx.converters.openms_consensus.psm_adapter import _run_resolver, psm_records_for_pid
+        from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, _run_resolver, psm_records_for_pid
 
         cm = load_consensus_map(consensusxml_path)
         if sdrf_path:
@@ -325,8 +328,11 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
                 cf_feats = feature_records_for_cf(cf, map_info, anchor_map) if want_feature else []
                 cf_psms: list[dict] = []
                 if want_psm:
+                    # Multi-run isobaric PIDs carry a local id_merge_index; the
+                    # feature's element runs disambiguate which run they belong to.
+                    cf_runs = _cf_element_runs(cf, map_info)
                     for pid in cf.getPeptideIdentifications():
-                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen))
+                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
                 if want_feature and want_psm:
                     _link_feature_psm(cf_feats, cf_psms)
                 feat_recs.extend(cf_feats)
