@@ -28,7 +28,7 @@ def _pg_table(anchor, grouped_runs, label=None):
     schema = PgSchema.get_arrow_schema()
     n = len(anchor)
     labels = label if label is not None else [None] * n
-    pg_ids = [derive_id([anchor[i], grouped_runs[i], labels[i]]) for i in range(n)]
+    pg_ids = [derive_id([anchor[i], grouped_runs[i], labels[i]], unordered_list_indices=(1,)) for i in range(n)]
     arrays = {}
     for f in schema:
         if f.name == "pg_id":
