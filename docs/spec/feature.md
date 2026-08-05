@@ -2,8 +2,9 @@
 
 The feature view captures quantified peptide information, including intensity
 across labels and protein-group mappings. Each row has a mandatory opaque
-`feature_id`. The Parquet footer's `identity_composite` records the upstream
-properties from which QPX derives that ID; converters may override the schema
+`feature_id`, which is the primary key. A producer-supplied ID is preserved by
+default; otherwise QPX derives the ID from the upstream properties recorded in
+the Parquet footer's `identity_composite`. Converters may override the schema
 default when their producer represents a different Feature-level entity.
 
 For a de novo workflow without a database search, set `is_decoy` to `false` and
@@ -23,6 +24,12 @@ is meaningful within a file only; distinct QPX files must not be joined on
 - **Integration with sample metadata**: Each feature carries label information, connecting quantification data to experimental design described in the SDRF.
 
 ## Schema
+
+### Identity
+
+| Field | Description | Type | Required |
+|-------|-------------|------|----------|
+| `feature_id` | Opaque primary key, supplied by the producer or derived by QPX from the footer-declared `identity_composite` | int64 | yes |
 
 ### Core Identification Fields
 
@@ -84,7 +91,7 @@ Each entry in `pg_positions` contains:
 | `end` | 1-based end position of the peptide in the protein sequence (inclusive) | `int` |
 
 !!! note "Gene and protein inference data"
-    Gene accessions, gene names, and unique peptide indicators are optionally included in the feature file for convenience. Protein-level scores are stored in the [Protein Group View](pg.md). For the complete protein-level perspective with aggregated intensities and peptide counts, join the protein mapping (for example, `anchor_protein`) and require `feature.run_file_name` to be a member of `pg.grouped_runs`.
+    Gene accessions, gene names, and unique peptide indicators are optionally included in the feature file for convenience. Protein-level scores are stored in the [Protein Group View](pg.md). When `pg_ids` is populated, join it directly to `pg.pg_id`. Otherwise use the semantic protein mapping (for example, `anchor_protein`) and require `feature.run_file_name` to be a member of `pg.grouped_runs`.
 
 !!! info "Optional vs nullable"
     `pg_global_qvalue` is **optional** — the column may be absent from the file entirely if the search engine does not provide a protein group q-value. When present, individual values may be null.
@@ -95,6 +102,13 @@ Each entry in `pg_positions` contains:
 |-------|-------------|------|----------|
 | `id_run_file_name` | The run file containing the best PSM that identified the feature (may differ from `run_file_name`) | string, null | no |
 | `scan` | Scan identifier of the best PSM that identified the feature, as an array of integer components (e.g., `[43920]` for single-scan instruments, `[10, 1, 345]` for Waters function/process/scan) | array[int32] | yes |
+
+### Optional Cross-References
+
+| Field | Description | Type | Required |
+|-------|-------------|------|----------|
+| `psm_ids` | References to PSM rows through `psm.psm_id`; null when no explicit links are available | array[int64], null | no |
+| `pg_ids` | References to protein-group rows through `pg.pg_id`; null when no explicit links are available | array[int64], null | no |
 
 ## Shared Fields
 
