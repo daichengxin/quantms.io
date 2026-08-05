@@ -24,20 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Feature/PSM/PG primary key is now the derived id** (`feature_id` / `psm_id` / `pg_id`) instead of the composite tuple; the previous composite is retained as the footer-declared `identity_composite` the id is derived from
 - **Deterministic ids across write paths**: the id is now derived from the **persisted (Arrow-cast) values** in a single place, so `write_batch`, `write_table`, and `write_dataframe` produce identical ids for the same row (previously a float32 field such as `rt` could hash differently on the record vs table path). The `write_table`/`write_dataframe` paths derive the id before the non-nullable cast, so a frame/table without a precomputed id is accepted
-- **Injective identity encoding**: `canonical()` uses JSON (quoted/escaped) instead of a delimiter join, so composites whose list elements or fields contain the delimiters (e.g. run names with commas) can no longer alias to the same id
+- **Injective identity encoding**: `canonical()` uses JSON (quoted/escaped) instead of a delimiter join, so composites whose list elements or fields contain the delimiters (e.g. run names with commas) can no longer alias to the same id. Ordered list fields such as multi-component `scan` identifiers retain their order; only set-valued `grouped_runs` is canonicalized without regard to order
 - **Referential validation** also flags reciprocal feature↔psm desync (an edge present one way but contradicted by the other), as a warning, only where the opposite direction is populated
 
-- **BREAKING — Feature/PSM primary keys** (format 1.1, issue #217): feature PK
-  `[sequence, charge, run_file_name, anchor_protein]` → `[peptidoform, charge,
-  run_file_name, rt]`; psm PK `[sequence, charge, run_file_name, scan]` →
-  `[peptidoform, charge, run_file_name, scan]`. Measured across ~13M real rows:
-  `anchor_protein` is functionally redundant and apex `rt` is the only populated
-  RT column that resolves co-eluting peaks of one peptidoform+charge in a run.
-  Regenerate feature/psm files. `rt` is finite when present but **nullable**
-  (some producers, e.g. FragPipe `combined_ion`, report no per-feature RT); a null
-  `rt` is still a key value, so such producers must emit at most one feature per
-  `(peptidoform, charge, run_file_name)` and any collision is caught as a
-  `duplicate_pk` error; the key is within-file only.
+- **BREAKING — Feature/PSM identity composites** (format 1.1, issue #217): the
+  schema-default Feature composite changes from `[sequence, charge,
+  run_file_name, anchor_protein]` to `[peptidoform, charge, run_file_name, rt]`;
+  the PSM composite changes from `[sequence, charge, run_file_name, scan]` to
+  `[peptidoform, charge, run_file_name, scan]`. Measured across ~13M real rows,
+  `anchor_protein` is functionally redundant and apex `rt` distinguishes
+  repeated peaks where the producer reports it. A converter may declare a
+  different producer-specific Feature composite when its upstream entity uses
+  other measured properties. The actual primary keys are the mandatory opaque
+  ID columns described above. Regenerate Feature and PSM files.
 - **Parquet output size**: writers now apply `BYTE_STREAM_SPLIT` encoding to high-entropy float columns (rt, rt_start/stop, predicted_rt, calculated/observed m/z, intensity arrays) and raise the ZSTD level to 9. Encoding-only and fully lossless — no schema change; output reads unchanged with pyarrow and DuckDB. Measured ~16% smaller on a 14 GB feature.parquet.
 
 ### Removed
