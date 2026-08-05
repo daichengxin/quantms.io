@@ -256,6 +256,50 @@ class BaseWriter:
                     f"Column '{field.name}' has {obj.column(i).null_count} null(s) but is marked as required in the schema"
                 )
 
+    def _persisted_composite_values(self, table: pa.Table, composite: Sequence[str]) -> dict[str, list]:
+        """Return composite columns cast to their persisted schema types."""
+        names = set(table.schema.names)
+        schema = self.arrow_schema
+        values: dict[str, list] = {}
+        for field_name in composite:
+            if field_name not in names:
+                values[field_name] = [None] * table.num_rows
+                continue
+            column = table.column(field_name)
+            field_type = schema.field(field_name).type
+            if column.type != field_type:
+                try:
+                    column = column.cast(field_type)
+                except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError):
+                    # Schema validation below reports incompatible source types.
+                    pass
+            values[field_name] = column.to_pylist()
+        return values
+
+    def _identity_values(
+        self,
+        existing: list,
+        composite_values: dict[str, list],
+        composite: Sequence[str],
+        cv_lists: list | None,
+        id_field: str,
+    ) -> list[int]:
+        """Preserve or derive row IDs, recording overridden producer IDs."""
+        ids: list[int] = []
+        for index, provided in enumerate(existing):
+            if provided is not None and self._override_provided_ids:
+                if cv_lists is not None:
+                    params = list(cv_lists[index] or [])
+                    params.append({"cv_name": f"provided_{id_field}", "cv_value": str(provided)})
+                    cv_lists[index] = params
+                ids.append(derive_id([composite_values[field][index] for field in composite]))
+                self.overridden_id_count += 1
+            elif provided is None:
+                ids.append(derive_id([composite_values[field][index] for field in composite]))
+            else:
+                ids.append(provided)
+        return ids
+
     def _fill_identity_table(self, table: pa.Table) -> pa.Table:
         """Return *table* with its derived-id column present and non-null.
 
@@ -270,46 +314,17 @@ class BaseWriter:
         id_field = self._id_field
         if not composite or id_field is None:
             return table
-        n = table.num_rows
         names = set(table.schema.names)
-        sch = self.arrow_schema
+        n = table.num_rows
         # Hash the PERSISTED (schema-cast) value of each composite field so the id
         # is identical regardless of which write path built the table — e.g. a
         # float32 ``rt`` hashes to the same value whether it arrived as a raw
         # Python float (record path) or an already-cast float32 column (table path).
-        composite_values: dict[str, list] = {}
-        for f in composite:
-            if f in names:
-                col = table.column(f)
-                ftype = sch.field(f).type
-                if col.type != ftype:
-                    try:
-                        col = col.cast(ftype)
-                    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError):
-                        # Bad/incompatible data (e.g. a wrong-typed column): fall
-                        # back to raw values here; schema validation downstream
-                        # surfaces the real type error rather than a cast crash.
-                        pass
-                composite_values[f] = col.to_pylist()
-            else:
-                composite_values[f] = [None] * n
+        composite_values = self._persisted_composite_values(table, composite)
         existing = table.column(id_field).to_pylist() if id_field in names else [None] * n
         override = self._override_provided_ids
         cv_lists = table.column("cv_params").to_pylist() if (override and "cv_params" in names) else None
-        ids: list[int] = []
-        for i in range(n):
-            provided = existing[i]
-            if provided is not None and override:
-                if cv_lists is not None:
-                    cvs = list(cv_lists[i] or [])
-                    cvs.append({"cv_name": f"provided_{id_field}", "cv_value": str(provided)})
-                    cv_lists[i] = cvs
-                ids.append(derive_id([composite_values[f][i] for f in composite]))
-                self.overridden_id_count += 1
-            elif provided is None:
-                ids.append(derive_id([composite_values[f][i] for f in composite]))
-            else:
-                ids.append(provided)
+        ids = self._identity_values(existing, composite_values, composite, cv_lists, id_field)
         if cv_lists is not None:
             cv_type = table.schema.field("cv_params").type
             table = table.set_column(
