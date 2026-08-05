@@ -393,6 +393,19 @@ def test_feature_psm_cross_refs_dangling_are_warnings(tmp_path):
     assert results["psm"].is_valid
     assert results["feature"].is_valid
 
+    with Dataset(ds_dir) as ds:
+        strict_results = ds.validate(structures=["feature", "psm"], strict=True)
+    strict_dangling = [
+        issue
+        for result in strict_results.values()
+        for issue in result.issues
+        if issue.check in ("dangling_feature_id", "dangling_psm_id")
+    ]
+    assert len(strict_dangling) == 2
+    assert all(issue.severity == "error" for issue in strict_dangling)
+    assert not strict_results["psm"].is_valid
+    assert not strict_results["feature"].is_valid
+
 
 def test_feature_psm_reciprocal_desync_is_warning(tmp_path):
     """A psm pointing at a feature whose non-empty psm_ids does not list it back
@@ -410,3 +423,10 @@ def test_feature_psm_reciprocal_desync_is_warning(tmp_path):
     assert len(desync) == 1
     assert desync[0].severity == "warning"
     assert results["psm"].is_valid  # warnings do not fail validation
+
+    with Dataset(ds_dir) as ds:
+        strict_results = ds.validate(structures=["feature", "psm"], strict=True)
+    strict_desync = [i for i in strict_results["psm"].issues if i.check == "feature_psm_desync"]
+    assert len(strict_desync) == 1
+    assert strict_desync[0].severity == "error"
+    assert not strict_results["psm"].is_valid

@@ -525,9 +525,8 @@ class Dataset:
         # Cross-structure invariant: the optional feature<->psm cross-references
         # must resolve. Every non-null psm.feature_id must name a real
         # feature.feature_id, and every feature.psm_ids element a real psm.psm_id.
-        # Unresolved references are reported as *warnings* (per the agreed design:
-        # during/after conversion a dangling cross-ref is a soft signal, not a
-        # hard error) — but only when both views are present.
+        # Unresolved references are warnings during normal use and errors under
+        # strict validation, but only when both views are present.
         if "feature" in results and "psm" in results and self.feature is not None and self.psm is not None:
             self._check_feature_psm_referential(results["feature"], results["psm"], strict=strict)
 
@@ -538,7 +537,7 @@ class Dataset:
     ) -> None:
         """Flag feature<->psm cross-references that do not resolve.
 
-        Appends a ``warning`` issue to *psm_result* for each non-null
+        Appends an issue to *psm_result* for each non-null
         ``psm.feature_id`` that is not a ``feature.feature_id``, and to
         *feature_result* for each ``feature.psm_ids`` element that is not a
         ``psm.psm_id``. It also flags **reciprocal desync** — an edge that exists
@@ -547,7 +546,9 @@ class Dataset:
         column (the common case) is never a false positive. A query failure (e.g.
         the optional cross-ref columns are absent on older files) is surfaced as
         ``referential_check_skipped`` rather than masking schema validation.
+        Issues are warnings normally and errors under strict validation.
         """
+        severity = "error" if strict else "warning"
         try:
             dangling_feature_ids = self._engine.execute(
                 """
@@ -596,7 +597,7 @@ class Dataset:
                 ValidationIssue(
                     structure="psm",
                     check="dangling_feature_id",
-                    severity="warning",
+                    severity=severity,
                     column="feature_id",
                     message=(f"psm.feature_id {feature_id!r} does not resolve to a feature.feature_id in feature.parquet"),
                 )
@@ -606,7 +607,7 @@ class Dataset:
                 ValidationIssue(
                     structure="feature",
                     check="dangling_psm_id",
-                    severity="warning",
+                    severity=severity,
                     column="psm_ids",
                     message=(f"feature.psm_ids contains {psm_id!r}, which does not resolve to a psm.psm_id in psm.parquet"),
                 )
@@ -616,7 +617,7 @@ class Dataset:
                 ValidationIssue(
                     structure="psm",
                     check="feature_psm_desync",
-                    severity="warning",
+                    severity=severity,
                     column="feature_id",
                     message=(
                         f"psm.psm_id {psm_id!r} points to feature {feature_id!r}, but that "
