@@ -13,11 +13,14 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import pyarrow as pa
+
 from qpx.converters.openms_consensus.feature_adapter import (
     check_channels_vs_sdrf,
     load_consensus_map,
 )
 from qpx.converters.openms_consensus.pg_adapter import accession_to_anchor, consensus_protein_groups_to_records
+from qpx.core.data import FeatureSchema, PsmSchema
 from qpx.core.data.identity import derive_id
 from qpx.writers.feature import FeatureWriter
 from qpx.writers.pg import PgWriter
@@ -37,6 +40,12 @@ _FEATURE_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "rt", "
 _PSM_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "scan")
 
 
+def _derive_persisted_record_id(record: dict, composite: tuple[str, ...], schema: pa.Schema) -> int:
+    """Derive an id from the values exactly as they will be stored by Arrow."""
+    values = [pa.scalar(record.get(name), type=schema.field(name).type).as_py() for name in composite]
+    return derive_id(values)
+
+
 def _link_feature_psm(feature_records: list[dict], psm_records: list[dict]) -> None:
     """Populate feature.psm_ids and psm.feature_id in place for one consensus feature.
 
@@ -46,9 +55,11 @@ def _link_feature_psm(feature_records: list[dict], psm_records: list[dict]) -> N
     record per run; each PSM links to the feature record of its own run. PSMs
     whose run has no feature record keep ``feature_id`` null (resolves #182).
     """
+    feature_schema = FeatureSchema.get_arrow_schema()
+    psm_schema = PsmSchema.get_arrow_schema()
     feat_by_run: dict[str, tuple[int, list[int]]] = {}
     for rec in feature_records:
-        feat_id = derive_id([rec.get(f) for f in _FEATURE_IDENTITY_COMPOSITE])
+        feat_id = _derive_persisted_record_id(rec, _FEATURE_IDENTITY_COMPOSITE, feature_schema)
         feat_by_run[rec["run_file_name"]] = (feat_id, [])
     for prec in psm_records:
         entry = feat_by_run.get(prec.get("run_file_name"))
@@ -56,7 +67,7 @@ def _link_feature_psm(feature_records: list[dict], psm_records: list[dict]) -> N
             continue
         feat_id, psm_ids = entry
         prec["feature_id"] = feat_id
-        psm_id = derive_id([prec.get(f) for f in _PSM_IDENTITY_COMPOSITE])
+        psm_id = _derive_persisted_record_id(prec, _PSM_IDENTITY_COMPOSITE, psm_schema)
         if psm_id not in psm_ids:
             psm_ids.append(psm_id)
     for rec in feature_records:

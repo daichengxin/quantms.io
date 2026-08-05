@@ -53,10 +53,10 @@ _TMT_CONSENSUSXML = """<?xml version="1.0" encoding="ISO-8859-1"?>
 	</mapList>
 	<consensusElementList>
 		<consensusElement id="e_0" quality="0.0" charge="2">
-			<centroid rt="100.0" mz="450.25" it="0.0"/>
+			<centroid rt="100.123456" mz="450.251234" it="0.0"/>
 			<groupedElementList>
-				<element map="0" id="0" rt="100.0" mz="450.25" it="1000.0"/>
-				<element map="1" id="1" rt="100.0" mz="450.25" it="2000.0"/>
+				<element map="0" id="0" rt="100.123456" mz="450.251234" it="1000.0"/>
+				<element map="1" id="1" rt="100.123456" mz="450.251234" it="2000.0"/>
 			</groupedElementList>
 			<PeptideIdentification identification_run_ref="PI_0" score_type="" higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100" spectrum_reference="controllerType=0 controllerNumber=1 scan=42" >
 				<PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
