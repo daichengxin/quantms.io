@@ -200,6 +200,68 @@ class TestOpenMSConverter:
         assert "merged" in caplog.text.lower()
         assert not list(output.glob(".openms.psm.parquet.*.tmp"))
 
+    def test_consensusxml_corrects_psm_run_file(self, tmp_path, caplog):
+        """OpenMS -out_qpx stamps every PSM with the first run's file (OpenMS#9872).
+        When the consensusXML is supplied, the converter restores each PSM's real
+        run_file_name from map_index (here row 2 -> run_02, not run_01)."""
+        import logging
+        import textwrap
+
+        qpx_dir = tmp_path / "openms_qpx"
+        qpx_dir.mkdir()
+        records = [
+            make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1001]),
+            make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1002]),  # actually run_02
+        ]
+        source = qpx_dir / "quantms.psm.parquet"
+        current_schema = load_schema("psm").get_arrow_schema()
+        legacy_schema = pa.schema([field for field in current_schema if field.name not in {"psm_id", "feature_id"}])
+        pq.write_table(pa.Table.from_pylist(records, schema=legacy_schema), source)
+
+        cxml = tmp_path / "design.consensusXML"
+        cxml.write_text(
+            textwrap.dedent(
+                """\
+                <?xml version="1.0" encoding="ISO-8859-1"?>
+                <consensusXML version="1.7">
+                  <mapList count="2">
+                    <map id="0" name="run_01" label="" size="1"/>
+                    <map id="1" name="run_02" label="" size="1"/>
+                  </mapList>
+                  <consensusElementList>
+                    <consensusElement id="e_0">
+                      <centroid rt="1.0" mz="450.26" intensity="1"/>
+                      <PeptideIdentification MZ="450.26" RT="1.0"
+                          spectrum_reference="controllerType=0 controllerNumber=1 scan=1001">
+                        <PeptideHit score="0.01" sequence="PEPTIDEK" charge="2">
+                          <UserParam type="string" name="target_decoy" value="target"/>
+                        </PeptideHit>
+                        <UserParam type="int" name="map_index" value="0"/>
+                      </PeptideIdentification>
+                    </consensusElement>
+                  </consensusElementList>
+                  <UnassignedPeptideIdentification MZ="450.26" RT="2.0"
+                      spectrum_reference="controllerType=0 controllerNumber=1 scan=1002">
+                    <PeptideHit score="0.01" sequence="PEPTIDEK" charge="2">
+                      <UserParam type="string" name="target_decoy" value="target"/>
+                    </PeptideHit>
+                    <UserParam type="int" name="map_index" value="1"/>
+                  </UnassignedPeptideIdentification>
+                </consensusXML>
+                """
+            )
+        )
+
+        output = tmp_path / "output"
+        output.mkdir()
+        with caplog.at_level(logging.INFO):
+            OpenMSConverter(qpx_dir=qpx_dir, consensusxml_path=cxml).convert(output_folder=output, output_prefix="openms")
+
+        installed = pq.read_table(output / "openms.psm.parquet").to_pylist()
+        by_scan = {row["scan"][0]: row["run_file_name"] for row in installed}
+        assert by_scan == {1001: "run_01", 1002: "run_02"}  # row 2 corrected off the first run
+        assert "corrected run_file_name" in caplog.text.lower()
+
     def test_convert_full_bundle(self, tmp_path):
         """Full enrichment: 3 core + SDRF -> 8 files."""
         qpx_dir = tmp_path / "openms_qpx"
