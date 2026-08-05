@@ -137,4 +137,5 @@ def load_schema(name: str) -> ViewSchema:
         fields=fields,
         doc=spec.get("doc", ""),
         extra_columns=spec.get("extra_columns", False),
+        identity_composite=spec.get("identity_composite"),
     )

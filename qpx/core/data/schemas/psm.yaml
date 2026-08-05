@@ -1,9 +1,17 @@
 name: psm
 file_type: psm_file
-primary_key: [peptidoform, charge, run_file_name, scan]
+primary_key: [psm_id]
+identity_composite: [peptidoform, charge, run_file_name, scan]
 doc: "Peptide Spectrum Matches from identification searches"
 
 fields:
+  # Identity
+  psm_id:
+    type: int64
+    required: true
+    nullable: false
+    doc: "Opaque identity of the psm (int64), supplied by the producer or derived from the identity_composite declared in the footer; the primary key of this view."
+
   # Core identification (shared with Feature)
   sequence:
     type: string
@@ -91,3 +99,10 @@ fields:
   ion_mobility_array:
     type: "list<float32>"
     doc: "Fragment ion mobility values"
+
+  # Optional cross-reference
+  feature_id:
+    type: int64
+    optional: true
+    nullable: true
+    doc: "Optional reference to the feature this PSM maps to (feature.feature_id); null when unlinked."

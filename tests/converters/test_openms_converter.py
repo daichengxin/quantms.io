@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -71,6 +72,29 @@ def _write_minimal_qpx(
         w.write_batch(pg_records)
 
 
+def _downgrade_to_legacy_qpx(qpx_dir: Path, prefix: str = "quantms") -> None:
+    """Remove 1.1 identity/PG fields to model existing OpenMS -out_qpx files."""
+    for view, id_columns in {
+        "feature": ("feature_id", "psm_ids", "pg_ids"),
+        "psm": ("psm_id", "feature_id"),
+    }.items():
+        path = qpx_dir / f"{prefix}.{view}.parquet"
+        table = pq.read_table(path).drop_columns(id_columns).replace_schema_metadata(None)
+        pq.write_table(table, path)
+
+    pg_path = qpx_dir / f"{prefix}.pg.parquet"
+    legacy_rows = []
+    for row in pq.read_table(pg_path).to_pylist():
+        run_file_name = row.pop("grouped_runs")[0]
+        row.pop("pg_id")
+        label = row.pop("label")
+        intensity = row.pop("intensity")
+        row["run_file_name"] = run_file_name
+        row["intensities"] = [{"label": label, "intensity": intensity}]
+        legacy_rows.append(row)
+    pq.write_table(pa.Table.from_pylist(legacy_rows), pg_path)
+
+
 def _write_minimal_sdrf(
     sdrf_path: Path,
     label: str = "AC=MS:1002038;NT=label free sample",
@@ -115,6 +139,52 @@ class TestDiscoverParquet:
 
 
 class TestOpenMSConverter:
+    def test_convert_upgrades_legacy_core_tables(self, tmp_path):
+        """Existing OpenMS -out_qpx files receive IDs and the flattened PG shape."""
+        qpx_dir = tmp_path / "openms_qpx"
+        qpx_dir.mkdir()
+        _write_minimal_qpx(qpx_dir)
+        _downgrade_to_legacy_qpx(qpx_dir)
+
+        output = tmp_path / "output"
+        OpenMSConverter(qpx_dir=qpx_dir).convert(output_folder=output, output_prefix="openms")
+
+        for view, id_field in (("feature", "feature_id"), ("psm", "psm_id"), ("pg", "pg_id")):
+            table = pq.read_table(output / f"openms.{view}.parquet")
+            assert id_field in table.column_names
+            assert table.column(id_field).null_count == 0
+            assert load_schema(view).validate_full(table, strict=True).is_valid
+        pg_table = pq.read_table(output / "openms.pg.parquet")
+        assert "grouped_runs" in pg_table.column_names
+        assert "run_file_name" not in pg_table.column_names
+
+    def test_invalid_legacy_identity_does_not_replace_output(self, tmp_path):
+        """Strict validation happens before a rewritten core file is installed."""
+        qpx_dir = tmp_path / "openms_qpx"
+        qpx_dir.mkdir()
+        records = [
+            make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1001]),
+            make_psm_record(sequence="PEPTIDEK", run_file_name="run_01", scan=[1001]),
+        ]
+        records[1]["posterior_error_probability"] = 0.2
+        source = qpx_dir / "quantms.psm.parquet"
+        current_schema = load_schema("psm").get_arrow_schema()
+        legacy_schema = pa.schema([field for field in current_schema if field.name not in {"psm_id", "feature_id"}])
+        legacy = pa.Table.from_pylist(records, schema=legacy_schema)
+        pq.write_table(legacy, source)
+
+        output = tmp_path / "output"
+        output.mkdir()
+        destination = output / "openms.psm.parquet"
+        sentinel = b"pre-existing output"
+        destination.write_bytes(sentinel)
+
+        with pytest.raises(ValueError, match="Primary key.*duplicate"):
+            OpenMSConverter(qpx_dir=qpx_dir).convert(output_folder=output, output_prefix="openms")
+
+        assert destination.read_bytes() == sentinel
+        assert not list(output.glob(".openms.psm.parquet.*.tmp"))
+
     def test_convert_full_bundle(self, tmp_path):
         """Full enrichment: 3 core + SDRF -> 8 files."""
         qpx_dir = tmp_path / "openms_qpx"

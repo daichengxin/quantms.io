@@ -1,12 +1,7 @@
-"""FragPipe Feature adapter -- combined_ion.tsv or combined_peptide.tsv to feature.parquet.
+"""FragPipe Feature adapter -- combined_ion.tsv to feature.parquet.
 
-Loads a FragPipe ``combined_ion.tsv`` or ``combined_peptide.tsv`` into DuckDB,
+Loads a FragPipe ``combined_ion.tsv`` into DuckDB,
 transforms feature rows into ``FeatureSchema``, and writes through ``FeatureWriter``.
-
-Auto-detects the input format:
-    - ``combined_ion.tsv``: has a ``Charge`` (singular) column — one row per precursor
-    - ``combined_peptide.tsv``: has a ``Charges`` (plural, comma-separated) column — one
-      row per peptide sequence
 """
 
 from __future__ import annotations
@@ -27,6 +22,12 @@ logger = logging.getLogger(__name__)
 
 # Derive field map from central YAML mappings
 _FEATURE_MAP = get_field_mappings("fragpipe", "feature")
+_FEATURE_IDENTITY_COMPOSITE = (
+    "quantification_unit_id",
+    "peptidoform",
+    "charge",
+    "compensation_voltage",
+)
 
 
 def _extract_pg_proteins(
@@ -62,7 +63,7 @@ def _extract_pg_proteins(
 
 
 class FragPipeFeatureAdapter(BaseConverter):
-    """Convert FragPipe ``combined_ion.tsv`` or ``combined_peptide.tsv`` to ``feature.parquet``.
+    """Convert FragPipe ``combined_ion.tsv`` to ``feature.parquet``.
 
     Usage::
 
@@ -82,10 +83,10 @@ class FragPipeFeatureAdapter(BaseConverter):
         chunksize: int = 500_000,
         creator: str = "fragpipe",
     ) -> None:
-        """Run the combined_ion/peptide.tsv -> feature.parquet conversion.
+        """Run the combined_ion.tsv -> feature.parquet conversion.
 
         Args:
-            feature_path: Path to FragPipe ``combined_ion.tsv`` or ``combined_peptide.tsv``.
+            feature_path: Path to FragPipe ``combined_ion.tsv``.
             output_path: Destination Parquet path.
             sdrf_path: Optional SDRF file (not used in current impl).
             psm_path: Optional path to FragPipe ``psm.tsv`` for PSM-level lookups
@@ -106,18 +107,23 @@ class FragPipeFeatureAdapter(BaseConverter):
         self._resolved = resolve_columns(_FEATURE_MAP, actual_cols)
 
         # Step 3: Detect format and experiment columns
-        format_type = self._detect_format()
+        self._require_ion_format()
         experiments = self._detect_experiment_columns()
-        self.logger.info(f"Detected format: {format_type}, experiments: {experiments}")
+        self.logger.info("Detected combined_ion format, experiments: %s", experiments)
 
         # Step 4: Build PSM lookup if psm.tsv provided
         psm_lookup = self._build_psm_lookup(psm_path) if psm_path else {}
 
         # Step 5: Stream and transform
-        with FeatureWriter(output_path, creator=creator, compression=self._compression) as writer:
+        with FeatureWriter(
+            output_path,
+            creator=creator,
+            compression=self._compression,
+            identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+        ) as writer:
             for batch in self._query_batched("SELECT * FROM fragpipe_features", chunksize):
                 df = batch.to_pandas()
-                records = self._transform_batch(df, experiments, format_type, psm_lookup)
+                records = self._transform_batch(df, experiments, psm_lookup)
                 if records:
                     self._track_scores(records)
                     writer.write_batch(records)
@@ -129,7 +135,7 @@ class FragPipeFeatureAdapter(BaseConverter):
     # ------------------------------------------------------------------
 
     def _load_feature_file(self, path: str) -> None:
-        """Load combined_ion.tsv or combined_peptide.tsv into DuckDB."""
+        """Load combined_ion.tsv into DuckDB."""
         self._conn.execute(
             sql_build(
                 """CREATE TABLE fragpipe_features AS
@@ -141,13 +147,20 @@ class FragPipeFeatureAdapter(BaseConverter):
         count = self._conn.execute("SELECT COUNT(*) FROM fragpipe_features").fetchone()[0]
         self.logger.info(f"Loaded {count:,} FragPipe feature rows")
 
-    def _detect_format(self) -> str:
-        """Return 'ion' if Charge column exists, 'peptide' if Charges."""
+    def _require_ion_format(self) -> None:
+        """Reject peptide-level input whose quantities cannot be split by charge."""
         cols = self._conn.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_name='fragpipe_features'"
         ).fetchall()
-        col_names = [c[0] for c in cols]
-        return "ion" if "Charge" in col_names else "peptide"
+        col_names = {c[0] for c in cols}
+        if "Charge" in col_names:
+            return
+        if "Charges" in col_names:
+            raise ValueError(
+                "FragPipe combined_peptide.tsv is peptide-level: its intensity cannot be assigned to individual "
+                "charges without duplicating quantity. Use combined_ion.tsv for Feature conversion."
+            )
+        raise ValueError("FragPipe Feature input must be combined_ion.tsv with a Charge column")
 
     def _detect_experiment_columns(self) -> list[str]:
         """Detect per-experiment intensity columns.
@@ -313,7 +326,6 @@ class FragPipeFeatureAdapter(BaseConverter):
         self,
         df: pd.DataFrame,
         experiments: list[str],
-        format_type: str,
         psm_lookup: dict[tuple, dict] | None = None,
     ) -> list[dict]:
         records: list[dict] = []
@@ -324,7 +336,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         for i in range(n_rows):
             try:
                 row = {col: vals[i] for col, vals in col_arrays.items()}
-                recs = self._transform_row(row, experiments, format_type, psm_lookup)
+                recs = self._transform_row(row, experiments, psm_lookup)
                 records.extend(recs)
             except Exception as e:
                 skipped += 1
@@ -343,13 +355,11 @@ class FragPipeFeatureAdapter(BaseConverter):
         self,
         row,
         experiments: list[str],
-        format_type: str,
         psm_lookup: dict[tuple, dict] | None = None,
     ) -> list[dict]:
         """Transform a single row into one or more feature records.
 
-        Expands into one record per experiment (run) with non-zero intensity.
-        For peptide format, also expands per charge state.
+        Expands into one record per experiment with non-zero intensity.
         """
         records: list[dict] = []
         r = self._resolved  # shorthand for resolved column mappings
@@ -379,18 +389,11 @@ class FragPipeFeatureAdapter(BaseConverter):
 
         # M/Z (from feature file — used as fallback)
         mz = safe_float(row.get(r.get("observed_mz", "M/Z"))) or 0.0
+        compensation_voltage = safe_float(row.get(r.get("compensation_voltage", "Compensation Voltage"))) or 0.0
 
-        # Determine charge states
-        if format_type == "ion":
-            charges = [int(row.get(r.get("charge", "Charge"), 0))]
-        else:
-            charges_col = r.get("charges", "Charges")
-            charges_raw = str(row.get(charges_col, "0"))
-            charges = [int(c.strip()) for c in charges_raw.split(",") if c.strip()]
-            if not charges:
-                charges = [0]
+        charge = int(row.get(r.get("charge", "Charge"), 0))
 
-        # Expand per experiment and per charge
+        # Expand per experiment
         for experiment in experiments:
             int_col = f"{experiment} Intensity"
             intensity_val = safe_float(row.get(int_col)) or 0.0
@@ -399,56 +402,57 @@ class FragPipeFeatureAdapter(BaseConverter):
 
             intensities = [{"label": "LFQ", "intensity": float(intensity_val)}]
 
-            for charge in charges:
-                # PSM lookup: enrich with mass error, PEP, scan, decoy flag
-                psm_info = {}
-                if psm_lookup:
-                    psm_key = (experiment, peptidoform, str(charge))
-                    psm_info = psm_lookup.get(psm_key, {})
+            # PSM lookup: enrich with mass error, PEP, scan, decoy flag
+            psm_info = {}
+            if psm_lookup:
+                psm_key = (experiment, peptidoform, str(charge))
+                psm_info = psm_lookup.get(psm_key, {})
 
-                _calc = psm_info.get("calculated_mz")
-                _obs = psm_info.get("observed_mz")
-                mass_error_ppm = 1e6 * (_obs - _calc) / _calc if _calc and _obs else None
+            _calc = psm_info.get("calculated_mz")
+            _obs = psm_info.get("observed_mz")
+            mass_error_ppm = 1e6 * (_obs - _calc) / _calc if _calc and _obs else None
 
-                # Is decoy: prefer PSM lookup; fall back to protein prefix
-                _is_decoy_fallback = (
-                    any(p["accession"].startswith(("rev_", "DECOY_", "decoy_", "REV_")) for p in pg_accessions)
-                    if pg_accessions
-                    else False
-                )
+            # Is decoy: prefer PSM lookup; fall back to protein prefix
+            _is_decoy_fallback = (
+                any(p["accession"].startswith(("rev_", "DECOY_", "decoy_", "REV_")) for p in pg_accessions)
+                if pg_accessions
+                else False
+            )
 
-                rec = {
-                    "sequence": sequence,
-                    "peptidoform": peptidoform,
-                    "modifications": modifications,
-                    "charge": charge,
-                    "posterior_error_probability": psm_info.get("pep"),
-                    "is_decoy": psm_info.get("is_decoy", _is_decoy_fallback),
-                    "calculated_mz": _calc or float(mz),
-                    "observed_mz": _obs or float(mz),
-                    "mass_error_ppm": mass_error_ppm,
-                    "additional_scores": None,
-                    "predicted_rt": None,
-                    "run_file_name": experiment,
-                    "cv_params": None,
-                    "scan": psm_info.get("scan", []),
-                    "rt": None,
-                    "ion_mobility": psm_info.get("ion_mobility"),
-                    "missed_cleavages": psm_info.get("missed_cleavages"),
-                    "intensities": intensities,
-                    "additional_intensities": None,
-                    "pg_accessions": pg_accessions,
-                    "anchor_protein": anchor_protein,
-                    "unique": len(pg_accessions) <= 1 if pg_accessions else True,
-                    "pg_global_qvalue": None,
-                    "ion_mobility_start": None,
-                    "ion_mobility_stop": None,
-                    "gg_accessions": None,
-                    "gg_names": gg_names,
-                    "id_run_file_name": experiment,
-                    "rt_start": None,
-                    "rt_stop": None,
-                }
-                records.append(rec)
+            rec = {
+                "sequence": sequence,
+                "peptidoform": peptidoform,
+                "modifications": modifications,
+                "charge": charge,
+                "posterior_error_probability": psm_info.get("pep"),
+                "is_decoy": psm_info.get("is_decoy", _is_decoy_fallback),
+                "calculated_mz": _calc or float(mz),
+                "observed_mz": _obs or float(mz),
+                "mass_error_ppm": mass_error_ppm,
+                "additional_scores": None,
+                "predicted_rt": None,
+                "run_file_name": experiment,
+                "quantification_unit_id": experiment,
+                "cv_params": None,
+                "scan": psm_info.get("scan", []),
+                "rt": None,
+                "ion_mobility": psm_info.get("ion_mobility"),
+                "compensation_voltage": compensation_voltage,
+                "missed_cleavages": psm_info.get("missed_cleavages"),
+                "intensities": intensities,
+                "additional_intensities": None,
+                "pg_accessions": pg_accessions,
+                "anchor_protein": anchor_protein,
+                "unique": len(pg_accessions) <= 1 if pg_accessions else True,
+                "pg_global_qvalue": None,
+                "ion_mobility_start": None,
+                "ion_mobility_stop": None,
+                "gg_accessions": None,
+                "gg_names": gg_names,
+                "id_run_file_name": experiment,
+                "rt_start": None,
+                "rt_stop": None,
+            }
+            records.append(rec)
 
         return records

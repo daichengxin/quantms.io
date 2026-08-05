@@ -143,7 +143,8 @@ def _scan_by_run(pids, map_info: dict[int, tuple[str, str]]) -> dict[str, list[i
             pid_run = map_info.get(int(pid.getMetaValue("map_index")), (None, None))[0]
         pid_run = pid_run or sole_run
         if pid_run is not None:
-            scan_by_run.setdefault(pid_run, scans)
+            run_scans = scan_by_run.setdefault(pid_run, [])
+            run_scans.extend(scan for scan in scans if scan not in run_scans)
     return scan_by_run
 
 
@@ -209,6 +210,8 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
     if hit.metaValueExists("target_decoy"):
         is_decoy = "decoy" in str(hit.getMetaValue("target_decoy")).lower()
     observed_mz = float(cf.getMZ()) if cf.getMZ() else 0.0
+    streamed_consensus_rt = getattr(cf, "consensus_rt", None)
+    consensus_rt = float(cf.getRT() if streamed_consensus_rt is None else streamed_consensus_rt)
     calculated_mz = float(seq_obj.getMZ(charge)) if charge else observed_mz
     evidences = hit.getPeptideEvidences()
     anchor_protein = evidences[0].getProteinAccession() if evidences else None
@@ -234,6 +237,7 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
                 "is_decoy": is_decoy,
                 "calculated_mz": calculated_mz,
                 "observed_mz": observed_mz,
+                "consensus_rt": consensus_rt,
                 "anchor_protein": anchor_protein,
             }
         )

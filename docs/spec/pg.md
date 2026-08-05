@@ -2,7 +2,7 @@
 
 The protein group (PG) view is a tabular Parquet file that contains the details of protein groups identified and quantified per quantification unit. A quantification unit is the group of raw files aggregated together (`grouped_runs`) — a protein quantity only exists after aggregating peptides across a sample's fractions, so the view keys on this group of raw files rather than a single raw file (for unfractionated or DIA data the group is a single file). It captures the relationship between protein groups and the grouped runs in which they were detected, including peptide counts, feature counts, quality metrics, and intensity-based quantification. The sample is resolved downstream via `(any file in grouped_runs, label) -> run.samples[].sample_accession`.
 
-This view is analogous to outputs from tools such as MaxQuant (`proteinGroups.txt`), DIA-NN (`pg_matrix`), and FragPipe protein group reports.
+This view is analogous to outputs from tools such as MaxQuant (`proteinGroups.txt`), DIA-NN (`pg_matrix`), and FragPipe protein group reports. Each row has a mandatory opaque `pg_id`, which is the primary key. A producer-supplied ID is preserved by default; otherwise QPX derives the ID from the footer-declared `identity_composite`.
 
 ## Use cases
 
@@ -13,7 +13,17 @@ This view is analogous to outputs from tools such as MaxQuant (`proteinGroups.tx
 
 ## Schema
 
-Fields marked with **(PK)** are primary keys and MUST NOT be null — with the single exception of `label`, which is part of the key but is null for identification-only protein groups that carry no quantity (marked **PK, nullable**). Fields marked with **(nullable)** may have null values. See the full YAML schema in [`pg.yaml`](schemas/pg.yaml).
+`pg_id` is the non-null primary key. The schema-default `identity_composite` is
+`[anchor_protein, grouped_runs, label]`; `label` is null only for
+identification-only protein groups that carry no quantity. Fields marked with
+**(nullable)** may have null values. See the full YAML schema in
+[`pg.yaml`](schemas/pg.yaml).
+
+### Row identity
+
+| Field | Description | Type | Required |
+|-------|-------------|------|----------|
+| `pg_id` | Opaque primary key, supplied by the producer or derived by QPX from the footer-declared `identity_composite` | `int64` | Yes |
 
 ### Identity
 
@@ -24,8 +34,8 @@ Fields marked with **(PK)** are primary keys and MUST NOT be null — with the s
 | `gg_accessions` | Gene group accessions as a string array | `array[string]` | No |
 | `gg_names` | Gene names corresponding to the proteins in the group | `array[string]` | No |
 | `gg_qvalue` | Gene group q-value (e.g., DIA-NN GG.Q.Value) | `float64`, null | No |
-| `anchor_protein` | Representative protein of the group (leading protein) | `string` | Yes (PK) |
-| `grouped_runs` | The group of raw files aggregated into one quantification unit (fractions aggregated together; single-element for unfractionated/DIA). The sample is resolved downstream via `(any file in grouped_runs, label) -> run.samples[].sample_accession` | `array[string]` | Yes (PK) |
+| `anchor_protein` | Representative protein of the group (leading protein); part of the default identity composite | `string` | Yes |
+| `grouped_runs` | The group of raw files aggregated into one quantification unit (fractions aggregated together; single-element for unfractionated/DIA). The sample is resolved downstream via `(any file in grouped_runs, label) -> run.samples[].sample_accession`; part of the default identity composite | `array[string]` | Yes |
 
 ### Counts
 
@@ -53,7 +63,7 @@ Fields marked with **(PK)** are primary keys and MUST NOT be null — with the s
 
 | Field | Description | Type | Required |
 |-------|-------------|------|----------|
-| `label` | Channel/label of this quantification (e.g., TMT126, LFQ); **one row per label**. Null for identification-only groups. Part of the primary key. | `string` | Yes (PK, nullable) |
+| `label` | Channel/label of this quantification (e.g., TMT126, LFQ); **one row per label**. Null for identification-only groups. Part of the default identity composite. | `string` | Yes (nullable) |
 | `intensity` | Primary raw intensity value for this label. Null for identification-only groups. | `float32` | No |
 | `additional_intensities` | Pre-computed intensity values from the upstream tool (normalized, LFQ, iBAQ, etc.) for this row's label. See [Intensities](intensities.md) | `array[struct]` | No |
 | `additional_scores` | Additional scores and metrics (posterior error probability, confidence, etc.). See [Scores](scores.md) | `array[struct]` | No |
@@ -90,6 +100,7 @@ Each entry in `peptides` contains:
 
 ```json
 {
+  "pg_id": 2937018471546916399,
   "pg_accessions": ["P04217", "A0A024R4E5"],
   "pg_names": ["Alpha-1B-glycoprotein", "Alpha-1B-glycoprotein variant"],
   "gg_accessions": ["A1BG"],
@@ -316,7 +327,7 @@ FragPipe outputs are pre-filtered (no decoys or contaminants). Per-experiment co
 !!! note "Relationship to other views"
     The PG view provides per-file protein group quantification. For derived per-sample summaries (protein counts, abundances, etc.), see [API Views](views.md). For downstream absolute or differential expression results, see the [Absolute Expression](absolute.md) and [Differential Expression](differential.md) views.
 
-!!! warning "Primary key constraints"
-    The combination of `anchor_protein`, `grouped_runs`, and `label` forms the composite primary key. `anchor_protein` and `grouped_runs` MUST NOT be null. `label` is null **only** for identification-only protein groups that carry no quantity (e.g. mzIdentML); when a quantity exists, `label` is non-null and there is one row per label. `grouped_runs` is a **set of distinct raw files**: it MUST NOT contain duplicates, and two keys are equal when they contain the same files regardless of order (identity is compared set-wise). The list is **stored in fraction order** — sorting is not applied, because it would destroy fraction ordering (and lexicographically misorder names like `F1, F10, F2`). Each record represents a single protein group quantified in one quantification unit (the group of raw files/fractions aggregated together) for one label. A protein quantity only exists after aggregating peptides across a sample's fractions, so the PG view keys on this group of raw files, not a single raw file; for unfractionated or DIA data the list has a single element.
+!!! warning "Identity constraints"
+    `pg_id` is the primary key. When QPX derives it, the default identity composite is `anchor_protein`, `grouped_runs`, and `label`. `anchor_protein` and `grouped_runs` MUST NOT be null. `label` is null **only** for identification-only protein groups that carry no quantity (e.g. mzIdentML); when a quantity exists, `label` is non-null and there is one row per label. `grouped_runs` is a **set of distinct raw files**: it MUST NOT contain duplicates, and two composites are equal when they contain the same files regardless of order (identity is compared set-wise). The list is **stored in fraction order** — sorting is not applied, because it would destroy fraction ordering (and lexicographically misorder names like `F1, F10, F2`). Each record represents a single protein group quantified in one quantification unit (the group of raw files/fractions aggregated together) for one label. A protein quantity only exists after aggregating peptides across a sample's fractions, so the PG view identifies this group of raw files rather than a single raw file; for unfractionated or DIA data the list has a single element.
 
     Within one `(anchor_protein, label)`, the `grouped_runs` sets across rows MUST be **disjoint** — every raw file contributes to at most one row, so no measurement is counted twice (the *run-disjointness* invariant enforced by validation).

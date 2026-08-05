@@ -24,19 +24,54 @@ def _scan_of(spectrum_ref: str) -> list[int]:
     return [int(m) for m in _SCAN_RE.findall(str(spectrum_ref or ""))]
 
 
+def _cf_element_runs(cf, map_info: dict[int, tuple[str, str]]) -> set[str]:
+    """Runs the consensus feature's elements map to (positive intensity).
+
+    Mirrors the feature adapter's run attribution (``feature_records_for_cf``
+    skips non-positive elements), so a PSM record lands on the same
+    ``run_file_name`` as the feature record it links to.
+    """
+    runs: set[str] = set()
+    for sub in cf.getFeatureList():
+        if float(sub.getIntensity()) <= 0:
+            continue
+        run = map_info.get(sub.getMapIndex(), (None, None))[0]
+        if run is not None:
+            runs.add(run)
+    return runs
+
+
 def _run_resolver(cm):
-    """Build a callable mapping a PeptideIdentification to its run_file_name."""
+    """Build a callable mapping a PeptideIdentification to its run_file_name.
+
+    ``map_index`` is a global map-column index (label-free: one map per run, so it
+    is authoritative). ``id_merge_index``, however, is a LOCAL per-run channel index
+    in a multi-run isobaric (TMT/iTRAQ) consensusXML — each run's channels are
+    indexed ``0..k-1`` — so it cannot be resolved against the global map without
+    knowing the run. Callers with a consensus feature pass ``cf_runs`` (the runs
+    its positive-intensity elements map to); with exactly one such run it is
+    authoritative for that feature's PIDs.
+    """
     headers = cm.getColumnHeaders()
     map_run = {idx: _run_stem(headers[idx].filename) for idx in headers}
     distinct = sorted(set(map_run.values()))
     sole_run = distinct[0] if len(distinct) == 1 else None
 
-    def resolve(pid) -> str | None:
-        for key in ("map_index", "id_merge_index"):
-            if pid.metaValueExists(key):
-                run = map_run.get(int(pid.getMetaValue(key)))
-                if run:
-                    return run
+    def resolve(pid, cf_runs=None) -> str | None:
+        # Global map index, when present, is always authoritative.
+        if pid.metaValueExists("map_index"):
+            run = map_run.get(int(pid.getMetaValue("map_index")))
+            if run:
+                return run
+        # Multi-run isobaric: fall back to the consensus feature's element runs.
+        if cf_runs and len(cf_runs) == 1:
+            return next(iter(cf_runs))
+        # Unassigned PIDs (no feature) or a feature spanning several runs: keep the
+        # historical id_merge_index lookup (correct when one map == one run).
+        if pid.metaValueExists("id_merge_index"):
+            run = map_run.get(int(pid.getMetaValue("id_merge_index")))
+            if run:
+                return run
         return sole_run
 
     return resolve
@@ -63,9 +98,14 @@ def consensus_psms_to_records(consensusxml_path: str | None = None, cm=None) -> 
     return records
 
 
-def psm_records_for_pid(pid, resolve_run, seen: set[tuple]) -> list[dict]:
-    """PSM records for one PeptideIdentification (deduped via the shared ``seen`` set)."""
-    run = resolve_run(pid)
+def psm_records_for_pid(pid, resolve_run, seen: set[tuple], cf_runs=None) -> list[dict]:
+    """PSM records for one PeptideIdentification (deduped via the shared ``seen`` set).
+
+    ``cf_runs`` is the consensus feature's element-run set (passed for assigned
+    PIDs); it lets :func:`_run_resolver` attribute a PID whose ``id_merge_index``
+    is only a local per-run channel index to the correct run.
+    """
+    run = resolve_run(pid, cf_runs=cf_runs)
     if run is None:
         return []
     spectrum_ref = pid.getSpectrumReference() if hasattr(pid, "getSpectrumReference") else ""

@@ -258,6 +258,7 @@ class ViewSchema:
         fields: dict[str, FieldDef],
         doc: str = "",
         extra_columns: bool = False,
+        identity_composite: list[str] | None = None,
     ):
         self._view_name = view_name
         self._file_type = file_type
@@ -265,7 +266,20 @@ class ViewSchema:
         self._fields = fields
         self._doc = doc
         self._extra_columns = extra_columns
+        self._identity_composite = tuple(identity_composite) if identity_composite else None
         self._arrow_schema_cache: pa.Schema | None = None
+
+    @property
+    def primary_key(self) -> tuple[str, ...]:
+        """The view's primary-key column(s)."""
+        return self._primary_key
+
+    @property
+    def identity_composite(self) -> tuple[str, ...] | None:
+        """Composite of existing fields the single-column identity id is derived
+        from, as declared by the schema's ``identity_composite`` key. ``None``
+        for views without a derived identity (mz, run, sample, ...)."""
+        return self._identity_composite
 
     @property
     def __name__(self) -> str:
