@@ -148,12 +148,35 @@ def test_override_provided_id_stashes_to_cv_params(tmp_path):
     assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in cv
 
 
-def test_derive_id_list_order_insensitive():
-    """List-valued composite fields (grouped_runs, scan) are order-insensitive."""
-    assert derive_id(["P1", [1, 2, 3]]) == derive_id(["P1", [3, 1, 2]])
-    assert derive_id([["r1", "r2"]]) == derive_id([["r2", "r1"]])
-    # but different *elements* still differ
-    assert derive_id([[1, 2]]) != derive_id([[1, 3]])
+def test_derive_id_preserves_ordered_list_components():
+    """A multi-component scan is a tuple, not a set."""
+    assert derive_id(["P1", [1, 2, 3]]) != derive_id(["P1", [3, 1, 2]])
+
+
+def test_derive_id_can_canonicalize_set_valued_lists():
+    """Explicitly unordered grouped_runs values are compared set-wise."""
+    assert derive_id([["r1", "r2"]], unordered_list_indices=(0,)) == derive_id([["r2", "r1"]], unordered_list_indices=(0,))
+    assert derive_id([["r1", "r2"]], unordered_list_indices=(0,)) != derive_id([["r1", "r3"]], unordered_list_indices=(0,))
+
+
+def test_writer_preserves_scan_order_but_canonicalizes_grouped_runs(tmp_path):
+    """Writer applies unordered semantics only to the grouped_runs field."""
+    psm_path = tmp_path / "ordered.psm.parquet"
+    psm_a = make_psm_record(peptidoform="PEPTIDEK", run_file_name="run_01", scan=[10, 1, 345])
+    psm_b = make_psm_record(peptidoform="PEPTIDEK", run_file_name="run_01", scan=[345, 1, 10])
+    with PsmWriter(psm_path) as writer:
+        writer.write_batch([psm_a, psm_b])
+    assert len(set(pq.read_table(psm_path).column("psm_id").to_pylist())) == 2
+
+    pg_ids = []
+    for name, grouped_runs in (("forward", ["run_01", "run_02"]), ("reverse", ["run_02", "run_01"])):
+        pg_path = tmp_path / f"{name}.pg.parquet"
+        pg = make_pg_record(anchor_protein="P1", run_file_name="run_01")
+        pg["grouped_runs"] = grouped_runs
+        with PgWriter(pg_path) as writer:
+            writer.write_batch([pg])
+        pg_ids.extend(pq.read_table(pg_path).column("pg_id").to_pylist())
+    assert pg_ids[0] == pg_ids[1]
 
 
 def test_override_applies_on_write_table_path(tmp_path):

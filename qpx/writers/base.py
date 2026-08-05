@@ -299,18 +299,23 @@ class BaseWriter:
     ) -> list[int]:
         """Preserve or derive row IDs, recording overridden producer IDs."""
         ids: list[int] = []
+        unordered_list_indices = tuple(index for index, field in enumerate(composite) if field == "grouped_runs")
         for index, provided in enumerate(existing):
-            if provided is not None and self._override_provided_ids:
+            if provided is not None and not self._override_provided_ids:
+                ids.append(provided)
+                continue
+            if provided is not None:
                 if cv_lists is not None:
                     params = list(cv_lists[index] or [])
                     params.append({"cv_name": f"provided_{id_field}", "cv_value": str(provided)})
                     cv_lists[index] = params
-                ids.append(derive_id([composite_values[field][index] for field in composite]))
                 self.overridden_id_count += 1
-            elif provided is None:
-                ids.append(derive_id([composite_values[field][index] for field in composite]))
-            else:
-                ids.append(provided)
+            ids.append(
+                derive_id(
+                    [composite_values[field][index] for field in composite],
+                    unordered_list_indices=unordered_list_indices,
+                )
+            )
         return ids
 
     def _fill_identity_table(self, table: pa.Table) -> pa.Table:
