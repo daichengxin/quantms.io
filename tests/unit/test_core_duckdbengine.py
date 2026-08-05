@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pyarrow as pa
+import pytest
 
 from qpx.core.convert import QueryResult
 from qpx.core.engine import DuckDBEngine, create_engine
@@ -93,6 +94,27 @@ def test_lazy_query(feature_parquet):
         assert set(runs) == {"run_01", "run_02"}
     finally:
         engine.close()
+
+
+@pytest.mark.parametrize(
+    ("list_column", "value_column"),
+    [
+        ("grouped_runs); DROP TABLE run; --", "run_file_name"),
+        ("grouped_runs", "run_file_name); DROP TABLE pg; --"),
+    ],
+)
+def test_join_list_membership_validates_column_names(list_column, value_column):
+    """List-membership joins reject SQL passed as a column identifier."""
+    with DuckDBEngine() as engine:
+        left = LazyQuery(engine, "pg")
+        right = LazyQuery(engine, "run")
+
+        with pytest.raises(ValueError, match="Unsafe SQL identifier"):
+            left.join_list_membership(
+                right,
+                list_column=list_column,
+                value_column=value_column,
+            )
 
 
 def test_query_result(feature_parquet):

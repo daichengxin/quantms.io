@@ -7,11 +7,14 @@ correct schemas and plausible values.
 
 import re
 from pathlib import Path
+from unittest.mock import Mock
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from tests.conftest import assert_pg_table_wellformed
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples" / "diann" / "small"
 
@@ -53,6 +56,76 @@ def _prepare_ms_info_parquet(source_dir: Path, dest_dir: Path) -> None:
         stem = tsv_path.stem.replace("_mzml_info", "")
         parquet_name = f"{stem}_ms_info.parquet"
         pq.write_table(pa.Table.from_pandas(out), str(dest_dir / parquet_name))
+
+
+def _write_plexdia_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Write a two-channel DIA-NN report, PG matrix, and matching SDRF."""
+    shared = {
+        "Run": "run_A.RAW",
+        "Protein.Group": "P1",
+        "Protein.Names": "Protein 1",
+        "Genes": "G1",
+        "Modified.Sequence": "PEPTIDEK",
+        "Stripped.Sequence": "PEPTIDEK",
+        "Precursor.Id": "PEPTIDEK2",
+        "Precursor.Charge": 2,
+        "PEP": 0.001,
+        "Global.Q.Value": 0.001,
+        "PG.Q.Value": 0.002,
+        "Global.PG.Q.Value": 0.003,
+        "GG.Q.Value": 0.004,
+        "Proteotypic": 1,
+        "RT": 10.0,
+    }
+    rows = [
+        {
+            **shared,
+            "Channel": "L",
+            "Q.Value": 0.002,
+            "Precursor.Quantity": 100.0,
+            "PG.Quantity": 1000.0,
+            "PG.MaxLFQ": 900.0,
+        },
+        {
+            **shared,
+            "Channel": "H",
+            "Q.Value": 0.003,
+            "Precursor.Quantity": 200.0,
+            "PG.Quantity": 2000.0,
+            "PG.MaxLFQ": 1800.0,
+        },
+    ]
+    report_path = tmp_path / "plexdia_report.tsv"
+    pd.DataFrame(rows).to_csv(report_path, sep="\t", index=False)
+
+    matrix_path = tmp_path / "plexdia_pg_matrix.tsv"
+    pd.DataFrame(
+        [
+            {
+                "Protein.Group": "P1",
+                "Protein.Names": "Protein 1",
+                "Genes": "G1",
+                "run_A": 900.0,
+            }
+        ]
+    ).to_csv(matrix_path, sep="\t", index=False)
+
+    sdrf_path = tmp_path / "plexdia.sdrf.tsv"
+    pd.DataFrame(
+        [
+            {
+                "source name": "SAMPLE_L",
+                "comment[data file]": "run_A.RAW",
+                "comment[label]": "L",
+            },
+            {
+                "source name": "SAMPLE_H",
+                "comment[data file]": "run_A.RAW",
+                "comment[label]": "H",
+            },
+        ]
+    ).to_csv(sdrf_path, sep="\t", index=False)
+    return report_path, matrix_path, sdrf_path
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +208,6 @@ class TestDiaNNFeatureConversion:
     def test_has_rows(self, feature_table):
         assert feature_table.num_rows > 0, "feature.parquet is empty"
 
-    def test_key_columns_present(self, feature_table):
-        column_names = set(feature_table.column_names)
-        expected = {"sequence", "charge", "intensities", "run_file_name"}
-        missing = expected - column_names
-        assert not missing, f"Missing columns: {missing}"
-
     def test_sequence_values_are_nonempty(self, feature_table):
         sequences = feature_table.column("sequence").to_pylist()
         for seq in sequences:
@@ -171,6 +238,26 @@ class TestDiaNNFeatureConversion:
         assert not errors, f"Schema validation errors: {errors}"
 
 
+def test_plexdia_feature_collapses_channels_into_one_row(tmp_path):
+    """Channel rows for one precursor become one feature with two intensities."""
+    from qpx.converters.diann.feature_adapter import DiannFeatureAdapter
+
+    report_path, _, sdrf_path = _write_plexdia_inputs(tmp_path)
+    output_path = tmp_path / "plexdia.feature.parquet"
+    with DiannFeatureAdapter() as adapter:
+        adapter.convert(
+            diann_report=str(report_path),
+            output_path=str(output_path),
+            sdrf_path=str(sdrf_path),
+            qvalue_threshold=0.01,
+        )
+
+    rows = pq.read_table(output_path).to_pylist()
+    assert len(rows) == 1
+    assert rows[0]["run_file_name"] == "run_A"
+    assert {entry["label"]: entry["intensity"] for entry in rows[0]["intensities"]} == {"L": 100.0, "H": 200.0}
+
+
 # ---------------------------------------------------------------------------
 # Protein group conversion tests
 # ---------------------------------------------------------------------------
@@ -187,36 +274,9 @@ class TestDiaNNPgConversion:
     def test_has_rows(self, pg_table):
         assert pg_table.num_rows > 0, "pg.parquet is empty"
 
-    def test_key_columns_present(self, pg_table):
-        column_names = set(pg_table.column_names)
-        expected = {"pg_accessions", "anchor_protein", "run_file_name", "intensities"}
-        missing = expected - column_names
-        assert not missing, f"Missing columns: {missing}"
-
-    def test_protein_accessions_are_nonempty(self, pg_table):
-        accessions_col = pg_table.column("pg_accessions").to_pylist()
-        for accessions in accessions_col:
-            assert accessions is not None and len(accessions) > 0
-            for acc in accessions:
-                assert isinstance(acc, str) and len(acc) > 0, f"Expected non-empty accession, got {acc!r}"
-
-    def test_anchor_protein_is_nonempty(self, pg_table):
-        anchors = pg_table.column("anchor_protein").to_pylist()
-        for anchor in anchors:
-            assert isinstance(anchor, str) and len(anchor) > 0
-
-    def test_run_file_names_are_nonempty(self, pg_table):
-        run_names = pg_table.column("run_file_name").to_pylist()
-        for name in run_names:
-            assert isinstance(name, str) and len(name) > 0
-
-    def test_intensities_structure(self, pg_table):
-        rows = pg_table.column("intensities").to_pylist()
-        for row_intensities in rows:
-            assert row_intensities is not None and len(row_intensities) > 0
-            for entry in row_intensities:
-                assert "label" in entry
-                assert "intensity" in entry
+    def test_pg_table_wellformed(self, pg_table):
+        """grouped_runs, pg_accessions, anchor_protein, intensities are all well-formed."""
+        assert_pg_table_wellformed(pg_table)
 
     def test_schema_validation(self, pg_table):
         """Verify that the output conforms to the PgSchema."""
@@ -224,6 +284,83 @@ class TestDiaNNPgConversion:
 
         errors = PgSchema.validate(pg_table)
         assert not errors, f"Schema validation errors: {errors}"
+
+
+def test_plexdia_pg_preserves_each_channel_quantity(tmp_path):
+    """Protein-group aggregation must not discard all but the first channel."""
+    from qpx.converters.diann.pg_adapter import DiannPgAdapter
+
+    report_path, matrix_path, sdrf_path = _write_plexdia_inputs(tmp_path)
+    output_path = tmp_path / "plexdia.pg.parquet"
+    with DiannPgAdapter() as adapter:
+        adapter.convert(
+            diann_report=str(report_path),
+            pg_matrix_path=str(matrix_path),
+            output_path=str(output_path),
+            sdrf_path=str(sdrf_path),
+        )
+
+    # pg is flattened since 1.1: each channel is its own row (one row per label).
+    rows = pq.read_table(output_path).to_pylist()
+    assert len(rows) == 2
+    assert all(row["grouped_runs"] == ["run_A"] for row in rows)
+    assert {row["label"]: row["intensity"] for row in rows} == {"L": 1000.0, "H": 2000.0}
+    assert {row["label"]: row["additional_intensities"][0]["intensities"][0]["intensity_value"] for row in rows} == {
+        "L": 900.0,
+        "H": 1800.0,
+    }
+
+
+def test_diann_maxlfq_fallback_keeps_experimental_label(tmp_path):
+    """MaxLFQ-only PG output remains joinable to an LFQ run sample."""
+    from qpx.converters.diann.pg_adapter import DiannPgAdapter
+
+    report_path = tmp_path / "maxlfq_report.tsv"
+    pd.DataFrame(
+        [
+            {
+                "Run": "run_A",
+                "Protein.Group": "P1",
+                "Protein.Names": "Protein 1",
+                "Genes": "G1",
+                "PG.MaxLFQ": 700.0,
+                "Modified.Sequence": "PEPTIDEK",
+                "Stripped.Sequence": "PEPTIDEK",
+                "Precursor.Id": "PEPTIDEK2",
+                "Precursor.Charge": 2,
+                "Q.Value": 0.002,
+                "PG.Q.Value": 0.002,
+                "Global.PG.Q.Value": 0.003,
+                "GG.Q.Value": 0.004,
+                "Proteotypic": 1,
+                "Precursor.Quantity": 100.0,
+            }
+        ]
+    ).to_csv(report_path, sep="\t", index=False)
+    matrix_path = tmp_path / "maxlfq_pg_matrix.tsv"
+    pd.DataFrame(
+        [
+            {
+                "Protein.Group": "P1",
+                "Protein.Names": "Protein 1",
+                "Genes": "G1",
+                "run_A": 700.0,
+            }
+        ]
+    ).to_csv(matrix_path, sep="\t", index=False)
+
+    output_path = tmp_path / "maxlfq.pg.parquet"
+    with DiannPgAdapter() as adapter:
+        adapter.convert(
+            diann_report=str(report_path),
+            pg_matrix_path=str(matrix_path),
+            output_path=str(output_path),
+        )
+
+    row = pq.read_table(output_path).to_pylist()[0]
+    assert row["label"] == "LFQ"
+    assert row["intensity"] == 700.0
+    assert row["additional_intensities"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -267,3 +404,109 @@ class TestDiaNNOntologyConversion:
         table = pq.read_table(str(path))
         errors = OntologySchema.validate(table)
         assert not errors, f"Schema validation errors: {errors}"
+
+
+class TestDiannReportLoading:
+    """Adaptive TABLE-vs-VIEW report loading (bigbio/qpx#221 — @Shen-YuFei)."""
+
+    @staticmethod
+    def _adapter(conn):
+        import logging
+
+        from qpx.converters.diann.base_adapter import DiaNNBaseAdapter
+
+        class _A(DiaNNBaseAdapter):
+            def convert(self, *args, **kwargs):
+                pass
+
+        adapter = _A.__new__(_A)  # bypass BaseConverter.__init__; we only need _conn + logger
+        adapter._conn = conn
+        adapter.logger = logging.getLogger("test")
+        return adapter
+
+    @staticmethod
+    def _relation_type(conn):
+        return conn.execute("SELECT table_type FROM information_schema.tables WHERE table_name='report'").fetchone()[0]
+
+    def test_parse_duckdb_size(self):
+        from qpx.converters.diann.base_adapter import _parse_duckdb_size
+
+        assert _parse_duckdb_size("14.3 GiB") == int(14.3 * 1024**3)
+        assert _parse_duckdb_size("8192MB") == 8192 * 1000**2
+        assert _parse_duckdb_size("200 MiB") == 200 * 1024**2
+        assert _parse_duckdb_size("-1") is None
+        assert _parse_duckdb_size("garbage") is None
+
+    def test_should_materialize_decision(self, tmp_path, monkeypatch):
+        import gzip
+        import os
+
+        from qpx.core.engine import DuckDBEngine
+
+        report = tmp_path / "r.tsv"
+        report.write_text("Run\tX\nr1\t1\n", encoding="utf-8")
+        compressed_report = tmp_path / "r.tsv.gz"
+        with gzip.open(compressed_report, "wt", encoding="utf-8") as handle:
+            handle.write("Run\tX\nr1\t1\n")
+        with DuckDBEngine() as engine:
+            adapter = self._adapter(engine.connection)
+            should_materialize = getattr(adapter, "_should_materialize_report")
+
+            monkeypatch.setattr(adapter, "_duckdb_memory_limit_bytes", lambda: 8 * 1024**3)
+            assert should_materialize(str(report)) is True  # tiny file, big limit
+            assert should_materialize(str(compressed_report)) is False
+
+            monkeypatch.setattr(os.path, "getsize", lambda _p: 5 * 1024**3)  # 5 GB file
+            assert should_materialize(str(report)) is False  # over 0.5*limit -> VIEW
+
+            monkeypatch.setattr(adapter, "_duckdb_memory_limit_bytes", lambda: None)
+            assert should_materialize(str(report)) is False  # unknown limit, big file
+
+    def test_small_report_materializes_table(self, tmp_path):
+        from qpx.core.engine import DuckDBEngine
+
+        report = tmp_path / "report.tsv"
+        report.write_text("Run\tX\n" + "\n".join(f"r1\t{i}" for i in range(20)) + "\n", encoding="utf-8")
+        engine = DuckDBEngine()
+        self._adapter(engine._conn)._load_diann_report(str(report))
+        assert self._relation_type(engine._conn) == "BASE TABLE"
+
+    def test_falls_back_to_view_when_over_budget(self, tmp_path, monkeypatch):
+        from qpx.core.engine import DuckDBEngine
+
+        report = tmp_path / "report.tsv"
+        report.write_text("Run\tX\n" + "\n".join(f"r1\t{i}" for i in range(20)) + "\n", encoding="utf-8")
+        engine = DuckDBEngine()
+        adapter = self._adapter(engine._conn)
+        monkeypatch.setattr(adapter, "_should_materialize_report", lambda _p: False)
+        adapter._load_diann_report(str(report))
+        assert self._relation_type(engine._conn) == "VIEW"
+
+    def test_materialization_oom_falls_back_without_scanning_view(self, tmp_path, monkeypatch):
+        """OOM fallback creates a VIEW without immediately scanning it."""
+        import duckdb
+
+        from qpx.core.engine import DuckDBEngine
+
+        report = tmp_path / "report.tsv"
+        report.write_text("Run\tX\nr1\t1\n", encoding="utf-8")
+        with DuckDBEngine() as engine:
+            statements = []
+            real_execute = engine.connection.execute
+
+            def execute(statement, *args, **kwargs):
+                """Force materialization to fail while preserving other queries."""
+                statements.append(statement)
+                if statement.startswith("CREATE TABLE report"):
+                    raise duckdb.OutOfMemoryException("forced materialization failure")
+                return real_execute(statement, *args, **kwargs)
+
+            conn = Mock(wraps=engine.connection)
+            conn.execute.side_effect = execute
+            adapter = self._adapter(conn)
+            monkeypatch.setattr(adapter, "_should_materialize_report", lambda _p: True)
+
+            getattr(adapter, "_load_diann_report")(str(report))
+
+            assert self._relation_type(engine.connection) == "VIEW"
+            assert not any(statement.startswith("SELECT COUNT(*)") for statement in statements)

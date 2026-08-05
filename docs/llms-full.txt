@@ -17,8 +17,11 @@ pip install qpx[quantify]          # Integration with mokume
 
 ## CLI Usage
 
-### Convert mzTab to QPX
-qpxc convert mztab input.mzTab -o output.parquet
+### Enrich OpenMS native QPX output
+qpxc convert openms --qpx-dir openms_qpx --sdrf-file metadata.sdrf.tsv --output-folder qpx_output
+
+### Convert OpenMS consensusXML to QPX
+qpxc convert openms-consensus --consensusxml results.consensusXML --sdrf-file metadata.sdrf.tsv --output-folder qpx_output
 
 ### Convert MaxQuant to QPX
 qpxc convert maxquant evidence.txt proteinGroups.txt -o output.parquet
@@ -45,11 +48,11 @@ conn = qpx.connect("dataset.parquet")
 result = conn.sql("SELECT * FROM psms WHERE Intensity > 1000").df()
 
 ### Converting formats
-from qpx.converters import MzTabConverter, MaxQuantConverter, DiannConverter
+from qpx.converters import DiaNNConverter, MaxQuantConverter, OpenMSConverter
 
-# mzTab → QPX
-converter = MzTabConverter("results.mzTab")
-converter.convert("output.parquet")
+# OpenMS native QPX → full QPX dataset
+converter = OpenMSConverter(qpx_dir="openms_qpx", sdrf_path="metadata.sdrf.tsv")
+converter.convert(output_folder="qpx_output")
 
 # MaxQuant → QPX
 converter = MaxQuantConverter("evidence.txt", "proteinGroups.txt")

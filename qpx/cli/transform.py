@@ -100,10 +100,27 @@ def transform_gene_map_cmd(
 # ---------------------------------------------------------------------------
 
 
+def _accession_target_files(dataset: Path) -> list[str]:
+    """Return the Feature and protein-group files for a QPX dataset."""
+    from qpx.transforms.utils import discover_qpx_file_prefix
+
+    try:
+        file_prefix = discover_qpx_file_prefix(dataset)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    target_files = [
+        name for name in (f"{file_prefix}.feature.parquet", f"{file_prefix}.pg.parquet") if (dataset / name).is_file()
+    ]
+    if not target_files:
+        raise click.ClickException(f"No feature or protein-group Parquet file found in {dataset}")
+    return target_files
+
+
 @transform.command("normalize-accessions")
 @click.option(
     "--dataset",
-    help="Path to a QPX dataset directory (containing quantms.*.parquet files)",
+    help="Path to a QPX dataset directory",
     required=True,
     type=click.Path(exists=True, file_okay=False, path_type=Path),
 )
@@ -192,8 +209,7 @@ def transform_normalize_accessions_cmd(
     if out_dir != dataset:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process feature.parquet and pg.parquet
-    target_files = ["quantms.feature.parquet", "quantms.pg.parquet"]
+    target_files = _accession_target_files(dataset)
     total_changed = 0
 
     # Copy non-target files to output dir (once, outside the loop)
@@ -206,10 +222,6 @@ def transform_normalize_accessions_cmd(
 
     for fname in target_files:
         src = dataset / fname
-        if not src.exists():
-            click.echo(f"  Skipping {fname} (not found)")
-            continue
-
         dst = out_dir / fname
         result = normalize_parquet(
             parquet_path=src,

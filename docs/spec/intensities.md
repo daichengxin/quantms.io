@@ -116,11 +116,19 @@ additional_intensities: array[struct{
 
 ## Where intensities are used
 
-| View                          | `intensities` | `additional_intensities` | Notes |
-| ----------------------------- | :-----------: | :----------------------: | ----- |
-| Feature (`feature_file`)      | Yes           | Yes                      | Per-feature, per-run measurements |
-| Protein Group (`pg_file`)     | Yes           | Yes                      | Aggregated at protein group level |
-| Protein Summary (`protein_file`) | --         | --                       | Uses `abundance` field instead |
+| View                          | Primary intensity | `additional_intensities` | Notes |
+| ----------------------------- | :---------------: | :----------------------: | ----- |
+| Feature (`feature_file`)      | `intensities` (list) | Yes                   | Per-feature, per-run; one struct element per label |
+| Protein Group (`pg_file`)     | `intensity` (scalar) | Yes                   | **Flattened since QPX 1.1**: one row per label, scalar `label` + `intensity` — no `intensities` list |
+| Protein Summary (`protein_file`) | `abundance`       | --                       | Uses a single float per sample instead |
+
+!!! warning "PG is flattened — no `intensities` list"
+    The `intensities: list<{label, intensity}>` struct on this page describes the
+    **feature** view. Since QPX 1.1 the protein-group view is **flattened**: each
+    row carries scalar `label` + `intensity` columns and there is one row per
+    `(anchor_protein, grouped_runs, label)`. `label`/`intensity` are null for
+    identification-only groups. See [Protein Group](pg.md) and the
+    [Data Model](data-model.md).
 
 !!! note
     The Protein Summary view uses a simpler `abundance` field (a single float per sample) rather than the full intensities struct, since it serves as a lightweight report format.

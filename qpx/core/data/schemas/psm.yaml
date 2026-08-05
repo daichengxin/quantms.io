@@ -1,6 +1,6 @@
 name: psm
 file_type: psm_file
-primary_key: [sequence, charge, run_file_name, scan]
+primary_key: [peptidoform, charge, run_file_name, scan]
 doc: "Peptide Spectrum Matches from identification searches"
 
 fields:

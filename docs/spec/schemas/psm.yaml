@@ -1,6 +1,6 @@
 name: psm
 file_type: psm_file
-primary_key: [sequence, charge, run_file_name, scan]
+primary_key: [peptidoform, charge, run_file_name, scan]
 doc: "Peptide Spectrum Matches from identification searches"
 
 fields:
@@ -87,7 +87,7 @@ fields:
     doc: "Fragment charge values"
   ion_type_array:
     type: "list<string>"
-    doc: "Fragment ion type annotations (b, y, a, etc.)"
+    doc: "Fragment ion type annotations (e.g., b1, y2, a2)"
   ion_mobility_array:
     type: "list<float32>"
     doc: "Fragment ion mobility values"

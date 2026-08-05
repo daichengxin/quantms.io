@@ -24,8 +24,13 @@ def test_is_multiplexed_uses_static_query_whitelist(table, label_field):
     assert _is_multiplexed(engine, table, label_field)
     engine.execute.assert_called_once()
     query = engine.execute.call_args.args[0]
-    assert f"FROM {table}," in query
-    assert f"i.{label_field}" in query
+    assert f"FROM {table}" in query
+    if table == "pg":
+        # pg is flattened since 1.1: a scalar ``label`` column (no intensities
+        # list to UNNEST), so both label_field variants read ``label`` directly.
+        assert "label" in query
+    else:
+        assert f"i.{label_field}" in query
 
 
 @pytest.mark.parametrize(

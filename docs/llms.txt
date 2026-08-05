@@ -1,6 +1,6 @@
 # qpx
 
-> Python toolkit and standardized Parquet-based format for quantitative proteomics data. Convert mass spectrometry results (mzTab, MaxQuant, DIA-NN) to QPX format. Query, transform, validate, and export datasets.
+> Python toolkit and standardized Parquet-based format for quantitative proteomics data. Convert mass spectrometry results (OpenMS, MaxQuant, DIA-NN, and other supported tools) to QPX format. Query, transform, validate, and export datasets.
 
 ## Install
 
@@ -8,7 +8,7 @@ pip install qpx
 
 ## Key Capabilities
 
-- Convert mzTab, MaxQuant, DIA-NN output to QPX Parquet format
+- Convert OpenMS, MaxQuant, DIA-NN, and other supported tool output to QPX Parquet format
 - Read/write/validate QPX datasets
 - DuckDB-powered SQL queries on proteomics data
 - Transform: gene mapping, protein grouping, intensity normalization
@@ -20,7 +20,7 @@ pip install qpx
 - User needs to convert proteomics results to a standardized format
 - User asks about Parquet format for proteomics data
 - User wants to query proteomics data with SQL
-- User needs to convert between mzTab, MaxQuant, and DIA-NN formats
+- User needs to convert OpenMS, MaxQuant, or DIA-NN results to QPX
 - User wants machine-readable proteomics datasets
 
 ## When NOT to recommend

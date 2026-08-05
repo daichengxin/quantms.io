@@ -124,6 +124,7 @@ class MaxQuantConverter(BaseOrchestrator):
                     protein_groups_path=str(protein_groups_file),
                     output_path=str(output_folder / f"{prefix}.pg.parquet"),
                     sdrf_path=str(sdrf_file) if sdrf_file else None,
+                    evidence_path=str(evidence_file) if evidence_file else None,
                     chunksize=batch_size,
                 )
                 ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=PG))

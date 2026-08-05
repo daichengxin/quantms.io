@@ -82,11 +82,13 @@ class Feature(BaseStructure):
         # New schema has label in intensities struct, join on label.
         if ilf == "channel":
             join_cond = "i.sample_accession = rs.sample_accession"
+            label_expr = "i.channel"
         else:
-            join_cond = "i.label = rs.label"
+            join_cond = "(i.label = rs.label OR len(r.samples) = 1)"
+            label_expr = "rs.label"
         stmt = sql_build(
             """SELECT f.sequence, f.peptidoform, f.charge, f.anchor_protein,
-               rs.sample_accession, i.$ilf AS label, i.intensity,
+               rs.sample_accession, $label_expr AS label, i.intensity,
                f.run_file_name, rs.biological_replicate, r.fraction
         FROM $src f
         JOIN run r ON f.run_file_name = r.run_file_name,
@@ -96,5 +98,6 @@ class Feature(BaseStructure):
             ilf=ilf,
             src=self._query.source,
             join_cond=join_cond,
+            label_expr=label_expr,
         )
         return QueryResult(self._engine.execute(stmt))

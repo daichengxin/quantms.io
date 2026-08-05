@@ -37,6 +37,17 @@ fields:
   dissociation_method:
     type: string
     doc: "Fragmentation method name (HCD, CID, ETD)"
+  acquisition_method:
+    type: string
+    nullable: true
+    doc: "Data acquisition method name (e.g. DDA, DIA); from comment[proteomics data acquisition method]"
+
+  # Additional ontology-backed run terms (acquisition method as CV, labeling, etc.);
+  # plain-string values live in the fields above, resolved CV terms in ontology.parquet
+  additional_terms:
+    type: "list<ontology_term>"
+    nullable: true
+    doc: "Other ontology-backed run terms (acquisition method, labeling, etc.)"
 
   # Search configuration
   modification_parameters:

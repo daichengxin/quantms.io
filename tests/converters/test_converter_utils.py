@@ -7,10 +7,12 @@ Tests cover:
 """
 
 import pandas as pd
+import pytest
 
 from qpx.converters.base import BaseConverter
 from qpx.converters.maxquant.feature_adapter import MaxQuantFeatureAdapter
 from qpx.converters.maxquant.pg_adapter import MaxQuantPgAdapter
+from qpx.converters.utils import parse_uniprot_id, strip_uniprot_prefix
 
 # ---------------------------------------------------------------------------
 # BaseConverter._escape_path
@@ -183,3 +185,45 @@ class TestExtractGeneMap:
         result = MaxQuantFeatureAdapter._extract_gene_map(df, "Protein IDs", "Gene names")
         if result != {}:
             raise AssertionError(f"Expected empty dict, got {result!r}")
+
+
+# ---------------------------------------------------------------------------
+# UniProt accession helpers (shared parser)
+# ---------------------------------------------------------------------------
+
+
+class TestParseUniprotId:
+    """``db|ACCESSION|NAME`` -> ``(accession, name)`` with graceful fallbacks."""
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            ("sp|P12345|PROT_HUMAN", ("P12345", "PROT_HUMAN")),
+            ("tr|A0A3B3IS91|X_HUMAN", ("A0A3B3IS91", "X_HUMAN")),
+            ("A|B", ("B", "B")),  # 2 fields: accession doubles as name
+            ("P12345", ("P12345", "P12345")),  # no pipes: entry is both
+            ("A|", ("", "")),  # trailing empty field preserved
+            ("db|X|Y|Z", ("X", "Y")),  # >3 fields: first two used
+        ],
+    )
+    def test_parse(self, entry, expected):
+        assert parse_uniprot_id(entry) == expected
+
+
+class TestStripUniprotPrefix:
+    """Only ``sp|``/``tr|``-prefixed ids are stripped; everything else is verbatim."""
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            ("sp|P55011|S12A2_HUMAN", "P55011"),
+            ("tr|A0A3B3IS91|X_HUMAN", "A0A3B3IS91"),
+            ("P55011", "P55011"),  # bare accession untouched
+            ("CON__P1", "CON__P1"),  # contaminant prefix, no sp|/tr| -> verbatim
+            ("REV__sp|P1|N", "REV__sp|P1|N"),  # decoy: not a leading sp|/tr| -> verbatim
+            ("xyz|abc", "xyz|abc"),  # pipe but not a UniProt db prefix -> verbatim
+            ("", ""),
+        ],
+    )
+    def test_strip(self, entry, expected):
+        assert strip_uniprot_prefix(entry) == expected

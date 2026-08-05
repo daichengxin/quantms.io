@@ -368,7 +368,7 @@ class SpectronautFeatureAdapter(SpectronautBaseAdapter):
         # --- Nested columns ---
         int_col = r["intensity"]
         parts.append(
-            f"[STRUCT_PACK(label := 'raw', intensity := COALESCE({_safe_float_sql(int_col)}, 0.0::FLOAT))] AS intensities"
+            f"[STRUCT_PACK(label := 'LFQ', intensity := COALESCE({_safe_float_sql(int_col)}, 0.0::FLOAT))] AS intensities"
         )
         parts.append(self._build_additional_intensities_sql(r, report_cols))
         parts.append(self._build_additional_scores_sql(report_cols))
@@ -443,7 +443,7 @@ class SpectronautFeatureAdapter(SpectronautBaseAdapter):
         ai_check = " OR ".join(checks)
         return (
             f"CASE WHEN {ai_check} "
-            f"THEN [STRUCT_PACK(label := 'raw', "
+            f"THEN [STRUCT_PACK(label := 'LFQ', "
             f"intensities := LIST_FILTER("
             f"[{ai_list}], x -> x IS NOT NULL))] "
             f"ELSE NULL END AS additional_intensities"

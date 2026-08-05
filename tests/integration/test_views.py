@@ -1,6 +1,7 @@
 """Tests for QPX views: ProteinView, PeptideView, IdentificationSummaryView."""
 
 import pandas as pd
+import pytest
 
 from qpx.core.convert import QueryResult
 from qpx.dataset import Dataset
@@ -242,6 +243,152 @@ class TestIdentificationSummaryView:
 # ---------------------------------------------------------------------------
 
 
+def _lfq_run(run_accession, run_file_name, sample_accession):
+    """A label-free (single-sample) run record; run.samples[].label == 'LFQ'."""
+    return {
+        "run_accession": run_accession,
+        "run_file_name": run_file_name,
+        "samples": [
+            {
+                "sample_accession": sample_accession,
+                "label": "LFQ",
+                "biological_replicate": 1,
+                "technical_replicate": 1,
+            }
+        ],
+        "fraction": None,
+        "instrument": None,
+        "enzymes": None,
+        "dissociation_method": None,
+        "modification_parameters": None,
+    }
+
+
+@pytest.fixture(name="multi_run_dataset_dir")
+def _multi_run_dataset_dir(tmp_path):
+    """A dataset with a genuine multi-element grouped_runs and DIA-NN LFQ labels.
+
+    - Two fractions (run_A and run_B) from the same label-free sample.
+    - One protein group PROT1 whose grouped_runs is BOTH runs, quantified once
+      with a single 'LFQ' intensity (the tool-reported LFQ value for the group).
+    - Features carry the DIA-NN label 'raw' (NOT the run's 'LFQ' channel), to
+      exercise the PeptideView label-mismatch fix.
+    """
+    from qpx.writers import DatasetWriter, FeatureWriter, PgWriter, RunWriter, SampleWriter
+    from tests.conftest import make_dataset_record, make_feature_record, make_pg_record, make_sample_record
+
+    ds_dir = tmp_path / "multi_run_dataset"
+    ds_dir.mkdir()
+
+    # Features: DIA-NN emits label 'raw'; one feature per run.
+    feature_records = [
+        make_feature_record(
+            sequence="PEPTIDEK",
+            anchor_protein="PROT1",
+            run_file_name="run_A",
+            intensities=[{"label": "raw", "intensity": 1000.0}],
+        ),
+        make_feature_record(
+            sequence="PEPTIDEK",
+            anchor_protein="PROT1",
+            run_file_name="run_B",
+            scan=[2001],
+            intensities=[{"label": "raw", "intensity": 2000.0}],
+        ),
+    ]
+    with FeatureWriter(ds_dir / "exp.feature.parquet") as w:
+        w.write_batch(feature_records)
+
+    # PG: one row keyed by a TWO-element grouped_runs list.
+    pg_rec = make_pg_record(anchor_protein="PROT1")
+    pg_rec["grouped_runs"] = ["run_A", "run_B"]
+    pg_rec["intensities"] = [{"label": "LFQ", "intensity": 5000.0}]
+    with PgWriter(ds_dir / "exp.pg.parquet") as w:
+        w.write_batch([pg_rec])
+
+    with SampleWriter(ds_dir / "exp.sample.parquet") as w:
+        w.write_batch([make_sample_record("SAMPLE_A")])
+
+    with RunWriter(ds_dir / "exp.run.parquet") as w:
+        w.write_batch(
+            [
+                _lfq_run("assay_A", "run_A", "SAMPLE_A"),
+                _lfq_run("assay_B", "run_B", "SAMPLE_A"),
+            ]
+        )
+
+    with DatasetWriter(ds_dir / "exp.dataset.parquet") as w:
+        w.write_batch([make_dataset_record()])
+
+    return ds_dir
+
+
+class TestMultiRunGroupedRuns:
+    """Integration tests for a genuine multi-element grouped_runs group."""
+
+    def test_protein_view_deduplicates_fraction_sample(self, multi_run_dataset_dir):
+        """One grouped PG quantity is returned once for its shared sample."""
+        with Dataset(multi_run_dataset_dir) as ds:
+            df = ProteinView(ds).intensity().to_df()
+
+        prot1 = df[df["protein_accession"] == "PROT1"]
+        assert list(prot1["sample_accession"]) == ["SAMPLE_A"]
+        assert list(prot1["intensity"]) == [5000.0]
+
+    def test_dataset_intensity_does_not_double_fraction_quantity(self, multi_run_dataset_dir):
+        """Dataset helpers must not sum one PG value once per fraction."""
+        with Dataset(multi_run_dataset_dir) as ds:
+            abundance = ds.intensity("protein").to_df()
+            matrix = ds.design_matrix("protein")
+
+        assert len(abundance) == 1
+        assert abundance.iloc[0]["intensity"] == 5000.0
+        assert matrix.loc["SAMPLE_A", "PROT1"] == 5000.0
+
+    def test_mudata_proteins_reflect_all_grouped_runs(self, multi_run_dataset_dir):
+        """The muData proteins modality has an observation for every grouped run."""
+        from qpx.mudata import build_mudata
+
+        with Dataset(multi_run_dataset_dir) as ds:
+            mdata = build_mudata(ds, modalities=["proteins"])
+
+        proteins = mdata.mod["proteins"]
+        assert "PROT1" in list(proteins.var.index)
+        obs_runs = set(proteins.obs.index)
+        assert "run_A" in obs_runs and "run_B" in obs_runs
+
+    def test_invariant_check_passes(self, multi_run_dataset_dir):
+        """Both grouped_runs values resolve to the same sample without errors."""
+        with Dataset(multi_run_dataset_dir) as ds:
+            results = ds.validate(structures=["pg"])
+        grouped_run_issues = [
+            issue for issue in results["pg"].issues if issue.check in {"dangling_grouped_run", "ambiguous_grouped_run_sample"}
+        ]
+        assert grouped_run_issues == []
+
+    def test_peptide_view_resolves_diann_lfq_label(self, multi_run_dataset_dir):
+        """PeptideView joins DIA-NN 'raw' feature labels to single-sample 'LFQ' runs."""
+        with Dataset(multi_run_dataset_dir) as ds:
+            df = PeptideView(ds).intensity().to_df()
+
+        assert len(df) == 2  # would be 0 rows before the label-mismatch fix
+        assert set(df["sample_accession"]) == {"SAMPLE_A"}
+        assert set(df["label"]) == {"LFQ"}
+
+    def test_peptide_helpers_resolve_diann_lfq_label(self, multi_run_dataset_dir):
+        """All public peptide helpers apply the same single-sample LFQ mapping."""
+        with Dataset(multi_run_dataset_dir) as ds:
+            abundance = ds.intensity("peptide").to_df()
+            quantified = ds.feature.for_quantification(ds).to_df()
+
+        assert len(abundance) == 1
+        assert abundance.iloc[0]["sample_accession"] == "SAMPLE_A"
+        assert abundance.iloc[0]["intensity"] == 3000.0
+        assert len(quantified) == 2
+        assert set(quantified["sample_accession"]) == {"SAMPLE_A"}
+        assert set(quantified["label"]) == {"LFQ"}
+
+
 class TestViewIntegration:
     """Integration tests using views with Dataset."""
 
@@ -277,16 +424,15 @@ class TestViewIntegration:
             manual_result = ds.sql("""
                 SELECT pg.anchor_protein AS protein_accession,
                        rs.sample_accession,
-                       i.label,
-                       i.intensity,
+                       pg.label,
+                       pg.intensity,
                        pg.global_qvalue,
                        pg.gg_names AS gene_names
                 FROM pg,
                      run r,
-                     UNNEST(r.samples) AS _t1(rs),
-                     UNNEST(pg.intensities) AS _t2(i)
-                WHERE pg.run_file_name = r.run_file_name
-                  AND i.label = rs.label
+                     UNNEST(r.samples) AS _t1(rs)
+                WHERE list_contains(pg.grouped_runs, r.run_file_name)
+                  AND pg.label = rs.label
                   AND (pg.global_qvalue IS NULL OR pg.global_qvalue <= 0.01)
             """)
             manual_df = manual_result.to_df()

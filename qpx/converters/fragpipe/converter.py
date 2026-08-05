@@ -35,6 +35,8 @@ class FragPipeConverter(BaseOrchestrator):
         batch_size=500_000,
         output_folder=None,
         project_accession=None,
+        experiment_to_runs=None,
+        experiment_annotation_file=None,
     ):
         out = Path(output_folder) if output_folder else self._output_dir
         if out is None:
@@ -86,6 +88,8 @@ class FragPipeConverter(BaseOrchestrator):
                     protein_path=str(pg_file),
                     output_path=str(out / f"{prefix}.pg.parquet"),
                     chunksize=batch_size,
+                    experiment_to_runs=experiment_to_runs,
+                    experiment_annotation_path=(str(experiment_annotation_file) if experiment_annotation_file else None),
                 )
                 ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=PG))
                 self._resolved_mappings_by_view[PG] = adapter.get_resolved_columns()

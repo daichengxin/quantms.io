@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
+from qpx.transforms.utils import discover_qpx_file_prefix
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -183,12 +185,13 @@ def update_metadata(
             logger.warning(w)
 
     # Step 2: Re-generate sample.parquet and run.parquet from new SDRF
-    sample_path = dataset_path / "quantms.sample.parquet"
-    run_path = dataset_path / "quantms.run.parquet"
+    file_prefix = discover_qpx_file_prefix(dataset_path)
+    sample_path = dataset_path / f"{file_prefix}.sample.parquet"
+    run_path = dataset_path / f"{file_prefix}.run.parquet"
 
     # Back up originals
     if sample_path.exists():
-        backup = dataset_path / "quantms.sample.parquet.bak"
+        backup = sample_path.with_name(f"{sample_path.name}.bak")
         if not backup.exists():
             import shutil
 
@@ -196,7 +199,7 @@ def update_metadata(
             logger.info("Backed up original sample.parquet → %s", backup.name)
 
     if run_path.exists():
-        backup = dataset_path / "quantms.run.parquet.bak"
+        backup = run_path.with_name(f"{run_path.name}.bak")
         if not backup.exists():
             import shutil
 

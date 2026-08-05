@@ -31,20 +31,13 @@ from qpx.converters.maxquant.constants import (
     to_proforma,
 )
 from qpx.converters.ptm import from_proforma
-from qpx.converters.utils import mq_flag_to_bool, safe_float
+from qpx.converters.utils import mq_flag_to_bool, safe_float, strip_uniprot_prefix
 from qpx.writers.feature import FeatureWriter
 
 logger = logging.getLogger(__name__)
 
 # Derive field map from central mappings
 _FEATURE_MAP = get_field_mappings("maxquant", "feature")
-
-
-def _norm_acc(acc: str) -> str:
-    """Strip sp|/tr| UniProt prefixes so lookup keys match normalised accessions."""
-    if acc.startswith(("sp|", "tr|")):
-        return acc.split("|")[1]
-    return acc
 
 
 class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
@@ -181,7 +174,7 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         sub = sub.dropna(subset=[qval_col])
         # Explode semicolon-separated protein groups into individual accessions
         sub = sub.assign(**{acc_col: sub[acc_col].astype(str).str.split(";")}).explode(acc_col)
-        sub[acc_col] = sub[acc_col].str.strip().apply(_norm_acc)
+        sub[acc_col] = sub[acc_col].str.strip().apply(strip_uniprot_prefix)
         sub = sub[sub[acc_col].str.len() > 0].drop_duplicates(subset=[acc_col], keep="first")
         return dict(zip(sub[acc_col], sub[qval_col]))
 
@@ -193,7 +186,7 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         gene_vals = df[gene_col].tolist() if (gene_col and gene_col in df.columns) else [None] * len(df)
         fasta_vals = df["Fasta headers"].tolist() if "Fasta headers" in df.columns else [None] * len(df)
         for acc_raw, gene_raw, fasta_raw in zip(acc_vals, gene_vals, fasta_vals):
-            accs = [_norm_acc(a.strip()) for a in acc_raw.split(";") if a.strip()]
+            accs = [strip_uniprot_prefix(a.strip()) for a in acc_raw.split(";") if a.strip()]
             genes: list[str] | None = None
             if gene_raw and pd.notna(gene_raw):
                 genes = [g.strip() for g in str(gene_raw).split(";") if g.strip()] or None

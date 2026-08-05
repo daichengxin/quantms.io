@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from qpx.core.sql import sql_build, validate_table
+from qpx.core.sql import sql_build, validate_identifier, validate_table
 
 if TYPE_CHECKING:
     from qpx.core.engine import DuckDBEngine
@@ -66,6 +66,27 @@ class LazyQuery:
             src_a=self.source,
             src_b=other.source,
             col=on,
+        )
+        return LazyQuery(self._engine, self._table_name, stmt)
+
+    def join_list_membership(
+        self,
+        other: LazyQuery,
+        list_column: str,
+        value_column: str,
+    ) -> LazyQuery:
+        """Join rows by expanding a list column and matching each member."""
+        stmt = sql_build(
+            """
+            SELECT a.*, b.*
+            FROM $src_a a
+            CROSS JOIN UNNEST(a.$list_col) AS _items(item)
+            JOIN $src_b b ON _items.item = b.$value_col
+            """,
+            src_a=self.source,
+            src_b=other.source,
+            list_col=validate_identifier(list_column),
+            value_col=validate_identifier(value_column),
         )
         return LazyQuery(self._engine, self._table_name, stmt)
 

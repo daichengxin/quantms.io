@@ -39,6 +39,7 @@ _COL_INDIVIDUAL = "characteristics[individual]"
 _COL_INSTRUMENT = "comment[instrument]"
 _COL_ENZYME = "comment[cleavage agent details]"
 _COL_DISSOC = "comment[dissociation method]"
+_COL_ACQUISITION = "comment[proteomics data acquisition method]"
 _COL_MOD_PARAM = "comment[modification parameter"  # prefix, may have ]s suffix
 
 
@@ -371,6 +372,12 @@ class SdrfConverter(BaseConverter):
                 if dissoc:
                     self._run_dissociation.add(dissoc)
 
+            # Acquisition method (plain string; e.g. DDA / DIA)
+            acquisition_method = None
+            acq_vals = _collect_column_values(group, _COL_ACQUISITION)
+            if acq_vals:
+                acquisition_method = _extract_nt(str(acq_vals[0])) or None
+
             # Original file name with extension (e.g. "S1_Frontal_1.raw")
             file_name_vals = group["_file_name"].dropna().unique()
             file_name = str(file_name_vals[0]) if len(file_name_vals) > 0 else None
@@ -384,6 +391,7 @@ class SdrfConverter(BaseConverter):
                 "instrument": instrument,
                 "enzymes": enzymes,
                 "dissociation_method": dissoc,
+                "acquisition_method": acquisition_method,
                 "modification_parameters": mod_params or None,
             }
             records.append(rec)

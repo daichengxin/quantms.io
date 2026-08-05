@@ -21,7 +21,7 @@ import re
 from functools import lru_cache
 from typing import Iterable
 
-from qpx.converters.cdap.constants import ALL_MOD_MASSES, LABEL_TAG_MASSES
+from qpx.converters.cdap.constants import ALL_MOD_MASSES
 from qpx.converters.ptm import build_proforma
 
 # Regex capturing a single signed delta-mass token (e.g. ``+229.163``,
@@ -41,11 +41,6 @@ def _resolve_mass_to_unimod(mass_token: str) -> str:
     if accession is not None:
         return f"UNIMOD:{accession}"
     return f"CHEMMOD:{mass_token}"
-
-
-def _is_label_token(mass_token: str) -> bool:
-    """Return True when *mass_token* is a known N-term/Lys labelling reagent."""
-    return mass_token in LABEL_TAG_MASSES
 
 
 @lru_cache(maxsize=65536)

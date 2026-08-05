@@ -27,6 +27,7 @@ from qpx.mudata import (  # noqa: E402
     _detect_label_field,
     build_mudata,
 )
+from qpx.version import QPX_SPEC_VERSION  # noqa: E402
 from qpx.writers import FeatureWriter, PgWriter, RunWriter  # noqa: E402
 from tests.conftest import make_feature_record, make_pg_record, make_run_record  # noqa: E402
 
@@ -131,6 +132,17 @@ def test_attach_uns_metadata_preserves_non_scalar_values():
     assert mdata.uns["config"] == {"key": "value"}
 
 
+def test_attach_uns_metadata_always_stamps_qpx_versions():
+    """Version identity is present even when dataset.parquet has no row."""
+    mdata = _make_empty_mdata()
+
+    _attach_uns_metadata(_FakeEngine(pd.DataFrame()), mdata)
+
+    assert mdata.uns["qpx_version"] == QPX_SPEC_VERSION
+    assert isinstance(mdata.uns["writer_version"], str)
+    assert mdata.uns["writer_version"]
+
+
 def test_attach_uns_metadata_allows_hdf5_write(tmp_path):
     """End-to-end: mdata.write() must succeed when dataset row contains pd.NA.
 
@@ -217,6 +229,8 @@ def test_orchestrator_mudata_exports_all_channels_from_requested_prefix(tmp_path
     mdata = mudata.read_h5mu(output)
     precursor = mdata.mod["precursors"]
     protein = mdata.mod["proteins"]
+    assert mdata.uns["qpx_version"] == QPX_SPEC_VERSION
+    assert mdata.uns["writer_version"]
     assert list(precursor.obs_names) == ["run_01|TMT126", "run_01|TMT127N"]
     assert list(precursor.obs["sample_accession"]) == ["z_TMT126", "z_TMT127N"]
     np.testing.assert_allclose(precursor.X.toarray()[:, 0], [100.0, 200.0])

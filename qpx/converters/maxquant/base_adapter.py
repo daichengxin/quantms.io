@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from qpx.converters.base import BaseConverter
+from qpx.converters.utils import strip_uniprot_prefix
 
 
 class MaxQuantBaseAdapter(BaseConverter):
@@ -20,20 +21,15 @@ class MaxQuantBaseAdapter(BaseConverter):
 
     @staticmethod
     def _norm_uniprot_id(pid: str) -> str:
-        """Normalise UniProt protein ID to bare accession.
+        """Normalise a MaxQuant UniProt protein ID to its bare accession.
 
-        Strips ``sp|`` and ``tr|`` database prefixes produced by MaxQuant
-        when the search FASTA uses full UniProt headers::
+        Thin wrapper over :func:`qpx.converters.utils.strip_uniprot_prefix`::
 
             sp|P55011|S12A2_HUMAN  →  P55011
             tr|A0A3B3IS91|..._HUMAN  →  A0A3B3IS91
             P55011  →  P55011  (returned as-is)
         """
-        if pid and (pid.startswith("sp|") or pid.startswith("tr|")):
-            parts = pid.split("|")
-            if len(parts) >= 2:
-                return parts[1]
-        return pid
+        return strip_uniprot_prefix(pid)
 
     def _load_sdrf(self, sdrf_path: Optional[str]) -> tuple[dict, str, list]:
         """Load SDRF and return ``(sample_map, experiment_type, tmt_channels)``.

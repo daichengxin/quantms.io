@@ -40,21 +40,24 @@ Run columns describe technical and instrument-related properties of the data acq
 | `comment[technical replicate]` | `technical_replicate` (inside `samples` list) | run.parquet |
 | `comment[instrument]` | `instrument` (as ONTOLOGY_TERM) | run.parquet |
 | `comment[cleavage agent details]` | `enzymes` (as list of ONTOLOGY_TERM) | run.parquet |
-| `comment[proteomics data acquisition method]` | `additional_terms` (as ONTOLOGY_TERM) | run.parquet |
+| `comment[proteomics data acquisition method]` | `acquisition_method` (plain string; also resolved into `additional_terms` as ONTOLOGY_TERM) | run.parquet |
 | `comment[dissociation method]` | `dissociation_method` (as ONTOLOGY_TERM) | run.parquet |
 | `comment[modification parameters]` | `modification_parameters` (as list of MODIFICATION) | run.parquet |
 
-### Factor Columns (→ future factor.parquet)
+### Factor Columns (planned `factor.parquet`)
 
-Factor columns capture experimental design variables from `factor value[X]` columns in the SDRF. These are stored in `factor.parquet`.
+Factor columns capture experimental design variables from `factor value[X]` columns in the SDRF.
+
+!!! warning "Planned view -- not yet serialized"
+    `factor.parquet` is a **planned** view. QPX 1.1 does not ship a `factor.yaml` schema or write a `factor.parquet` file. Experimental-design / factor information is currently carried in the differential-expression view (`factor_names` in the [DE](differential.md) AnnData `uns`), and factor values remain available in the source `.sdrf.tsv` preserved alongside the Parquet files. The mapping below documents the intended field naming for a future release.
 
 | SDRF Column | QPX Field Name | Status |
 |---|---|---|
-| `factor value[disease]` | `factor_disease` | factor.parquet |
-| `factor value[organism part]` | `factor_organism_part` | factor.parquet |
+| `factor value[disease]` | `factor_disease` | planned |
+| `factor value[organism part]` | `factor_organism_part` | planned |
 
 !!! note
-    Factor columns are open-ended. Any `factor value[X]` column in the SDRF will be mapped to `factor_X` (with spaces replaced by underscores). Replicate identifiers (`biological_replicate`, `technical_replicate`) are stored in the `samples` struct of [run.parquet](run.md) rather than here, so the design matrix is self-contained in a single file.
+    Factor columns are open-ended. Any `factor value[X]` column in the SDRF is intended to map to `factor_X` (with spaces replaced by underscores). Replicate identifiers (`biological_replicate`, `technical_replicate`) are stored in the `samples` struct of [run.parquet](run.md), so replicate structure is already self-contained there.
 
 ---
 

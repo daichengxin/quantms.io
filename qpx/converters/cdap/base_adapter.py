@@ -21,8 +21,6 @@ from qpx.converters.base import BaseConverter
 from qpx.converters.cdap.constants import (
     CHANNEL_DEFS,
     DECOY_PREFIX,
-    EXTRA_META_COLUMNS,
-    META_SUFFIXES,
 )
 from qpx.converters.cdap.peptidoform import cdap_to_proforma, strip_label_tags
 from qpx.converters.ptm import from_proforma
@@ -105,15 +103,6 @@ class CdapBaseAdapter(BaseConverter):
                     present.extend(c for c in CHANNEL_DEFS["TMTXX"] if c in col_set)
                 return present, prefix
         return [], "LFQ"
-
-    @staticmethod
-    def _is_meta_column(col: str) -> bool:
-        """Return True if *col* is a CDAP reporter-ion meta column."""
-        if col in EXTRA_META_COLUMNS:
-            return True
-        if not _CHANNEL_PREFIX_RE.match(col):
-            return False
-        return any(col.endswith(suffix) for suffix in META_SUFFIXES)
 
     # ------------------------------------------------------------------
     # Value parsers (intensity, protein)

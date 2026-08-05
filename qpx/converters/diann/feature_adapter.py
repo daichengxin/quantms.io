@@ -63,6 +63,16 @@ _CV_MAPPINGS = [
 _RT_SECONDS_FACTOR = 60.0
 
 
+def _safe_float_sql(column: str) -> str:
+    """Build a SQL expression that converts a finite value to FLOAT."""
+    return f'CASE WHEN r."{column}" IS NOT NULL AND NOT isnan(CAST(r."{column}" AS DOUBLE)) THEN CAST(r."{column}" AS FLOAT) END'
+
+
+def _safe_double_sql(column: str) -> str:
+    """Build a SQL expression that converts a finite value to DOUBLE."""
+    return f'CASE WHEN r."{column}" IS NOT NULL AND NOT isnan(CAST(r."{column}" AS DOUBLE)) THEN CAST(r."{column}" AS DOUBLE) END'
+
+
 class DiannFeatureAdapter(DiaNNBaseAdapter):
     """Convert DIA-NN report to ``feature.parquet``.
 
@@ -98,7 +108,6 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         # 2. SDRF for sample mapping and enzyme info
         enzyme_name: str | None = None
         if sdrf_path:
-            self._load_sdrf_sample_map(sdrf_path)
             enzyme_name = self._load_sdrf_enzyme(sdrf_path)
 
         # 3. Detect report columns (once, reused for all batches)
@@ -106,6 +115,7 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         self._resolved = resolve_columns(get_field_mappings("diann", "feature"), report_cols)
         decoy_col = self._resolved.get("decoy")
         has_decoy_col = decoy_col is not None
+        channel_col = self._register_channel_labels(report_cols, sdrf_path)
 
         # 4. Pre-compute precursors: DuckDB temp table + Python modifications dict
         mods_lookup = self._register_precursor_lookup(enzyme_name)
@@ -121,7 +131,13 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
                 self._discovered_scores.add(score_name)
 
         # 7. Build SQL template (once, reused for all batches)
-        sql_template = self._build_batch_sql(report_cols, has_decoy_col, qvalue_threshold)
+        sql_template = self._build_batch_sql(
+            report_cols,
+            has_decoy_col,
+            qvalue_threshold,
+            channel_col,
+            target_schema,
+        )
 
         # 8. Discover runs
         run_names = self._discover_runs(mzml_info_folder)
@@ -156,13 +172,6 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             for c in self._conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='report'").fetchall()
         }
 
-    def _load_sdrf_sample_map(self, sdrf_path: str) -> dict[str, str]:
-        """Load SDRF and create run_file -> sample_accession mapping."""
-        from qpx.core.sdrf import SDRFHandler
-
-        handler = SDRFHandler(sdrf_path)
-        return handler.get_sample_map_run()
-
     def _load_sdrf_enzyme(self, sdrf_path: str) -> str | None:
         """Load the first enzyme name from SDRF for missed-cleavage computation."""
         try:
@@ -172,7 +181,7 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             enzymes = handler.get_enzymes()
             if enzymes:
                 return str(enzymes[0])
-        except Exception:
+        except (OSError, KeyError, TypeError, ValueError):
             self.logger.debug("Could not load enzyme from SDRF")
         return None
 
@@ -191,11 +200,19 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             qcol = validate_identifier(run_col)
             rows = self._conn.execute(
                 sql_build(
-                    "SELECT DISTINCT $col FROM report ORDER BY $col",
+                    """
+                    SELECT DISTINCT regexp_replace(
+                        CAST($col AS VARCHAR),
+                        '(?i)\\.(mzML|raw|d|wiff|htrms)$',
+                        ''
+                    ) AS run_file_name
+                    FROM report
+                    ORDER BY run_file_name
+                    """,
                     col=qcol,
                 )
             ).fetchall()
-            run_names = [r[0].replace(".mzML", "").replace(".raw", "") for r in rows]
+            run_names = [row[0] for row in rows]
             self.logger.info(f"Discovered {len(run_names)} runs from report")
 
         return run_names
@@ -262,7 +279,151 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
     # SQL template builder
     # ------------------------------------------------------------------
 
-    def _build_batch_sql(self, report_cols: set[str], has_decoy_col: bool, qvalue_threshold: float) -> str:
+    @staticmethod
+    def _build_core_select_parts(
+        resolved: dict,
+        report_cols: set[str],
+        has_decoy_col: bool,
+    ) -> list[str]:
+        """Build SQL SELECT parts for core feature columns."""
+        has_column = report_cols.__contains__
+        parts = [
+            f'r."{resolved["sequence"]}" AS sequence',
+            "lk.peptidoform",
+            f'CAST(r."{resolved["charge"]}" AS SMALLINT) AS charge',
+        ]
+
+        pep_col = resolved.get("posterior_error_probability")
+        parts.append(
+            f"{_safe_double_sql(pep_col)} AS posterior_error_probability"
+            if has_column(pep_col)
+            else "NULL::DOUBLE AS posterior_error_probability"
+        )
+
+        pg_col = resolved["pg_accessions"]
+        if has_decoy_col:
+            parts.append(f'CAST(r."{resolved["decoy"]}" AS BOOLEAN) AS is_decoy')
+        else:
+            parts.append(
+                f"(starts_with(r.\"{pg_col}\", 'DECOY_') OR starts_with(r.\"{pg_col}\", 'decoy_') "
+                f"OR starts_with(r.\"{pg_col}\", 'rev_') OR starts_with(r.\"{pg_col}\", 'REV_')) AS is_decoy"
+            )
+
+        parts.append("COALESCE(CAST(lk.calculated_mz AS FLOAT), 0.0::FLOAT) AS calculated_mz")
+
+        observed_mz_col = resolved.get("observed_mz")
+        parts.append(
+            f"COALESCE({_safe_float_sql(observed_mz_col)}, 0.0::FLOAT) AS observed_mz"
+            if observed_mz_col and has_column(observed_mz_col)
+            else "0.0::FLOAT AS observed_mz"
+        )
+
+        mass_error_col = resolved.get("mass_error_ppm")
+        parts.append(
+            f"{_safe_float_sql(mass_error_col)} AS mass_error_ppm"
+            if mass_error_col and has_column(mass_error_col)
+            else "NULL::FLOAT AS mass_error_ppm"
+        )
+
+        predicted_rt_col = resolved.get("predicted_rt")
+        parts.append(
+            f"CAST({_safe_float_sql(predicted_rt_col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS predicted_rt"
+            if predicted_rt_col and has_column(predicted_rt_col)
+            else "NULL::FLOAT AS predicted_rt"
+        )
+
+        run_col = resolved["run_file_name"]
+        parts.append(f"regexp_replace(r.\"{run_col}\", '(?i)\\.(mzML|raw|d|wiff|htrms)$', '') AS run_file_name")
+
+        ms2_col = resolved.get("ms2_scan")
+        if ms2_col and has_column(ms2_col):
+            parts.append(
+                f'CASE WHEN r."{ms2_col}" IS NOT NULL THEN [CAST(r."{ms2_col}" AS INTEGER)] ELSE []::INTEGER[] END AS scan'
+            )
+        else:
+            parts.append("[]::INTEGER[] AS scan")
+
+        rt_col = resolved.get("rt")
+        parts.append(
+            f"CAST({_safe_float_sql(rt_col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS rt"
+            if rt_col and has_column(rt_col)
+            else "NULL::FLOAT AS rt"
+        )
+
+        ion_mobility_col = resolved.get("ion_mobility")
+        parts.append(
+            f"{_safe_float_sql(ion_mobility_col)} AS ion_mobility"
+            if ion_mobility_col and has_column(ion_mobility_col)
+            else "NULL::FLOAT AS ion_mobility"
+        )
+        parts.extend(
+            [
+                "CAST(lk.missed_cleavages AS SMALLINT) AS missed_cleavages",
+                f"SPLIT_PART(r.\"{pg_col}\", ';', 1) AS anchor_protein",
+            ]
+        )
+        return parts
+
+    @staticmethod
+    def _build_metadata_select_parts(
+        resolved: dict,
+        report_cols: set[str],
+    ) -> list[str]:
+        """Build SQL SELECT parts for feature metadata columns."""
+        has_column = report_cols.__contains__
+        parts: list[str] = []
+        pg_col = resolved["pg_accessions"]
+
+        proteotypic_col = resolved.get("proteotypic")
+        if proteotypic_col and has_column(proteotypic_col):
+            parts.append(f'CAST(r."{proteotypic_col}" AS INTEGER) = 1 AS "unique"')
+        else:
+            parts.append(f'NOT contains(r."{pg_col}", \';\') AS "unique"')
+
+        pg_qvalue_col = resolved.get("pg_global_qvalue")
+        parts.append(
+            f"{_safe_double_sql(pg_qvalue_col)} AS pg_global_qvalue"
+            if pg_qvalue_col and has_column(pg_qvalue_col)
+            else "NULL::DOUBLE AS pg_global_qvalue"
+        )
+
+        for field in ("ion_mobility_start", "ion_mobility_stop"):
+            column = resolved.get(field)
+            parts.append(f"{_safe_float_sql(column)} AS {field}" if column and has_column(column) else f"NULL::FLOAT AS {field}")
+
+        genes_col = resolved.get("gg_names")
+        if genes_col and has_column(genes_col):
+            genes_expr = (
+                f'CASE WHEN r."{genes_col}" IS NOT NULL '
+                f"AND r.\"{genes_col}\" != '' "
+                f"THEN STRING_SPLIT(r.\"{genes_col}\", ';') "
+                "ELSE NULL END"
+            )
+        else:
+            genes_expr = "NULL"
+        parts.append(f"{genes_expr} AS gg_accessions")
+        parts.append(f"{genes_expr} AS gg_names")
+
+        run_col = resolved["run_file_name"]
+        parts.append(f"regexp_replace(r.\"{run_col}\", '(?i)\\.(mzML|raw|d|wiff|htrms)$', '') AS id_run_file_name")
+
+        for field in ("rt_start", "rt_stop"):
+            column = resolved.get(field)
+            parts.append(
+                f"CAST({_safe_float_sql(column)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS {field}"
+                if column and has_column(column)
+                else f"NULL::FLOAT AS {field}"
+            )
+        return parts
+
+    def _build_batch_sql(
+        self,
+        report_cols: set[str],
+        has_decoy_col: bool,
+        qvalue_threshold: float,
+        channel_col: str | None,
+        target_schema: pa.Schema,
+    ) -> str:
         """Build the SQL query template for batch processing.
 
         Constructs all output columns (including nested structs) in DuckDB SQL.
@@ -273,132 +434,21 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         qv_col = r["qvalue"]
         pg_col = r["pg_accessions"]
 
-        def _has(col):
-            return col in report_cols
-
-        def _sf(col):
-            """Safe float: NULL/NaN → NULL, else FLOAT."""
-            return f'CASE WHEN r."{col}" IS NOT NULL AND NOT isnan(CAST(r."{col}" AS DOUBLE)) THEN CAST(r."{col}" AS FLOAT) END'
-
-        def _sd(col):
-            """Safe double: NULL/NaN → NULL, else DOUBLE."""
-            return f'CASE WHEN r."{col}" IS NOT NULL AND NOT isnan(CAST(r."{col}" AS DOUBLE)) THEN CAST(r."{col}" AS DOUBLE) END'
-
-        parts = []
-
-        # --- Flat scalar columns ---
-        parts.append(f'r."{r["sequence"]}" AS sequence')
-        parts.append("lk.peptidoform")
-        parts.append(f'CAST(r."{r["charge"]}" AS SMALLINT) AS charge')
-
-        # PEP
-        pep_col = r.get("posterior_error_probability")
-        parts.append(
-            f"{_sd(pep_col)} AS posterior_error_probability" if _has(pep_col) else "NULL::DOUBLE AS posterior_error_probability"
-        )
-
-        # is_decoy
-        if has_decoy_col:
-            parts.append(f'CAST(r."{r["decoy"]}" AS BOOLEAN) AS is_decoy')
-        else:
-            parts.append(
-                f"(starts_with(r.\"{pg_col}\", 'DECOY_') OR starts_with(r.\"{pg_col}\", 'decoy_') "
-                f"OR starts_with(r.\"{pg_col}\", 'rev_') OR starts_with(r.\"{pg_col}\", 'REV_')) AS is_decoy"
-            )
-
-        parts.append("COALESCE(CAST(lk.calculated_mz AS FLOAT), 0.0::FLOAT) AS calculated_mz")
-
-        # observed_mz
-        omz_col = r.get("observed_mz")
-        parts.append(
-            f"COALESCE({_sf(omz_col)}, 0.0::FLOAT) AS observed_mz" if omz_col and _has(omz_col) else "0.0::FLOAT AS observed_mz"
-        )
-
-        # mass_error_ppm
-        me_col = r.get("mass_error_ppm")
-        parts.append(f"{_sf(me_col)} AS mass_error_ppm" if me_col and _has(me_col) else "NULL::FLOAT AS mass_error_ppm")
-
-        # predicted_rt (minutes → seconds)
-        prt_col = r.get("predicted_rt")
-        parts.append(
-            f"CAST({_sf(prt_col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS predicted_rt"
-            if prt_col and _has(prt_col)
-            else "NULL::FLOAT AS predicted_rt"
-        )
-
-        # run_file_name (strip extension)
-        parts.append(f"regexp_replace(r.\"{run_col}\", '\\.(mzML|raw|d)$', '') AS run_file_name")
-
-        # scan
-        ms2_col = r.get("ms2_scan")
-        if ms2_col and _has(ms2_col):
-            parts.append(
-                f'CASE WHEN r."{ms2_col}" IS NOT NULL THEN [CAST(r."{ms2_col}" AS INTEGER)] ELSE []::INTEGER[] END AS scan'
-            )
-        else:
-            parts.append("[]::INTEGER[] AS scan")
-
-        # rt (minutes → seconds)
-        rt_col = r.get("rt")
-        parts.append(
-            f"CAST({_sf(rt_col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS rt" if rt_col and _has(rt_col) else "NULL::FLOAT AS rt"
-        )
-
-        # ion_mobility
-        im_col = r.get("ion_mobility")
-        parts.append(f"{_sf(im_col)} AS ion_mobility" if im_col and _has(im_col) else "NULL::FLOAT AS ion_mobility")
-
-        # missed_cleavages
-        parts.append("CAST(lk.missed_cleavages AS SMALLINT) AS missed_cleavages")
-
-        # anchor_protein
-        parts.append(f"SPLIT_PART(r.\"{pg_col}\", ';', 1) AS anchor_protein")
-
-        # unique
-        proteotypic_col = r.get("proteotypic")
-        if proteotypic_col and _has(proteotypic_col):
-            parts.append(f'CAST(r."{proteotypic_col}" AS INTEGER) = 1 AS "unique"')
-        else:
-            parts.append(f'NOT contains(r."{pg_col}", \';\') AS "unique"')
-
-        # pg_global_qvalue
-        pgqv_col = r.get("pg_global_qvalue")
-        parts.append(
-            f"{_sd(pgqv_col)} AS pg_global_qvalue" if pgqv_col and _has(pgqv_col) else "NULL::DOUBLE AS pg_global_qvalue"
-        )
-
-        # ion_mobility_start/stop
-        for field in ("ion_mobility_start", "ion_mobility_stop"):
-            col = r.get(field)
-            parts.append(f"{_sf(col)} AS {field}" if col and _has(col) else f"NULL::FLOAT AS {field}")
-
-        # gg_accessions / gg_names
-        genes_col = r.get("gg_names")
-        if genes_col and _has(genes_col):
-            ge = f'CASE WHEN r."{genes_col}" IS NOT NULL AND r."{genes_col}" != \'\' THEN STRING_SPLIT(r."{genes_col}", \';\') ELSE NULL END'
-        else:
-            ge = "NULL"
-        parts.append(f"{ge} AS gg_accessions")
-        parts.append(f"{ge} AS gg_names")
-
-        # id_run_file_name
-        parts.append(f"regexp_replace(r.\"{run_col}\", '\\.(mzML|raw|d)$', '') AS id_run_file_name")
-
-        # rt_start / rt_stop (minutes → seconds)
-        for field in ("rt_start", "rt_stop"):
-            col = r.get(field)
-            parts.append(
-                f"CAST({_sf(col)} * {_RT_SECONDS_FACTOR} AS FLOAT) AS {field}" if col and _has(col) else f"NULL::FLOAT AS {field}"
-            )
+        has_column = report_cols.__contains__
+        parts = self._build_core_select_parts(r, report_cols, has_decoy_col)
+        parts.extend(self._build_metadata_select_parts(r, report_cols))
 
         # --- Nested: intensities ---
+        label_expr, channel_helper_parts, channel_join = self._build_channel_sql_parts(channel_col, qv_col)
         int_col = r["intensity"]
-        parts.append(f"[STRUCT_PACK(label := 'raw', intensity := COALESCE({_sf(int_col)}, 0.0::FLOAT))] AS intensities")
+        parts.append(
+            f"[STRUCT_PACK(label := {label_expr}, intensity := COALESCE({_safe_float_sql(int_col)}, 0.0::FLOAT))] AS intensities"
+        )
 
         # --- Nested columns built by helpers ---
-        parts.append(self._build_additional_intensities_sql(r, _has))
-        parts.append(self._build_additional_scores_sql(_has))
-        parts.append(self._build_cv_params_sql(r, _has))
+        parts.append(self._build_additional_intensities_sql(r, has_column, label_expr))
+        parts.append(self._build_additional_scores_sql(has_column))
+        parts.append(self._build_cv_params_sql(r, has_column))
 
         # --- Helper columns (for Python post-processing, dropped later) ---
         mod_col = r["modified_sequence"]
@@ -406,11 +456,12 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         chg_col = r["charge"]
         parts.append(f'r."{mod_col}" AS _modified_sequence')
         parts.append(f'r."{pg_col}" AS _pg_group')
+        parts.extend(channel_helper_parts)
 
         # --- Build full query ---
         select_clause = ",\n        ".join(parts)
 
-        sql = sql_build(
+        row_sql = sql_build(
             """
         SELECT
             $select_clause
@@ -419,7 +470,12 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             ON r.$mod_col = lk.modified_sequence
             AND r.$seq_col = lk.sequence
             AND r.$chg_col = lk.charge
-        WHERE r.$run_col IN ({run_placeholders})
+        $channel_join
+        WHERE regexp_replace(
+                  CAST(r.$run_col AS VARCHAR),
+                  '(?i)\\.(mzML|raw|d|wiff|htrms)$',
+                  ''
+              ) IN ({run_placeholders})
           AND r.$qv_col < $qv_threshold
           AND r.$pg_col IS NOT NULL
         """,
@@ -427,16 +483,98 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
             mod_col=validate_identifier(mod_col),
             seq_col=validate_identifier(seq_col),
             chg_col=validate_identifier(chg_col),
+            channel_join=channel_join,
             run_col=validate_identifier(run_col),
             qv_col=validate_identifier(qv_col),
             qv_threshold=str(qvalue_threshold),
             pg_col=validate_identifier(pg_col),
         )
 
-        return sql
+        if channel_col:
+            return self._aggregate_channel_rows_sql(row_sql, target_schema)
+        return row_sql
 
     @staticmethod
-    def _build_additional_intensities_sql(r: dict, _has) -> str:
+    def _build_channel_sql_parts(channel_col: str | None, qvalue_col: str) -> tuple[str, list[str], str]:
+        """Return the label, helper columns, and join used for channel-aware rows."""
+        if channel_col is None:
+            return "'LFQ'", [], ""
+
+        qvalue_expr = f"{_safe_double_sql(qvalue_col)} AS _qvalue"
+        channel_join = sql_build(
+            """
+            JOIN diann_channel_labels cl
+              ON CAST(r.$channel_col AS VARCHAR) = cl.channel_value
+            """,
+            channel_col=validate_identifier(channel_col),
+        )
+        return "cl.canonical_label", [qvalue_expr], channel_join
+
+    @staticmethod
+    def _aggregate_channel_rows_sql(row_sql: str, target_schema: pa.Schema) -> str:
+        """Collapse DIA-NN's one-row-per-channel output to one QPX feature row."""
+        group_fields = {"sequence", "charge", "run_file_name"}
+        python_fields = {
+            "modifications",
+            "peptide_qvalue",
+            "pg_accessions",
+            "pg_positions",
+        }
+        select_parts: list[str] = []
+        for field in target_schema:
+            name = field.name
+            quoted = validate_identifier(name)
+            if name in python_fields:
+                continue
+            if name in group_fields:
+                select_parts.append(quoted)
+            elif name == "intensities":
+                select_parts.append("LIST(intensities[1] ORDER BY intensities[1].label) AS intensities")
+            elif name == "additional_intensities":
+                select_parts.append(
+                    "LIST(additional_intensities[1] "
+                    "ORDER BY intensities[1].label) "
+                    "FILTER (WHERE additional_intensities IS NOT NULL) "
+                    "AS additional_intensities"
+                )
+            else:
+                select_parts.append(f"FIRST({quoted} ORDER BY _qvalue NULLS LAST) AS {quoted}")
+
+        select_parts.extend(["_modified_sequence", "_pg_group"])
+        select_clause = ",\n            ".join(select_parts)
+        return sql_build(
+            """
+            WITH channel_rows AS (
+                $row_sql
+            ),
+            best_channel_rows AS (
+                SELECT *
+                FROM channel_rows
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY sequence,
+                                 charge,
+                                 run_file_name,
+                                 _modified_sequence,
+                                 _pg_group,
+                                 intensities[1].label
+                    ORDER BY _qvalue NULLS LAST
+                ) = 1
+            )
+            SELECT
+                $select_clause
+            FROM best_channel_rows
+            GROUP BY sequence,
+                     charge,
+                     run_file_name,
+                     _modified_sequence,
+                     _pg_group
+            """,
+            row_sql=row_sql,
+            select_clause=select_clause,
+        )
+
+    @staticmethod
+    def _build_additional_intensities_sql(r: dict, _has, label_expr: str = "'LFQ'") -> str:
         """Build SQL for the additional_intensities nested column."""
         candidates = [
             ("PG.MaxLFQ", "maxlfq"),
@@ -461,7 +599,7 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         ai_check = " OR ".join(checks)
         return (
             f"CASE WHEN {ai_check} "
-            f"THEN [STRUCT_PACK(label := 'raw', "
+            f"THEN [STRUCT_PACK(label := {label_expr}, "
             f"intensities := LIST_FILTER([{ai_list}], x -> x IS NOT NULL))] "
             f"ELSE NULL END AS additional_intensities"
         )
