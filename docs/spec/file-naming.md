@@ -14,7 +14,7 @@ Where:
 
 - **`{PREFIX}`** -- A short, unique identifier for the dataset. See [Choosing a prefix](#choosing-a-prefix) below.
 - **`{view}`** -- One of the QPX spec-defined views (e.g., `psm`, `feature`, `pg`, `mz`, `ae`, `de`, `dataset`, `sample`, `run`, `ontology`, `provenance`).
-- **`{format}`** -- The serialization format extension (`parquet`, `h5ad`, `tsv`).
+- **`{format}`** -- The serialization format extension (`parquet`, `h5ad`, `h5mu`, `tsv`).
 
 ### Choosing a prefix
 
@@ -41,6 +41,7 @@ The only requirement is that the prefix is consistent across all files in the sa
 | `PXD014414.mz.parquet` | Mass Spectra | Parquet |
 | `PXD014414.ae.h5ad` | Absolute Expression | AnnData |
 | `PXD014414.de.h5ad` | Differential Expression | AnnData |
+| `PXD014414.h5mu` | Combined expression (MuData) | MuData |
 | `PXD014414.dataset.parquet` | Dataset Metadata | Parquet |
 | `PXD014414.sample.parquet` | Sample Metadata | Parquet |
 | `PXD014414.run.parquet` | Run Metadata | Parquet |
