@@ -1,16 +1,16 @@
 """OpenMS QPX converter — enriches ProteomicsLFQ ``-out_qpx`` output.
 
-OpenMS ``ProteomicsLFQ -out_qpx`` already produces QPX-compliant
-``psm.parquet``, ``feature.parquet``, and ``pg.parquet``.  This converter
-validates those files, copies them to the output folder, and generates the
-missing metadata tables (``run``, ``sample``, ``ontology``, ``provenance``,
-``dataset``) from an SDRF file.
+OpenMS ``ProteomicsLFQ -out_qpx`` produces the core ``psm.parquet``,
+``feature.parquet``, and ``pg.parquet`` tables. This converter upgrades them to
+the current QPX schema, enriches them, and generates the missing metadata tables
+(``run``, ``sample``, ``ontology``, ``provenance``, ``dataset``) from an SDRF.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
+import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +24,7 @@ from qpx.converters.channel_labels import (
     fraction_groups_from_consensusxml,
     parse_consensusxml_maplist,
     read_sdrf_labels,
-    relabel_intensities_parquet,
+    relabel_intensities_table,
     resolve_channel_labels,
 )
 from qpx.converters.orchestrator import BaseOrchestrator
@@ -32,6 +32,7 @@ from qpx.converters.sdrf import SdrfConverter
 from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
 from qpx.core.data.loader import load_schema
 from qpx.core.scores import score_ontology_entries
+from qpx.writers import FeatureWriter, PgWriter, PsmWriter
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,17 @@ _VIEW_SCHEMAS = {
     PSM: "psm",
     FEATURE: "feature",
     PG: "pg",
+}
+
+_OPENMS_IDENTITY_COMPOSITES = {
+    FEATURE: ("run_file_name", "peptidoform", "charge", "rt", "scan", "observed_mz"),
+    PSM: ("run_file_name", "scan", "peptidoform", "charge"),
+}
+
+_VIEW_WRITERS = {
+    FEATURE: FeatureWriter,
+    PSM: PsmWriter,
+    PG: PgWriter,
 }
 
 # There is no PSI-MS CV term for OpenMS's experimental-design ``fraction_group``
@@ -145,7 +157,7 @@ def _validate_core(discovered: dict[str, Path]) -> None:
     for view, path in discovered.items():
         schema = load_schema(_VIEW_SCHEMAS[view])
         table = pq.read_table(str(path))
-        result = schema.validate_full(table)
+        result = schema.validate_full(table, strict=True)
         if not result.is_valid:
             errors = "; ".join(i.message for i in result.errors)
             raise ValueError(f"Validation failed for {path.name}: {errors}")
@@ -164,6 +176,82 @@ def _validate_core(discovered: dict[str, Path]) -> None:
 _FRACTION_GROUP_RUN_COLUMN = {PG: "grouped_runs", FEATURE: "run_file_name"}
 
 
+def _source_identity_composite(parquet: pq.ParquetFile, view: str) -> tuple[str, ...] | None:
+    """Return a declared source composite, or the OpenMS composite for legacy data."""
+    metadata = parquet.schema_arrow.metadata or {}
+    declared = metadata.get(b"identity_composite")
+    if declared:
+        return tuple(declared.decode().split(","))
+    return _OPENMS_IDENTITY_COMPOSITES.get(view)
+
+
+def _add_legacy_grouped_runs(table: pa.Table) -> pa.Table:
+    """Map the pre-1.1 scalar pg run column to grouped_runs."""
+    if "grouped_runs" in table.column_names or "run_file_name" not in table.column_names:
+        return table
+    values = [[value] if value is not None else [] for value in table.column("run_file_name").to_pylist()]
+    return table.append_column("grouped_runs", pa.array(values, type=pa.list_(pa.string())))
+
+
+def _rewrite_core_file(
+    view: str,
+    src_path: Path,
+    dst: Path,
+    channel_labels: dict[int, str],
+    is_lfq: bool | None,
+    compression: str,
+    fraction_group_lookup: dict[str, str],
+) -> tuple[int, int]:
+    """Upgrade one OpenMS core file while streaming by Parquet row group."""
+    parquet = pq.ParquetFile(src_path)
+    metadata = parquet.schema_arrow.metadata or {}
+    writer_class = _VIEW_WRITERS[view]
+    writer_kwargs = {
+        "creator": metadata.get(b"creator", b"OpenMS").decode(),
+        "software_provider": metadata.get(b"software_provider", b"OpenMS").decode(),
+        "compression": compression,
+    }
+    identity_composite = _source_identity_composite(parquet, view)
+    if identity_composite:
+        writer_kwargs["identity_composite"] = identity_composite
+    if view == PSM and b"scan_format" in metadata:
+        writer_kwargs["scan_format"] = metadata[b"scan_format"].decode()
+
+    with tempfile.NamedTemporaryFile(prefix=f".{dst.name}.", suffix=".tmp", dir=dst.parent, delete=False) as temp_file:
+        temp_path = Path(temp_file.name)
+    annotated = 0
+    rows = 0
+    fraction_group_resolver = partial(_fraction_group_for, lookup=fraction_group_lookup)
+    try:
+        with writer_class(temp_path, **writer_kwargs) as writer:
+            for group in range(parquet.num_row_groups):
+                table = parquet.read_row_group(group)
+                if view == PG:
+                    table = _add_legacy_grouped_runs(table)
+                run_column = _FRACTION_GROUP_RUN_COLUMN.get(view)
+                table, group_annotated = relabel_intensities_table(
+                    table,
+                    channel_labels,
+                    bool(is_lfq),
+                    relabel=view in (FEATURE, PG) and is_lfq is not None,
+                    cv_param_name=FRACTION_GROUP_CV_NAME if fraction_group_lookup else None,
+                    run_column=run_column,
+                    cv_param_resolver=fraction_group_resolver,
+                )
+                annotated += group_annotated
+                rows += table.num_rows
+                if view != PG or "intensities" not in table.column_names:
+                    table = writer.align_table_to_schema(table)
+                writer.write_table(table)
+        parquet.close()
+        temp_path.replace(dst)
+    except Exception:
+        parquet.close()
+        temp_path.unlink(missing_ok=True)
+        raise
+    return rows, annotated
+
+
 def _copy_core(
     discovered: dict[str, Path],
     output_folder: Path,
@@ -174,54 +262,37 @@ def _copy_core(
     fraction_group_lookup: Optional[dict[str, str]] = None,
 ) -> dict[str, Path]:
     """
-    Copy core parquet files to the output directory in a single rewrite each.
+    Upgrade and copy core parquet files to the output directory.
 
     ``feature`` and ``pg`` carry ``intensities[].label`` — OpenMS ``-out_qpx``
     writes the run filename (feature) or a bare channel index (pg) there, so
     those two are relabeled with canonical channel labels when the experiment
     type is known (``is_lfq=None`` preserves their source labels: no SDRF
     evidence). When a consensusXML ``fraction_group`` design is available, that
-    cv_param is stamped onto pg/feature rows in the **same** streaming pass, so
-    each file is rewritten at most once (relabel-only, cv_param-only, both, or a
-    plain copy when neither applies). The remaining views pass through untouched.
+    cv_param is stamped onto pg/feature rows in the same streaming pass. Legacy
+    pre-1.1 tables are projected onto the current schemas and receive mandatory
+    IDs before they are atomically installed at the destination.
     """
     fraction_group_lookup = fraction_group_lookup or {}
     output_paths: dict[str, Path] = {}
     for view, src_path in discovered.items():
         dst = output_folder / f"{output_prefix}.{view}.parquet"
-        is_quant_view = view in (FEATURE, PG)
-        do_relabel = is_quant_view and is_lfq is not None
-        do_cv_param = is_quant_view and bool(fraction_group_lookup)
-
-        if do_relabel or do_cv_param:
-            run_column = _FRACTION_GROUP_RUN_COLUMN.get(view) if do_cv_param else None
-            resolver = (lambda run_names: _fraction_group_for(run_names, fraction_group_lookup)) if do_cv_param else None
-            in_place = src_path.resolve() == dst.resolve()
-            out_path = dst.with_suffix(".relabel.tmp") if in_place else dst
-            annotated = relabel_intensities_parquet(
-                str(src_path),
-                str(out_path),
-                channel_labels or {},
-                bool(is_lfq),
-                compression=compression,
-                relabel=do_relabel,
-                cv_param_name=FRACTION_GROUP_CV_NAME if do_cv_param else None,
-                run_column=run_column,
-                cv_param_resolver=resolver,
-            )
-            if in_place:
-                out_path.replace(dst)
-            actions = []
-            if do_relabel:
-                actions.append("relabeled channels")
-            if annotated:
-                actions.append(f"stamped fraction_group on {annotated} row(s)")
-            logger.info("Rewrote %s -> %s (%s)", src_path.name, dst.name, "; ".join(actions) or "no-op")
-        elif src_path.resolve() != dst.resolve():
-            shutil.copy2(str(src_path), str(dst))
-            logger.info("Copied %s -> %s", src_path.name, dst.name)
-        else:
-            logger.info("Skipping copy for %s (same location)", view)
+        rows, annotated = _rewrite_core_file(
+            view,
+            src_path,
+            dst,
+            channel_labels or {},
+            is_lfq,
+            compression,
+            fraction_group_lookup,
+        )
+        logger.info(
+            "Rewrote %s -> %s (%d source rows; stamped fraction_group on %d row(s))",
+            src_path.name,
+            dst.name,
+            rows,
+            annotated,
+        )
         output_paths[view] = dst
     return output_paths
 
@@ -278,8 +349,8 @@ class OpenMSConverter(BaseOrchestrator):
     ) -> None:
         """Run the full enrichment pipeline.
 
-        1. Discover and validate core QPX parquet files
-        2. Copy core files to output folder (if needed)
+        1. Discover core QPX parquet files
+        2. Upgrade, enrich, and validate core files in the output folder
         3. Convert SDRF to run.parquet + sample.parquet
         4. Collect score names for ontology
         5. Write ontology.parquet, provenance.parquet, dataset.parquet
@@ -335,6 +406,7 @@ class OpenMSConverter(BaseOrchestrator):
             self._compression,
             fraction_group_lookup,
         )
+        _validate_core(output_paths)
 
         ontology_entries = self._convert_sdrf(output_folder, output_prefix)
         ontology_entries.extend(self._collect_ontology(output_paths))
@@ -355,7 +427,7 @@ class OpenMSConverter(BaseOrchestrator):
         logger.info("OpenMS QPX enrichment complete -> %s", output_folder)
 
     def discover_and_validate(self) -> dict[str, Path]:
-        """Discover and validate core QPX parquet files."""
+        """Discover core files; validation follows their schema upgrade."""
         discovered = _discover_parquet(self.qpx_dir)
         if not discovered:
             raise FileNotFoundError(
@@ -366,7 +438,6 @@ class OpenMSConverter(BaseOrchestrator):
             len(discovered),
             ", ".join(f"{v}={p.name}" for v, p in discovered.items()),
         )
-        _validate_core(discovered)
         return discovered
 
     def _convert_sdrf(
