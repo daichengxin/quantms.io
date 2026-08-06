@@ -1,5 +1,7 @@
 """Tests for the derived mandatory identity ids (feature_id / psm_id / pg_id)."""
 
+import logging
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -148,16 +150,38 @@ def test_unidentified_feature_namespaces_provided_id(tmp_path):
         assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in params
 
 
-def test_unidentified_feature_derives_id_from_composite(tmp_path):
+def test_unidentified_feature_uses_unique_composite_fallback(tmp_path, caplog):
     """An unidentified Feature (null peptidoform) with no producer id derives a
-    feature_id from the composite (null peptidoform + measured charge/run/rt/...)
-    rather than failing the conversion."""
+    feature_id only when the resulting full-file primary key is unique."""
     path = tmp_path / "unidentified.feature.parquet"
     rec = make_feature_record(sequence="", peptidoform="")
-    with FeatureWriter(path) as writer:
-        writer.write_batch([rec])
+    with caplog.at_level(logging.WARNING, logger="qpx.writers.feature"):
+        with FeatureWriter(path) as writer:
+            writer.write_batch([rec])
     ids = pq.read_table(path).column("feature_id").to_pylist()
     assert ids and ids[0] is not None
+    assert "1 unidentified Feature row(s)" in caplog.text
+    assert "full-file primary-key uniqueness was verified" in caplog.text
+
+
+@pytest.mark.parametrize("write_path", ["batch", "table"])
+def test_unidentified_feature_rejects_non_unique_composite_fallback(tmp_path, write_path):
+    """Distinct unidentified Features cannot share a fallback-derived primary key."""
+    path = tmp_path / "duplicate-unidentified.feature.parquet"
+    first = make_feature_record(sequence="", peptidoform="")
+    second = make_feature_record(
+        sequence="",
+        peptidoform="",
+        intensities=[{"label": "TMT126", "intensity": 2000.0}],
+    )
+
+    with pytest.raises(ValueError, match="Unidentified Feature composite fallback was used for 2 row"):
+        with FeatureWriter(path, batch_size=1) as writer:
+            if write_path == "batch":
+                writer.write_batch([first, second])
+            else:
+                table = writer.align_table_to_schema(pa.Table.from_pylist([first, second]))
+                writer.write_table(table)
 
 
 def test_provided_psm_id_kept_by_default(tmp_path):
