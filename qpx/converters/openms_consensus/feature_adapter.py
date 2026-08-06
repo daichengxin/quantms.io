@@ -10,6 +10,7 @@ the QPX feature schema. Protein-level quantity is not produced here.
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Optional
 
@@ -105,7 +106,7 @@ def _parse_site_scores(raw) -> dict[int, float]:
     if not raw:
         return {}
     try:
-        parsed = eval(str(raw))  # noqa: S307 - trusted OpenMS float dict
+        parsed = ast.literal_eval(str(raw))
         if not isinstance(parsed, dict):
             return {}
         out = {}
@@ -136,10 +137,10 @@ def to_modifications(aa_sequence, site_scores: dict[int, list[dict]] | None = No
     rendering.
     """
     mods: list[dict] = []
-    seen: dict[str, dict] = {}
+    seen: dict[tuple[str, str | None], dict] = {}
 
     def _add_mod(name: str, accession: str | None, position: int, amino_acid: str | None, scores: list[dict] | None) -> None:
-        key = name or accession or ""
+        key = (name, accession)
         entry = seen.get(key)
         if entry is None:
             entry = {"name": name, "accession": accession, "positions": []}
@@ -196,10 +197,14 @@ def localization_scores(hit) -> tuple[list[dict] | None, dict[int, list[dict]]]:
     for algo in _LOCALIZATION_ALGORITHMS:
         pep_key = f"{algo}_pep_score"
         if hit.metaValueExists(pep_key):
-            additional.append({"score_name": pep_key, "score_value": float(hit.getMetaValue(pep_key)), "higher_better": None})
+            additional.append(
+                {"score_name": pep_key.lower(), "score_value": float(hit.getMetaValue(pep_key)), "higher_better": None}
+            )
         flr_key = f"{algo}_global_flr"
         if hit.metaValueExists(flr_key):
-            additional.append({"score_name": flr_key, "score_value": float(hit.getMetaValue(flr_key)), "higher_better": None})
+            additional.append(
+                {"score_name": flr_key.lower(), "score_value": float(hit.getMetaValue(flr_key)), "higher_better": None}
+            )
         site_key = f"{algo}_site_scores"
         if hit.metaValueExists(site_key):
             parsed = _parse_site_scores(hit.getMetaValue(site_key))

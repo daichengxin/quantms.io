@@ -184,6 +184,22 @@ def test_unidentified_feature_rejects_non_unique_composite_fallback(tmp_path, wr
                 writer.write_table(table)
 
 
+def test_identified_duplicate_not_attributed_to_fallback(tmp_path):
+    """A duplicate among identified Features keeps the plain PK error even when a
+    (unique) unidentified composite-fallback row is present in the same file."""
+    path = tmp_path / "mixed-duplicate.feature.parquet"
+    fallback = make_feature_record(sequence="", peptidoform="")  # unique unidentified fallback
+    dup_a = make_feature_record(run_file_name="run_09")
+    dup_b = make_feature_record(run_file_name="run_09")  # identical composite -> duplicate PK
+
+    with pytest.raises(ValueError) as excinfo:
+        with FeatureWriter(path, batch_size=10) as writer:
+            writer.write_batch([fallback, dup_a, dup_b])
+    message = str(excinfo.value)
+    assert "duplicate row" in message.lower()
+    assert "Unidentified Feature composite fallback" not in message
+
+
 def test_provided_psm_id_kept_by_default(tmp_path):
     """A producer-supplied PSM id remains supported by the generic writer contract."""
     path = tmp_path / "t.psm.parquet"

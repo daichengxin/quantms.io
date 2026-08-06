@@ -1,6 +1,7 @@
 """FeatureWriter — writes feature.parquet files."""
 
 import logging
+from collections import Counter
 from collections.abc import Sequence
 
 from qpx.core.data import FeatureSchema
@@ -17,21 +18,35 @@ class FeatureWriter(BaseWriter):
         """Derive identified Feature ids by default from the declared composite."""
         super().__init__(*args, override_provided_ids=override_provided_ids, **kwargs)
         self._unidentified_fallback_count = 0
+        # ids derived for unidentified rows via the composite fallback (no producer
+        # id), plus a count of every derived id — used to attribute a duplicate-PK
+        # error to the fallback path only when a fallback id is the duplicate one,
+        # not when the collision is among identified Features.
+        self._fallback_ids: set[int] = set()
+        self._all_id_counts: Counter = Counter()
 
     def _should_override_provided_id(self, index: int, composite_values: dict[str, list]) -> bool:
         """Use the natural composite only for identified Features."""
         return self._override_provided_ids and bool(composite_values["peptidoform"][index])
 
     def _fallback_collision_error(self, exc: ValueError) -> ValueError:
-        """Add remediation when a fallback-derived identity is not unique."""
+        """Add remediation only when the duplicate primary key is a fallback-derived id.
+
+        A duplicate among *identified* Features must keep the original error — the
+        fallback remediation would wrongly imply the composite fallback is at fault.
+        """
         message = str(exc)
-        if self._unidentified_fallback_count and "primary key" in message.lower() and "duplicate" in message.lower():
+        if "primary key" in message.lower() and "duplicate" in message.lower() and self._fallback_derived_duplicate():
             return ValueError(
                 f"{message}. Unidentified Feature composite fallback was used for "
                 f"{self._unidentified_fallback_count} row(s); provide producer-supplied feature_id values "
                 "or use a converter with a reliable identity source"
             )
         return exc
+
+    def _fallback_derived_duplicate(self) -> bool:
+        """Whether any fallback-derived id was itself derived for more than one row."""
+        return any(self._all_id_counts[fallback_id] > 1 for fallback_id in self._fallback_ids)
 
     def _identity_values(
         self,
@@ -48,6 +63,10 @@ class FeatureWriter(BaseWriter):
             not peptidoform and existing[index] is None for index, peptidoform in enumerate(peptidoforms)
         )
         ids = super()._identity_values(existing, composite_values, composite, cv_lists, id_field)
+        self._all_id_counts.update(i for i in ids if i is not None)
+        for index, peptidoform in enumerate(peptidoforms):
+            if not peptidoform and existing[index] is None:
+                self._fallback_ids.add(ids[index])
         if not self._override_provided_ids:
             return ids
 

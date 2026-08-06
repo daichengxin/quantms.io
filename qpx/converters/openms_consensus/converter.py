@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from qpx._version import __version__
 from qpx.converters.openms_consensus.feature_adapter import (
@@ -228,7 +229,7 @@ def _validate_structures(structures: tuple[str, ...], sdrf_path: Optional[str]) 
 
 def _collect_score_names(table_path: Path) -> set[str]:
     """Read ``additional_scores`` score names from a written parquet file."""
-    table = pa.parquet.read_table(str(table_path), columns=["additional_scores"])
+    table = pq.read_table(str(table_path), columns=["additional_scores"])
     names: set[str] = set()
     for row in table.column("additional_scores").to_pylist():
         if row:
@@ -239,13 +240,19 @@ def _collect_score_names(table_path: Path) -> set[str]:
 
 
 def _consensus_is_isobaric(consensusxml_path: str) -> bool:
-    """Return whether a consensusXML's map labels indicate an isobaric (TMT/iTRAQ) run."""
-    try:
-        cm = load_consensus_map(consensusxml_path)
-        from qpx.converters.openms_consensus.feature_adapter import consensus_channels
+    """Return whether a consensusXML's map labels indicate an isobaric (TMT/iTRAQ) run.
 
-        return bool(consensus_channels(cm))
-    except Exception:  # noqa: BLE001 - best-effort provenance hint
+    Reads only the small column-map header via the streaming reader, so it never
+    loads the whole ConsensusMap into memory — the full pyopenms load would defeat
+    the streaming path and can exhaust RAM on multi-GB files.
+    """
+    from qpx.converters.openms_consensus.feature_adapter import consensus_channels
+    from qpx.converters.openms_consensus.streaming import StreamingConsensusMap
+
+    try:
+        return bool(consensus_channels(StreamingConsensusMap(consensusxml_path)))
+    except Exception as exc:  # noqa: BLE001 - best-effort provenance hint
+        _log.warning("could not determine isobaric labeling from %s: %s", consensusxml_path, exc)
         return False
 
 
@@ -426,7 +433,7 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
                 "tool_uri": None,
                 "parameters": None,
                 "config": None,
-                "output_views": [SAMPLE, RUN, ONTOLOGY],
+                "output_views": [v for v in (SAMPLE, RUN) if v in structures] + [ONTOLOGY],
             },
         ]
 
