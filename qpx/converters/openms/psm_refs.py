@@ -43,7 +43,7 @@ def _scan_of(spectrum_reference: Optional[str]) -> Optional[int]:
 
 
 @dataclass
-class PsmRef:
+class PsmRef:  # pylint: disable=too-many-instance-attributes
     """One consensusXML PeptideHit's reference fields (not its chemistry)."""
 
     run_file_name: Optional[str]
@@ -124,7 +124,7 @@ def psm_references_from_consensusxml(
     proteins: dict[str, str] = {}
     id_tags = {"PeptideIdentification", "UnassignedPeptideIdentification"}
     try:
-        for event, element in iterparse(consensusxml_path, events=("end",)):
+        for _event, element in iterparse(consensusxml_path, events=("end",)):
             tag = _local(element.tag)
             if tag == "ProteinHit":
                 pid = element.attrib.get("id")

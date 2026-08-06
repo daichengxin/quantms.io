@@ -211,92 +211,104 @@ def _scan_int(value) -> object:
     return value[0] if isinstance(value, list) and value else value
 
 
-def _repair_psm_run_files(table: pa.Table, refs: "list", composite: tuple[str, ...] | None) -> tuple[pa.Table, int, int]:
-    """Correct each PSM's ``run_file_name`` from the consensusXML, then dedup.
+def _psm_identity(row: dict, keys: list[str]) -> tuple:
+    return tuple(tuple(row[k]) if isinstance(row[k], list) else row[k] for k in keys)
 
-    OpenMS ``-out_qpx`` stamps every PSM with the first run's file (map_index
-    dropped; OpenMS#9872). The consensusXML carries the correct run per PSM, so
-    we match each parquet row to its consensusXML ref on the exact key
-    ``(plain_sequence, charge, scan)`` — a 1:1 pairing in practice — and overwrite
-    ``run_file_name``. Rows sharing that key across two runs (same peptide+scan in
-    two files) are disambiguated locally by ``observed_mz`` order. Once run files
-    are correct, the assigned+unassigned duplicates (OpenMS#9871) are collapsed on
-    the identity composite (prefer the feature-attached row). Returns
-    ``(table, relabeled_rows, dropped_dupes)``.
-    """
-    if not refs:
-        merged, dropped = _merge_multiengine_psms(table, composite)
-        return merged, 0, dropped
 
+def _psm_pep(row: dict) -> float:
+    value = row.get("posterior_error_probability")
+    return value if value is not None else float("inf")
+
+
+def _fold_additional_scores(group_best_first: list[dict]) -> "list | None":
+    """Union each row's ``additional_scores`` (best row first), deduped by name+value."""
+    seen: set = set()
+    combined: list = []
+    for row in group_best_first:
+        for score in row.get("additional_scores") or []:
+            marker = (score.get("score_name"), score.get("score_value"))
+            if marker not in seen:
+                seen.add(marker)
+                combined.append(score)
+    return combined or None
+
+
+def _collapse_duplicate_psms(rows: list[dict], keys: list[str], rank) -> tuple[list[dict], int]:
+    """Group ``rows`` by identity ``keys``; per group keep the lowest-``rank`` row
+    and fold the rest's ``additional_scores`` into it. Returns ``(kept, dropped)``."""
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for row in rows:
+        ident = _psm_identity(row, keys)
+        if ident not in groups:
+            groups[ident] = []
+            order.append(ident)
+        groups[ident].append(row)
+
+    kept: list[dict] = []
+    dropped = 0
+    for ident in order:
+        group = groups[ident]
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        ordered = sorted(group, key=rank)  # best first
+        best = dict(ordered[0])
+        best["additional_scores"] = _fold_additional_scores(ordered)
+        kept.append(best)
+        dropped += len(group) - 1
+    return kept, dropped
+
+
+def _relabel_psm_runs(rows: list[dict], refs: "list") -> int:
+    """Overwrite each row's ``run_file_name`` from its consensusXML ref (matched on
+    the exact ``(plain_sequence, charge, scan)`` key) and stamp ``_assigned``. Rows
+    sharing that key across two runs are paired to refs by ``observed_mz`` order.
+    Returns the number of rows whose run file changed."""
     ref_groups: dict[tuple, list] = {}
     for ref in refs:
         ref_groups.setdefault((_plain_sequence(ref.sequence), ref.charge, ref.scan), []).append(ref)
-
-    rows = table.to_pylist()
     row_groups: dict[tuple, list[int]] = {}
     for index, row in enumerate(rows):
         key = (_plain_sequence(row.get("sequence")), row.get("charge"), _scan_int(row.get("scan")))
         row_groups.setdefault(key, []).append(index)
 
     relabeled = 0
-    assigned_flag = [False] * len(rows)
     for key, indices in row_groups.items():
         group = ref_groups.get(key)
         if not group:
             continue
-        # Pair parquet rows to consensusXML refs by observed_mz order so that a
-        # scan number shared across two runs gets each row its correct file.
         paired_rows = sorted(indices, key=lambda i: rows[i].get("observed_mz") or 0.0)
         paired_refs = sorted(group, key=lambda r: r.observed_mz or 0.0)
         for index, ref in zip(paired_rows, paired_refs):
-            assigned_flag[index] = ref.assigned
+            rows[index]["_assigned"] = ref.assigned
             if ref.run_file_name and rows[index].get("run_file_name") != ref.run_file_name:
                 rows[index]["run_file_name"] = ref.run_file_name
                 relabeled += 1
+    return relabeled
 
-    # Dedup on the identity composite; prefer the feature-attached (assigned) row,
-    # then lowest PEP, folding the discarded rows' additional_scores in.
+
+def _repair_psm_run_files(table: pa.Table, refs: "list", composite: tuple[str, ...] | None) -> tuple[pa.Table, int, int]:
+    """Correct each PSM's ``run_file_name`` from the consensusXML, then dedup.
+
+    OpenMS ``-out_qpx`` stamps every PSM with the first run's file (map_index
+    dropped; OpenMS#9872). We restore the correct run per PSM from the consensusXML
+    refs, then collapse the assigned+unassigned duplicates (OpenMS#9871) on the
+    identity composite, preferring the feature-attached row (then lowest PEP). With
+    no refs, falls back to the multi-engine merge. Returns
+    ``(table, relabeled_rows, dropped_dupes)``.
+    """
+    if not refs:
+        merged, dropped = _merge_multiengine_psms(table, composite)
+        return merged, 0, dropped
+
+    rows = table.to_pylist()
+    relabeled = _relabel_psm_runs(rows, refs)
     keys = [k for k in (composite or _OPENMS_IDENTITY_COMPOSITES[PSM]) if k in table.column_names]
-
-    def identity(index: int) -> tuple:
-        return tuple(tuple(rows[index][k]) if isinstance(rows[index][k], list) else rows[index][k] for k in keys)
-
-    def pep(index: int) -> float:
-        value = rows[index].get("posterior_error_probability")
-        return value if value is not None else float("inf")
-
-    dedup_groups: dict[tuple, list[int]] = {}
-    order: list[tuple] = []
-    for index in range(len(rows)):
-        ident = identity(index)
-        if ident not in dedup_groups:
-            dedup_groups[ident] = []
-            order.append(ident)
-        dedup_groups[ident].append(index)
-
-    merged: list = []
-    dropped = 0
-    for ident in order:
-        members = dedup_groups[ident]
-        if len(members) == 1:
-            merged.append(rows[members[0]])
-            continue
-        best = min(members, key=lambda i: (not assigned_flag[i], pep(i)))
-        seen: set = set()
-        combined: list = []
-        for index in sorted(members, key=lambda i: (i != best, pep(i))):
-            for score in rows[index].get("additional_scores") or []:
-                marker = (score.get("score_name"), score.get("score_value"))
-                if marker not in seen:
-                    seen.add(marker)
-                    combined.append(score)
-        row = dict(rows[best])
-        row["additional_scores"] = combined or None
-        merged.append(row)
-        dropped += len(members) - 1
-
-    repaired = pa.Table.from_pylist(merged, schema=table.schema)
-    return repaired, relabeled, dropped
+    kept, dropped = _collapse_duplicate_psms(rows, keys, lambda r: (not r.get("_assigned", False), _psm_pep(r)))
+    for row in kept:
+        row.pop("_assigned", None)
+    return pa.Table.from_pylist(kept, schema=table.schema), relabeled, dropped
 
 
 def _merge_multiengine_psms(table: pa.Table, composite: tuple[str, ...] | None) -> tuple[pa.Table, int]:
@@ -309,54 +321,13 @@ def _merge_multiengine_psms(table: pa.Table, composite: tuple[str, ...] | None) 
     (best confidence) and fold the other rows' ``additional_scores`` into it so no
     engine's score is lost. Returns the deduped table and the number of rows dropped.
     """
-    keys = composite or _OPENMS_IDENTITY_COMPOSITES[PSM]
-    keys = [k for k in keys if k in table.column_names]
+    keys = [k for k in (composite or _OPENMS_IDENTITY_COMPOSITES[PSM]) if k in table.column_names]
     if not keys or table.num_rows == 0:
         return table, 0
-
-    rows = table.to_pylist()
-
-    def _identity(row: dict) -> tuple:
-        return tuple(tuple(row[k]) if isinstance(row[k], list) else row[k] for k in keys)
-
-    def _pep(row: dict) -> float:
-        value = row.get("posterior_error_probability")
-        return value if value is not None else float("inf")
-
-    groups: dict[tuple, list[dict]] = {}
-    order: list[tuple] = []
-    for row in rows:
-        identity = _identity(row)
-        if identity not in groups:
-            groups[identity] = []
-            order.append(identity)
-        groups[identity].append(row)
-
-    dropped = 0
-    merged: list[dict] = []
-    for identity in order:
-        group = groups[identity]
-        if len(group) == 1:
-            merged.append(group[0])
-            continue
-        best = min(group, key=_pep)
-        seen: set[tuple] = set()
-        combined: list = []
-        # Best row's own scores first, then the discarded engines' scores.
-        for row in sorted(group, key=lambda r: (r is not best, _pep(r))):
-            for score in row.get("additional_scores") or []:
-                marker = (score.get("score_name"), score.get("score_value"))
-                if marker not in seen:
-                    seen.add(marker)
-                    combined.append(score)
-        best = dict(best)
-        best["additional_scores"] = combined or None
-        merged.append(best)
-        dropped += len(group) - 1
-
+    kept, dropped = _collapse_duplicate_psms(table.to_pylist(), keys, _psm_pep)
     if dropped == 0:
         return table, 0
-    return pa.Table.from_pylist(merged, schema=table.schema), dropped
+    return pa.Table.from_pylist(kept, schema=table.schema), dropped
 
 
 def _rewrite_core_file(
