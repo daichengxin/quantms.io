@@ -365,6 +365,14 @@ class OpenMSConverter(BaseOrchestrator):
         4. Collect score names for ontology
         5. Write ontology.parquet, provenance.parquet, dataset.parquet
         """
+        logger.warning(
+            "`qpxc convert openms` (over the OpenMS -out_qpx parquet folder) is DEPRECATED. "
+            "OpenMS -out_qpx mis-assigns every PSM's run_file_name to the first run (OpenMS#9872) "
+            "and emits duplicate PSMs (OpenMS#9871). Use `qpxc convert openms-consensus` "
+            "(reads the consensusXML directly, resolving the run per PSM) instead. This path will "
+            "be reconsidered once OpenMS ships an -out_qpx that carries the correct per-PSM run."
+        )
+
         output_folder = Path(output_folder)
         output_folder.mkdir(parents=True, exist_ok=True)
 
