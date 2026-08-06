@@ -9,7 +9,6 @@ the current QPX schema, enriches them, and generates the missing metadata tables
 from __future__ import annotations
 
 import logging
-import re
 import tempfile
 from functools import partial
 from pathlib import Path
@@ -28,7 +27,6 @@ from qpx.converters.channel_labels import (
     relabel_intensities_table,
     resolve_channel_labels,
 )
-from qpx.converters.openms.psm_refs import psm_references_from_consensusxml
 from qpx.converters.orchestrator import BaseOrchestrator
 from qpx.converters.sdrf import SdrfConverter
 from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
@@ -202,134 +200,6 @@ def _add_legacy_grouped_runs(table: pa.Table) -> pa.Table:
     return table.append_column("grouped_runs", pa.array(values, type=pa.list_(pa.string())))
 
 
-def _plain_sequence(seq: str | None) -> str:
-    """OpenMS-annotated peptide → bare residue backbone (mods/termini stripped)."""
-    return re.sub(r"\([^)]*\)", "", seq or "").replace(".", "")
-
-
-def _scan_int(value) -> object:
-    return value[0] if isinstance(value, list) and value else value
-
-
-def _psm_identity(row: dict, keys: list[str]) -> tuple:
-    return tuple(tuple(row[k]) if isinstance(row[k], list) else row[k] for k in keys)
-
-
-def _psm_pep(row: dict) -> float:
-    value = row.get("posterior_error_probability")
-    return value if value is not None else float("inf")
-
-
-def _fold_additional_scores(group_best_first: list[dict]) -> "list | None":
-    """Union each row's ``additional_scores`` (best row first), deduped by name+value."""
-    seen: set = set()
-    combined: list = []
-    for row in group_best_first:
-        for score in row.get("additional_scores") or []:
-            marker = (score.get("score_name"), score.get("score_value"))
-            if marker not in seen:
-                seen.add(marker)
-                combined.append(score)
-    return combined or None
-
-
-def _collapse_duplicate_psms(rows: list[dict], keys: list[str], rank) -> tuple[list[dict], int]:
-    """Group ``rows`` by identity ``keys``; per group keep the lowest-``rank`` row
-    and fold the rest's ``additional_scores`` into it. Returns ``(kept, dropped)``."""
-    groups: dict[tuple, list[dict]] = {}
-    order: list[tuple] = []
-    for row in rows:
-        ident = _psm_identity(row, keys)
-        if ident not in groups:
-            groups[ident] = []
-            order.append(ident)
-        groups[ident].append(row)
-
-    kept: list[dict] = []
-    dropped = 0
-    for ident in order:
-        group = groups[ident]
-        if len(group) == 1:
-            kept.append(group[0])
-            continue
-        ordered = sorted(group, key=rank)  # best first
-        best = dict(ordered[0])
-        best["additional_scores"] = _fold_additional_scores(ordered)
-        kept.append(best)
-        dropped += len(group) - 1
-    return kept, dropped
-
-
-def _relabel_psm_runs(rows: list[dict], refs: "list") -> int:
-    """Overwrite each row's ``run_file_name`` from its consensusXML ref (matched on
-    the exact ``(plain_sequence, charge, scan)`` key) and stamp ``_assigned``. Rows
-    sharing that key across two runs are paired to refs by ``observed_mz`` order.
-    Returns the number of rows whose run file changed."""
-    ref_groups: dict[tuple, list] = {}
-    for ref in refs:
-        ref_groups.setdefault((_plain_sequence(ref.sequence), ref.charge, ref.scan), []).append(ref)
-    row_groups: dict[tuple, list[int]] = {}
-    for index, row in enumerate(rows):
-        key = (_plain_sequence(row.get("sequence")), row.get("charge"), _scan_int(row.get("scan")))
-        row_groups.setdefault(key, []).append(index)
-
-    relabeled = 0
-    for key, indices in row_groups.items():
-        group = ref_groups.get(key)
-        if not group:
-            continue
-        paired_rows = sorted(indices, key=lambda i: rows[i].get("observed_mz") or 0.0)
-        paired_refs = sorted(group, key=lambda r: r.observed_mz or 0.0)
-        for index, ref in zip(paired_rows, paired_refs):
-            rows[index]["_assigned"] = ref.assigned
-            if ref.run_file_name and rows[index].get("run_file_name") != ref.run_file_name:
-                rows[index]["run_file_name"] = ref.run_file_name
-                relabeled += 1
-    return relabeled
-
-
-def _repair_psm_run_files(table: pa.Table, refs: "list", composite: tuple[str, ...] | None) -> tuple[pa.Table, int, int]:
-    """Correct each PSM's ``run_file_name`` from the consensusXML, then dedup.
-
-    OpenMS ``-out_qpx`` stamps every PSM with the first run's file (map_index
-    dropped; OpenMS#9872). We restore the correct run per PSM from the consensusXML
-    refs, then collapse the assigned+unassigned duplicates (OpenMS#9871) on the
-    identity composite, preferring the feature-attached row (then lowest PEP). With
-    no refs, falls back to the multi-engine merge. Returns
-    ``(table, relabeled_rows, dropped_dupes)``.
-    """
-    if not refs:
-        merged, dropped = _merge_multiengine_psms(table, composite)
-        return merged, 0, dropped
-
-    rows = table.to_pylist()
-    relabeled = _relabel_psm_runs(rows, refs)
-    keys = [k for k in (composite or _OPENMS_IDENTITY_COMPOSITES[PSM]) if k in table.column_names]
-    kept, dropped = _collapse_duplicate_psms(rows, keys, lambda r: (not r.get("_assigned", False), _psm_pep(r)))
-    for row in kept:
-        row.pop("_assigned", None)
-    return pa.Table.from_pylist(kept, schema=table.schema), relabeled, dropped
-
-
-def _merge_multiengine_psms(table: pa.Table, composite: tuple[str, ...] | None) -> tuple[pa.Table, int]:
-    """Collapse PSM rows that collide on the identity composite into one row.
-
-    OpenMS ``-out_qpx`` emits one PSM row per search engine (e.g. Comet + MS-GF+):
-    the same spectrum matched to the same peptidoform yields rows that are
-    identical in every identity field and differ only in the per-engine score
-    (see OpenMS#9871). Keep the row with the lowest ``posterior_error_probability``
-    (best confidence) and fold the other rows' ``additional_scores`` into it so no
-    engine's score is lost. Returns the deduped table and the number of rows dropped.
-    """
-    keys = [k for k in (composite or _OPENMS_IDENTITY_COMPOSITES[PSM]) if k in table.column_names]
-    if not keys or table.num_rows == 0:
-        return table, 0
-    kept, dropped = _collapse_duplicate_psms(table.to_pylist(), keys, _psm_pep)
-    if dropped == 0:
-        return table, 0
-    return pa.Table.from_pylist(kept, schema=table.schema), dropped
-
-
 def _rewrite_core_file(
     view: str,
     src_path: Path,
@@ -338,7 +208,6 @@ def _rewrite_core_file(
     is_lfq: bool | None,
     compression: str,
     fraction_group_lookup: dict[str, str],
-    psm_refs: "list | None" = None,
 ) -> tuple[Path, int, int]:
     """Upgrade one OpenMS core file while streaming by Parquet row group."""
     parquet = pq.ParquetFile(src_path)
@@ -362,27 +231,6 @@ def _rewrite_core_file(
     fraction_group_resolver = partial(_fraction_group_for, lookup=fraction_group_lookup)
     try:
         with writer_class(temp_path, **writer_kwargs) as writer:
-            if view == PSM:
-                # Read the whole PSM table (duplicates may span row groups). When the
-                # consensusXML is available, correct each PSM's run_file_name from it
-                # (OpenMS -out_qpx mis-assigns the run, OpenMS#9872) and dedup the
-                # assigned+unassigned twins; otherwise fall back to the multi-engine
-                # merge. Either way psm_id is derived from a now-correct identity.
-                table = parquet.read()
-                table, relabeled, dropped = _repair_psm_run_files(table, psm_refs or [], identity_composite)
-                if relabeled:
-                    logger.info("Corrected run_file_name on %d PSM row(s) from the consensusXML", relabeled)
-                if dropped:
-                    logger.warning(
-                        "Merged %d duplicate PSM row(s) on the identity composite "
-                        "(assigned+unassigned / multi-engine); kept the best row, folded "
-                        "other scores into additional_scores.",
-                        dropped,
-                    )
-                rows += table.num_rows
-                writer.write_table(writer.align_table_to_schema(table))
-                parquet.close()
-                return temp_path, rows, annotated
             for group in range(parquet.num_row_groups):
                 table = parquet.read_row_group(group)
                 if view == PG:
@@ -418,7 +266,6 @@ def _copy_core(
     is_lfq: bool | None = None,
     compression: str = "zstd",
     fraction_group_lookup: Optional[dict[str, str]] = None,
-    psm_refs: Optional[list] = None,
 ) -> dict[str, Path]:
     """
     Upgrade and copy core parquet files to the output directory.
@@ -446,7 +293,6 @@ def _copy_core(
                 is_lfq,
                 compression,
                 fraction_group_lookup,
-                psm_refs=psm_refs if view == PSM else None,
             )
             staged[view] = (temp_path, src_path, dst, rows, annotated)
 
@@ -526,6 +372,14 @@ class OpenMSConverter(BaseOrchestrator):
         4. Collect score names for ontology
         5. Write ontology.parquet, provenance.parquet, dataset.parquet
         """
+        logger.warning(
+            "`qpxc convert openms` (over the OpenMS -out_qpx parquet folder) is DEPRECATED. "
+            "OpenMS -out_qpx mis-assigns every PSM's run_file_name to the first run (OpenMS#9872) "
+            "and emits duplicate PSMs (OpenMS#9871). Use `qpxc convert openms-consensus` "
+            "(reads the consensusXML directly, resolving the run per PSM) instead. This path will "
+            "be reconsidered once OpenMS ships an -out_qpx that carries the correct per-PSM run."
+        )
+
         output_folder = Path(output_folder)
         output_folder.mkdir(parents=True, exist_ok=True)
 
@@ -568,12 +422,6 @@ class OpenMSConverter(BaseOrchestrator):
         if fraction_group_lookup:
             logger.info("Resolved fraction_group for %d run(s) from consensusXML", len(fraction_groups))
 
-        # Authoritative PSM reference fields (correct run_file_name per PSM) live
-        # in the consensusXML, not the OpenMS -out_qpx psm.parquet (OpenMS#9872).
-        psm_refs = psm_references_from_consensusxml(self.consensusxml_path, maplist) if self.consensusxml_path and maplist else []
-        if psm_refs:
-            logger.info("Read %d PSM reference record(s) from consensusXML", len(psm_refs))
-
         output_paths = _copy_core(
             discovered,
             output_folder,
@@ -582,7 +430,6 @@ class OpenMSConverter(BaseOrchestrator):
             is_lfq,
             self._compression,
             fraction_group_lookup,
-            psm_refs=psm_refs,
         )
 
         ontology_entries = self._convert_sdrf(output_folder, output_prefix)
