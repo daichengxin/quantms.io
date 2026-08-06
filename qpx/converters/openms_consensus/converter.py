@@ -101,6 +101,78 @@ def _should_stream(path: str) -> bool:
         return False
 
 
+def _cf_feature_psm_records(cf, map_info, anchor_map, resolve_run, seen, *, want_feature, want_psm):
+    """Feature + PSM records for one consensus feature, cross-linked when both views
+    are emitted. Shared by the streaming and in-memory paths so their output matches.
+    """
+    from qpx.converters.openms_consensus.feature_adapter import feature_records_for_cf
+    from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, psm_records_for_pid
+
+    cf_feats = feature_records_for_cf(cf, map_info, anchor_map) if want_feature else []
+    cf_psms: list[dict] = []
+    if want_psm:
+        # Multi-run isobaric PIDs carry a local id_merge_index; the feature's
+        # element runs disambiguate which run they belong to.
+        cf_runs = _cf_element_runs(cf, map_info)
+        for pid in cf.getPeptideIdentifications():
+            cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
+    # Cross-reference the feature<->psm ids only when both views are emitted.
+    if want_feature and want_psm:
+        _link_feature_psm(cf_feats, cf_psms)
+    return cf_feats, cf_psms
+
+
+def _write_view(writer_cls, path, records, *, creator, compression, identity_composite=None):
+    """Write ``records`` to a view parquet via its writer (empty -> header only)."""
+    kwargs = {"creator": creator, "compression": compression}
+    if identity_composite is not None:
+        kwargs["identity_composite"] = identity_composite
+    with writer_cls(str(path), **kwargs) as w:
+        if records:
+            w.write_batch(records)
+    return path
+
+
+def _stream_feature_psm(cm, fw, pw, *, map_info, anchor_map, resolve_run, maps, pep_intensity, map_run, seen, batch):
+    """One ordered element/unassigned pass: write feature/psm in batches and
+    accumulate the pg maps in place (the streaming path's inner loop)."""
+    from qpx.converters.openms_consensus.pg_adapter import (
+        accumulate_cf_intensity,
+        accumulate_cf_maps,
+        accumulate_unassigned_maps,
+    )
+    from qpx.converters.openms_consensus.psm_adapter import psm_records_for_pid
+
+    feat_buf: list[dict] = []
+    psm_buf: list[dict] = []
+    for kind, obj in cm.iter_all():
+        if kind == "element":
+            cf_feats, cf_psms = _cf_feature_psm_records(
+                obj, map_info, anchor_map, resolve_run, seen, want_feature=fw is not None, want_psm=pw is not None
+            )
+            feat_buf.extend(cf_feats)
+            psm_buf.extend(cf_psms)
+            if maps is not None:
+                accumulate_cf_maps(obj, map_run, maps)
+                accumulate_cf_intensity(obj, map_info, pep_intensity)
+        else:  # unassigned peptide identification
+            if pw is not None:
+                # Unassigned PSMs map to no feature -> feature_id stays null.
+                psm_buf.extend(psm_records_for_pid(obj, resolve_run, seen))
+            if maps is not None:
+                accumulate_unassigned_maps(obj, resolve_run, maps)
+        if fw is not None and len(feat_buf) >= batch:
+            fw.write_batch(feat_buf)
+            feat_buf = []
+        if pw is not None and len(psm_buf) >= batch:
+            pw.write_batch(psm_buf)
+            psm_buf = []
+    if fw is not None and feat_buf:
+        fw.write_batch(feat_buf)
+    if pw is not None and psm_buf:
+        pw.write_batch(psm_buf)
+
+
 def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression="zstd") -> dict:
     """Single-pass, low-memory feature/psm/pg from a streamed consensusXML.
 
@@ -112,20 +184,9 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     from collections import defaultdict
     from contextlib import ExitStack
 
-    from qpx.converters.openms_consensus.feature_adapter import (
-        _run_stem,
-        feature_map_info,
-        feature_records_for_cf,
-    )
-    from qpx.converters.openms_consensus.pg_adapter import (
-        _ProteinMaps,
-        accession_to_anchor,
-        accumulate_cf_intensity,
-        accumulate_cf_maps,
-        accumulate_unassigned_maps,
-        build_pg_records,
-    )
-    from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, _run_resolver, psm_records_for_pid
+    from qpx.converters.openms_consensus.feature_adapter import _run_stem, feature_map_info
+    from qpx.converters.openms_consensus.pg_adapter import _ProteinMaps, accession_to_anchor, build_pg_records
+    from qpx.converters.openms_consensus.psm_adapter import _run_resolver
     from qpx.converters.openms_consensus.streaming import StreamingConsensusMap
 
     cm = StreamingConsensusMap(consensusxml_path)
@@ -143,7 +204,6 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     pep_intensity: dict = defaultdict(float) if want_pg else {}
     seen: set = set()
     written: dict[str, Path] = {}
-    batch = 100_000
 
     with ExitStack() as stack:
         fw = pw = None
@@ -165,55 +225,29 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
                     compression=compression,
                 )
             )
-        feat_buf: list[dict] = []
-        psm_buf: list[dict] = []
-        for kind, obj in cm.iter_all():
-            if kind == "element":
-                cf_feats = feature_records_for_cf(obj, map_info, anchor_map) if fw is not None else []
-                cf_psms: list[dict] = []
-                if pw is not None:
-                    # Multi-run isobaric PIDs carry a local id_merge_index; the
-                    # feature's element runs disambiguate which run they belong to.
-                    cf_runs = _cf_element_runs(obj, map_info)
-                    for pid in obj.getPeptideIdentifications():
-                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
-                # Cross-reference the feature<->psm ids only when both views are
-                # emitted; each PSM links to the feature record of its own run.
-                if fw is not None and pw is not None:
-                    _link_feature_psm(cf_feats, cf_psms)
-                feat_buf.extend(cf_feats)
-                psm_buf.extend(cf_psms)
-                if maps is not None:
-                    accumulate_cf_maps(obj, map_run, maps)
-                    accumulate_cf_intensity(obj, map_info, pep_intensity)
-            else:  # unassigned peptide identification
-                if pw is not None:
-                    # Unassigned PSMs map to no feature -> feature_id stays null.
-                    psm_buf.extend(psm_records_for_pid(obj, resolve_run, seen))
-                if maps is not None:
-                    accumulate_unassigned_maps(obj, resolve_run, maps)
-            if fw is not None and len(feat_buf) >= batch:
-                fw.write_batch(feat_buf)
-                feat_buf = []
-            if pw is not None and len(psm_buf) >= batch:
-                pw.write_batch(psm_buf)
-                psm_buf = []
+        _stream_feature_psm(
+            cm,
+            fw,
+            pw,
+            map_info=map_info,
+            anchor_map=anchor_map,
+            resolve_run=resolve_run,
+            maps=maps,
+            pep_intensity=pep_intensity,
+            map_run=map_run,
+            seen=seen,
+            batch=100_000,
+        )
         if fw is not None:
-            if feat_buf:
-                fw.write_batch(feat_buf)
             written["feature"] = out / f"{output_prefix}.feature.parquet"
         if pw is not None:
-            if psm_buf:
-                pw.write_batch(psm_buf)
             written["psm"] = out / f"{output_prefix}.psm.parquet"
 
     if want_pg:
         records = build_pg_records(cm, map_info, maps, pep_intensity, sdrf_path, pg_top)
-        path = out / f"{output_prefix}.pg.parquet"
-        with PgWriter(str(path), creator=creator, compression=compression) as w:
-            if records:
-                w.write_batch(records)
-        written["pg"] = path
+        written["pg"] = _write_view(
+            PgWriter, out / f"{output_prefix}.pg.parquet", records, creator=creator, compression=compression
+        )
     return written
 
 
@@ -251,7 +285,8 @@ def _consensus_is_isobaric(consensusxml_path: str) -> bool:
 
     try:
         return bool(consensus_channels(StreamingConsensusMap(consensusxml_path)))
-    except Exception as exc:  # noqa: BLE001 - best-effort provenance hint
+    except (OSError, ValueError, KeyError, AttributeError, RuntimeError) as exc:
+        # Best-effort provenance hint: any read/parse failure -> assume label-free.
         _log.warning("could not determine isobaric labeling from %s: %s", consensusxml_path, exc)
         return False
 
@@ -442,8 +477,8 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
         consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression="zstd"
     ) -> dict:
         """feature/psm/pg via the in-memory pyopenms map (loaded once, iterated cheaply)."""
-        from qpx.converters.openms_consensus.feature_adapter import feature_map_info, feature_records_for_cf
-        from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, _run_resolver, psm_records_for_pid
+        from qpx.converters.openms_consensus.feature_adapter import feature_map_info
+        from qpx.converters.openms_consensus.psm_adapter import _run_resolver, psm_records_for_pid
 
         cm = load_consensus_map(consensusxml_path)
         if sdrf_path:
@@ -463,42 +498,35 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
             feat_recs: list[dict] = []
             psm_recs: list[dict] = []
             for cf in cm:
-                cf_feats = feature_records_for_cf(cf, map_info, anchor_map) if want_feature else []
-                cf_psms: list[dict] = []
-                if want_psm:
-                    # Multi-run isobaric PIDs carry a local id_merge_index; the
-                    # feature's element runs disambiguate which run they belong to.
-                    cf_runs = _cf_element_runs(cf, map_info)
-                    for pid in cf.getPeptideIdentifications():
-                        cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
-                if want_feature and want_psm:
-                    _link_feature_psm(cf_feats, cf_psms)
+                cf_feats, cf_psms = _cf_feature_psm_records(
+                    cf, map_info, anchor_map, resolve_run, seen, want_feature=want_feature, want_psm=want_psm
+                )
                 feat_recs.extend(cf_feats)
                 psm_recs.extend(cf_psms)
             if want_psm:
                 for pid in cm.getUnassignedPeptideIdentifications():
                     psm_recs.extend(psm_records_for_pid(pid, resolve_run, seen))
             if want_feature:
-                path = out / f"{output_prefix}.feature.parquet"
-                with FeatureWriter(
-                    str(path), creator=creator, identity_composite=_FEATURE_IDENTITY_COMPOSITE, compression=compression
-                ) as w:
-                    if feat_recs:
-                        w.write_batch(feat_recs)
-                written["feature"] = path
+                written["feature"] = _write_view(
+                    FeatureWriter,
+                    out / f"{output_prefix}.feature.parquet",
+                    feat_recs,
+                    creator=creator,
+                    compression=compression,
+                    identity_composite=_FEATURE_IDENTITY_COMPOSITE,
+                )
             if want_psm:
-                path = out / f"{output_prefix}.psm.parquet"
-                with PsmWriter(
-                    str(path), creator=creator, identity_composite=_PSM_IDENTITY_COMPOSITE, compression=compression
-                ) as w:
-                    if psm_recs:
-                        w.write_batch(psm_recs)
-                written["psm"] = path
+                written["psm"] = _write_view(
+                    PsmWriter,
+                    out / f"{output_prefix}.psm.parquet",
+                    psm_recs,
+                    creator=creator,
+                    compression=compression,
+                    identity_composite=_PSM_IDENTITY_COMPOSITE,
+                )
         if "pg" in structures:
             recs = consensus_protein_groups_to_records(sdrf_path=sdrf_path, cm=cm, top=pg_top)
-            path = out / f"{output_prefix}.pg.parquet"
-            with PgWriter(str(path), creator=creator, compression=compression) as w:
-                if recs:
-                    w.write_batch(recs)
-            written["pg"] = path
+            written["pg"] = _write_view(
+                PgWriter, out / f"{output_prefix}.pg.parquet", recs, creator=creator, compression=compression
+            )
         return written

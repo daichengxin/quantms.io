@@ -121,7 +121,8 @@ def _parse_site_scores(raw) -> dict[int, float]:
                 except (TypeError, ValueError):
                     pass
         return out
-    except Exception:
+    except (ValueError, SyntaxError, TypeError):
+        # Malformed literal (ast.literal_eval) or a non-mapping value -> no scores.
         return {}
 
 
