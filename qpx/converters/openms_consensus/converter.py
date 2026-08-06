@@ -15,12 +15,12 @@ from typing import Optional
 
 import pyarrow as pa
 
+from qpx._version import __version__
 from qpx.converters.openms_consensus.feature_adapter import (
     check_channels_vs_sdrf,
     load_consensus_map,
 )
 from qpx.converters.openms_consensus.pg_adapter import accession_to_anchor, consensus_protein_groups_to_records
-from qpx._version import __version__
 from qpx.converters.orchestrator import BaseOrchestrator
 from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
 from qpx.core.data import FeatureSchema, PsmSchema
@@ -242,7 +242,6 @@ def _consensus_is_isobaric(consensusxml_path: str) -> bool:
     """Return whether a consensusXML's map labels indicate an isobaric (TMT/iTRAQ) run."""
     try:
         cm = load_consensus_map(consensusxml_path)
-        headers = cm.getColumnHeaders()
         from qpx.converters.openms_consensus.feature_adapter import consensus_channels
 
         return bool(consensus_channels(cm))
@@ -332,12 +331,16 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
                 # Low-memory path: a single ordered pass over the consensusXML builds
                 # feature/psm/pg together and writes in batches, so the whole map is
                 # never in memory and the file is parsed once (not once per view).
-                written.update(_convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression))
+                written.update(
+                    _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression)
+                )
             else:
                 # In-memory path: pyopenms loads the map once (fast for smaller files);
                 # the adapters iterate it cheaply. Output is identical either way.
                 written.update(
-                    self._convert_in_memory(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression)
+                    self._convert_in_memory(
+                        consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression
+                    )
                 )
 
         sdrf_paths, run_ontology = _write_sdrf_metadata(out, output_prefix, sdrf_path, requested, compression)
@@ -428,7 +431,9 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
         ]
 
     @staticmethod
-    def _convert_in_memory(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression="zstd") -> dict:
+    def _convert_in_memory(
+        consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top, compression="zstd"
+    ) -> dict:
         """feature/psm/pg via the in-memory pyopenms map (loaded once, iterated cheaply)."""
         from qpx.converters.openms_consensus.feature_adapter import feature_map_info, feature_records_for_cf
         from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, _run_resolver, psm_records_for_pid
@@ -468,13 +473,17 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
                     psm_recs.extend(psm_records_for_pid(pid, resolve_run, seen))
             if want_feature:
                 path = out / f"{output_prefix}.feature.parquet"
-                with FeatureWriter(str(path), creator=creator, identity_composite=_FEATURE_IDENTITY_COMPOSITE, compression=compression) as w:
+                with FeatureWriter(
+                    str(path), creator=creator, identity_composite=_FEATURE_IDENTITY_COMPOSITE, compression=compression
+                ) as w:
                     if feat_recs:
                         w.write_batch(feat_recs)
                 written["feature"] = path
             if want_psm:
                 path = out / f"{output_prefix}.psm.parquet"
-                with PsmWriter(str(path), creator=creator, identity_composite=_PSM_IDENTITY_COMPOSITE, compression=compression) as w:
+                with PsmWriter(
+                    str(path), creator=creator, identity_composite=_PSM_IDENTITY_COMPOSITE, compression=compression
+                ) as w:
                     if psm_recs:
                         w.write_batch(psm_recs)
                 written["psm"] = path

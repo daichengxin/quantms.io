@@ -853,7 +853,16 @@ def convert_openms_cmd(**kwargs):
     help="Parquet compression codec.",
 )
 def convert_openms_consensus_cmd(
-    consensusxml_path, sdrf_path, output_folder, output_prefix, structures, pg_top, streaming, verbose, project_accession, compression
+    consensusxml_path,
+    sdrf_path,
+    output_folder,
+    output_prefix,
+    structures,
+    pg_top,
+    streaming,
+    verbose,
+    project_accession,
+    compression,
 ):
     """Convert an OpenMS consensusXML (+ SDRF) to QPX.
 

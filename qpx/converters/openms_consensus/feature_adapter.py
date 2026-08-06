@@ -157,7 +157,13 @@ def to_modifications(aa_sequence, site_scores: dict[int, list[dict]] | None = No
         mod = aa_sequence[i].getModification()
         if not mod:
             continue
-        _add_mod(mod.getId() or "", _acc(mod.getUniModAccession()), i + 1, aa_sequence[i].getOneLetterCode(), site_scores.get(i + 1) if site_scores else None)
+        _add_mod(
+            mod.getId() or "",
+            _acc(mod.getUniModAccession()),
+            i + 1,
+            aa_sequence[i].getOneLetterCode(),
+            site_scores.get(i + 1) if site_scores else None,
+        )
 
     nterm = aa_sequence.getNTerminalModification() if hasattr(aa_sequence, "getNTerminalModification") else None
     if nterm:
