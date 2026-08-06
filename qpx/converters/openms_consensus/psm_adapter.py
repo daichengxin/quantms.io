@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 
-from qpx.converters.openms_consensus.feature_adapter import _run_stem, load_consensus_map, to_proforma
+from qpx.converters.openms_consensus.feature_adapter import _run_stem, feature_map_info, load_consensus_map, to_proforma
 
 _log = logging.getLogger(__name__)
 
@@ -77,13 +77,6 @@ def _run_resolver(cm):
     return resolve
 
 
-def _iter_peptide_ids(cm):
-    """Yield every PeptideIdentification: unassigned + assigned to features."""
-    yield from cm.getUnassignedPeptideIdentifications()
-    for cf in cm:
-        yield from cf.getPeptideIdentifications()
-
-
 def consensus_psms_to_records(consensusxml_path: str | None = None, cm=None) -> list[dict]:
     """Return QPX psm record dicts extracted from a consensusXML.
 
@@ -93,8 +86,13 @@ def consensus_psms_to_records(consensusxml_path: str | None = None, cm=None) -> 
     resolve_run = _run_resolver(cm)
     records: list[dict] = []
     seen: set[tuple] = set()
-    for pid in _iter_peptide_ids(cm):
+    for pid in cm.getUnassignedPeptideIdentifications():
         records.extend(psm_records_for_pid(pid, resolve_run, seen))
+    map_info = feature_map_info(cm)
+    for cf in cm:
+        cf_runs = _cf_element_runs(cf, map_info)
+        for pid in cf.getPeptideIdentifications():
+            records.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
     return records
 
 

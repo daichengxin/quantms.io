@@ -14,6 +14,8 @@ from typing import Union
 import pandas as pd
 from pandas import DataFrame
 
+from qpx.core.files import run_file_stem
+
 logger = logging.getLogger(__name__)
 
 
@@ -142,7 +144,7 @@ class SDRFHandler:
 
     def get_sample_map_run(self):
         sdrf = self.sdrf_table[["source name", "comment[data file]", "comment[label]"]].copy()
-        sdrf["comment[data file]"] = sdrf["comment[data file]"].str.split(".").str[0]
+        sdrf["comment[data file]"] = sdrf["comment[data file]"].map(run_file_stem)
         if self.get_experiment_type_from_sdrf() != "LFQ":
             sdrf.loc[:, "map_sample"] = sdrf["comment[data file]"] + "-" + sdrf["comment[label]"]
         else:

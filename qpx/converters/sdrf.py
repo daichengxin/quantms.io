@@ -14,6 +14,7 @@ import pandas as pd
 
 from qpx.converters.base import BaseConverter
 from qpx.converters.channel_labels import normalize_label
+from qpx.core.files import run_file_stem
 from qpx.writers.run import RunWriter
 from qpx.writers.sample import SampleWriter
 
@@ -143,21 +144,25 @@ class SdrfConverter(BaseConverter):
     def convert(
         self,
         sdrf_path: str,
-        sample_output: str,
-        run_output: str,
+        sample_output: str | None = None,
+        run_output: str | None = None,
         creator: str = "qpx",
     ) -> None:
         """Run the full SDRF conversion.
 
         Args:
             sdrf_path: Path to the SDRF TSV file.
-            sample_output: Output path for ``sample.parquet``.
-            run_output: Output path for ``run.parquet``.
+            sample_output: Optional output path for ``sample.parquet``.
+            run_output: Optional output path for ``run.parquet``.
             creator: Creator tag stored in Parquet metadata.
         """
+        if sample_output is None and run_output is None:
+            raise ValueError("At least one of sample_output or run_output is required")
         sdrf_df = self._read_sdrf(sdrf_path)
-        self._write_samples(sdrf_df, sample_output, creator)
-        self._write_runs(sdrf_df, run_output, creator)
+        if sample_output is not None:
+            self._write_samples(sdrf_df, sample_output, creator)
+        if run_output is not None:
+            self._write_runs(sdrf_df, run_output, creator)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -290,7 +295,7 @@ class SdrfConverter(BaseConverter):
             raise ValueError(f"SDRF is missing required column '{_COL_DATA_FILE}'")
 
         sdrf_df = sdrf_df.copy()
-        sdrf_df["_run_file"] = sdrf_df[_COL_DATA_FILE].astype(str).str.split(".").str[0]
+        sdrf_df["_run_file"] = sdrf_df[_COL_DATA_FILE].map(run_file_stem)
         sdrf_df["_file_name"] = sdrf_df[_COL_DATA_FILE].astype(str).str.strip()
 
         # Group by run file

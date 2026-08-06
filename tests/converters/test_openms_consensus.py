@@ -36,36 +36,43 @@ def test_to_proforma(openms_seq, expected):
 # output stamps TMT/iTRAQ runs "label-free" while the maps carry tmt6plex_* labels,
 # so the channels must be detected from the map labels, not experiment_type.
 _TMT_CONSENSUSXML = """<?xml version="1.0" encoding="ISO-8859-1"?>
-<consensusXML version="1.7" experiment_type="label-free" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/OpenMS/OpenMS/develop/share/OpenMS/SCHEMAS/ConsensusXML_1_7.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-	<IdentificationRun id="PI_0" date="0000-00-00T00:00:00" search_engine="" search_engine_version="">
-		<SearchParameters db="" db_version="" taxonomy="" mass_type="monoisotopic" charges="" enzyme="unknown_enzyme" missed_cleavages="0" precursor_peak_tolerance="0" precursor_peak_tolerance_ppm="false" peak_mass_tolerance="0" peak_mass_tolerance_ppm="false" >
-		</SearchParameters>
-		<ProteinIdentification score_type="" higher_score_better="true" significance_threshold="0">
-			<ProteinHit id="PH_0" accession="P12345" score="0" sequence="">
-			</ProteinHit>
-		</ProteinIdentification>
-	</IdentificationRun>
-	<mapList count="2">
-		<map id="0" name="run_01.mzML" unique_id="1" label="tmt6plex_126" size="1">
-		</map>
-		<map id="1" name="run_01.mzML" unique_id="2" label="tmt6plex_127" size="1">
-		</map>
-	</mapList>
-	<consensusElementList>
-		<consensusElement id="e_0" quality="0.0" charge="2">
-			<centroid rt="100.123456" mz="450.251234" it="0.0"/>
-			<groupedElementList>
-				<element map="0" id="0" rt="100.123456" mz="450.251234" it="1000.0"/>
-				<element map="1" id="1" rt="100.123456" mz="450.251234" it="2000.0"/>
-			</groupedElementList>
-			<PeptideIdentification identification_run_ref="PI_0" score_type="" higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100" spectrum_reference="controllerType=0 controllerNumber=1 scan=42" >
-				<PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
-					<UserParam type="string" name="target_decoy" value="target"/>
-					<UserParam type="float" name="Posterior Error Probability_score" value="1.0e-03"/>
-				</PeptideHit>
-			</PeptideIdentification>
-		</consensusElement>
-	</consensusElementList>
+<consensusXML version="1.7" experiment_type="label-free"
+  xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/OpenMS/OpenMS/develop/share/OpenMS/SCHEMAS/ConsensusXML_1_7.xsd"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <IdentificationRun id="PI_0" date="0000-00-00T00:00:00" search_engine="" search_engine_version="">
+    <SearchParameters db="" db_version="" taxonomy="" mass_type="monoisotopic" charges=""
+      enzyme="unknown_enzyme" missed_cleavages="0" precursor_peak_tolerance="0"
+      precursor_peak_tolerance_ppm="false" peak_mass_tolerance="0"
+      peak_mass_tolerance_ppm="false">
+    </SearchParameters>
+    <ProteinIdentification score_type="" higher_score_better="true" significance_threshold="0">
+      <ProteinHit id="PH_0" accession="P12345" score="0" sequence="">
+      </ProteinHit>
+    </ProteinIdentification>
+  </IdentificationRun>
+  <mapList count="2">
+    <map id="0" name="run_01.mzML" unique_id="1" label="tmt6plex_126" size="1">
+    </map>
+    <map id="1" name="run_01.mzML" unique_id="2" label="tmt6plex_127" size="1">
+    </map>
+  </mapList>
+  <consensusElementList>
+    <consensusElement id="e_0" quality="0.0" charge="2">
+      <centroid rt="100.123456" mz="450.251234" it="0.0"/>
+      <groupedElementList>
+        <element map="0" id="0" rt="100.123456" mz="450.251234" it="1000.0"/>
+        <element map="1" id="1" rt="100.123456" mz="450.251234" it="2000.0"/>
+      </groupedElementList>
+      <PeptideIdentification identification_run_ref="PI_0" score_type=""
+        higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100"
+        spectrum_reference="controllerType=0 controllerNumber=1 scan=42">
+        <PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
+          <UserParam type="string" name="target_decoy" value="target"/>
+          <UserParam type="float" name="Posterior Error Probability_score" value="1.0e-03"/>
+        </PeptideHit>
+      </PeptideIdentification>
+    </consensusElement>
+  </consensusElementList>
 </consensusXML>
 """
 
@@ -75,15 +82,194 @@ def _write_tmt_consensusxml(path):
     path.write_text(_TMT_CONSENSUSXML)
 
 
+def test_converter_rejects_invalid_structure_before_creating_output(tmp_path):
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="Unknown.*bogus"):
+        OpenMSConsensusConverter().convert(
+            str(tmp_path / "missing.consensusXML"),
+            str(out),
+            structures=("bogus",),
+        )
+    assert not out.exists()
+
+
+def test_converter_requires_sdrf_for_requested_metadata(tmp_path):
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="SDRF.*run"):
+        OpenMSConsensusConverter().convert(
+            str(tmp_path / "missing.consensusXML"),
+            str(out),
+            structures=("run",),
+        )
+    assert not out.exists()
+
+
+def test_converter_writes_only_requested_sdrf_structure(tmp_path):
+    sdrf = tmp_path / "test.sdrf.tsv"
+    sdrf.write_text(
+        "source name\tcharacteristics[organism]\tcharacteristics[organism part]\t"
+        "comment[data file]\tcomment[label]\n"
+        "S1\tHomo sapiens\tliver\trun_01.raw\tlabel free sample\n"
+    )
+    out = tmp_path / "out"
+    written = OpenMSConsensusConverter().convert(
+        str(tmp_path / "unused.consensusXML"),
+        str(out),
+        sdrf_path=str(sdrf),
+        structures=("run",),
+    )
+
+    assert set(written) == {"run"}
+    assert written["run"].exists()
+    assert not (out / "openms.sample.parquet").exists()
+
+
+def test_pg_peptide_counts_are_per_protein(monkeypatch):
+    from qpx.converters.openms_consensus import pg_adapter
+
+    class Header:
+        filename = "run_01.mzML"
+        label = ""
+
+    class ConsensusMap:
+        @staticmethod
+        def getColumnHeaders():
+            return {0: Header()}
+
+        @staticmethod
+        def getExperimentType():
+            return "label-free"
+
+        @staticmethod
+        def getProteinIdentifications():
+            return [object()]
+
+    protein_maps = pg_adapter._ProteinMaps()
+    protein_maps.acc_to_pep.update({"P1": {"PEPA", "PEPB"}, "P2": {"PEPB"}})
+    protein_maps.acc_to_runs.update({"P1": {"run_01"}, "P2": {"run_01"}})
+    protein_maps.acc_to_feat.update({"P1": {("PEPA", 2), ("PEPB", 2)}, "P2": {("PEPB", 2)}})
+    protein_maps.pep_to_accs.update({"PEPA": {"P1"}, "PEPB": {"P1", "P2"}})
+    protein_maps.feat_to_accs.update({("PEPA", 2): {"P1"}, ("PEPB", 2): {"P1", "P2"}})
+    monkeypatch.setattr(pg_adapter, "_protein_maps", lambda _cm: protein_maps)
+    monkeypatch.setattr(
+        pg_adapter,
+        "_merge_protein_ids",
+        lambda _cm: ({}, {}, {}, [["P1", "P2"]]),
+    )
+    monkeypatch.setattr(pg_adapter, "_peptide_intensities", lambda _cm, _map_info: {})
+
+    records = pg_adapter.consensus_protein_groups_to_records(cm=ConsensusMap())
+
+    assert records[0]["peptide_counts"]["unique_sequences"] == 2
+    assert records[0]["peptides"] == [
+        {"protein_name": "P1", "peptide_count": 2},
+        {"protein_name": "P2", "peptide_count": 1},
+    ]
+
+
+def test_pg_uses_id_merge_index_after_unmapped_map_index():
+    from qpx.converters.openms_consensus.pg_adapter import _protein_maps
+
+    class Header:
+        def __init__(self, filename):
+            self.filename = filename
+
+    class ConsensusMap:
+        @staticmethod
+        def getColumnHeaders():
+            return {0: Header("run_01.mzML"), 1: Header("run_02.mzML")}
+
+        @staticmethod
+        def getUnassignedPeptideIdentifications():
+            return [PeptideIdentification()]
+
+        def __iter__(self):
+            return iter(())
+
+    class Sequence:
+        @staticmethod
+        def toUnmodifiedString():
+            return "PEPTIDE"
+
+        @staticmethod
+        def toUniModString():
+            return "PEPTIDE"
+
+    class Evidence:
+        @staticmethod
+        def getProteinAccession():
+            return "P1"
+
+    class Hit:
+        @staticmethod
+        def getSequence():
+            return Sequence()
+
+        @staticmethod
+        def getCharge():
+            return 2
+
+        @staticmethod
+        def getPeptideEvidences():
+            return [Evidence()]
+
+    class PeptideIdentification:
+        values = {"map_index": 99, "id_merge_index": 1}
+
+        def metaValueExists(self, key):
+            return key in self.values
+
+        def getMetaValue(self, key):
+            return self.values[key]
+
+        @staticmethod
+        def getHits():
+            return [Hit()]
+
+    protein_maps = _protein_maps(ConsensusMap())
+    assert protein_maps.acc_to_pep == {"P1": {"PEPTIDE"}}
+    assert protein_maps.acc_to_runs == {"P1": {"run_02"}}
+    assert protein_maps.acc_to_feat == {"P1": {("PEPTIDE", 2)}}
+
+
+def test_consensus_psms_use_parent_feature_run_context(tmp_path):
+    """Assigned PSMs inherit the run represented by their parent feature."""
+    from qpx.converters.openms_consensus.psm_adapter import consensus_psms_to_records
+
+    consensusxml = _TMT_CONSENSUSXML.replace(
+        '<map id="0" name="run_01.mzML"',
+        '<map id="0" name="run_A.mzML"',
+    ).replace(
+        '<map id="1" name="run_01.mzML"',
+        '<map id="1" name="run_B.mzML"',
+    )
+    consensusxml = consensusxml.replace(
+        'map="0" id="0" rt="100.123456" mz="450.251234" it="1000.0"', 'map="0" id="0" rt="100.123456" mz="450.251234" it="0.0"'
+    )
+    consensusxml = consensusxml.replace(
+        "        </PeptideHit>\n      </PeptideIdentification>",
+        '        </PeptideHit>\n        <UserParam type="int" name="id_merge_index" value="0"/>\n      </PeptideIdentification>',
+    )
+    path = tmp_path / "multi_run.consensusXML"
+    path.write_text(consensusxml)
+
+    records = consensus_psms_to_records(str(path))
+
+    assert len(records) == 1
+    assert records[0]["run_file_name"] == "run_B"
+
+
 def _write_multi_reference_consensusxml(path):
     """Write one ConsensusFeature supported by two spectrum references."""
     second_pid = """
-			<PeptideIdentification identification_run_ref="PI_0" score_type="" higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100" spectrum_reference="controllerType=0 controllerNumber=1 scan=43" >
-				<PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
-					<UserParam type="string" name="target_decoy" value="target"/>
-				</PeptideHit>
-			</PeptideIdentification>"""
-    path.write_text(_TMT_CONSENSUSXML.replace("\n\t\t</consensusElement>", f"{second_pid}\n\t\t</consensusElement>"))
+      <PeptideIdentification identification_run_ref="PI_0" score_type=""
+        higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100"
+        spectrum_reference="controllerType=0 controllerNumber=1 scan=43">
+        <PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
+          <UserParam type="string" name="target_decoy" value="target"/>
+        </PeptideHit>
+      </PeptideIdentification>"""
+    path.write_text(_TMT_CONSENSUSXML.replace("\n    </consensusElement>", f"{second_pid}\n    </consensusElement>"))
 
 
 def test_streaming_matches_pyopenms(tmp_path):
@@ -132,7 +318,7 @@ def test_channel_sdrf_consistency_check(tmp_path):
     assert any("TMT131" in m and "SDRF comment[label] but not" in m for m in msgs)
 
 
-def test_consensusxml_to_qpx_feature_has_channels_pg_is_identification_only(tmp_path):
+def test_consensusxml_to_qpx_feature_has_channels_and_interim_pg_intensity(tmp_path):
     cx = tmp_path / "test.consensusXML"
     _write_tmt_consensusxml(cx)
     out = tmp_path / "out"
@@ -140,7 +326,8 @@ def test_consensusxml_to_qpx_feature_has_channels_pg_is_identification_only(tmp_
     con = duckdb.connect()
 
     feat = con.execute(
-        f"SELECT peptidoform, charge, run_file_name, intensities FROM read_parquet('{written['feature']}')"
+        "SELECT peptidoform, charge, run_file_name, intensities FROM read_parquet($1)",
+        [str(written["feature"])],
     ).fetchall()
     assert len(feat) == 1
     pep, charge, run, intensities = feat[0]
@@ -149,12 +336,16 @@ def test_consensusxml_to_qpx_feature_has_channels_pg_is_identification_only(tmp_
     labels = {e["label"]: e["intensity"] for e in intensities}
     assert labels == {"TMT126": 1000.0, "TMT127": 2000.0}  # both channels, canonicalized, quant kept
 
-    psm = con.execute(f"SELECT peptidoform, scan FROM read_parquet('{written['psm']}')").fetchall()
+    psm = con.execute(
+        "SELECT peptidoform, scan FROM read_parquet($1)",
+        [str(written["psm"])],
+    ).fetchall()
     assert len(psm) == 1  # one spectrum match, not collapsed/duplicated
     assert psm[0][0] == "PEPTIDEK" and list(psm[0][1]) == [42]
 
     pg = con.execute(
-        f"SELECT anchor_protein, label, intensity, cv_params, peptide_counts, feature_counts FROM read_parquet('{written['pg']}')"
+        "SELECT anchor_protein, label, intensity, cv_params, peptide_counts, feature_counts FROM read_parquet($1)",
+        [str(written["pg"])],
     ).fetchall()
     assert len(pg) == 2  # one row per channel, no duplicate protein-group rows
     assert all(anchor == "P12345" for anchor, *_ in pg)
@@ -169,6 +360,33 @@ def test_consensusxml_to_qpx_feature_has_channels_pg_is_identification_only(tmp_
         # PEPTIDEK is unique to the single-protein group -> unique == total == 1.
         assert pep_counts == {"unique_sequences": 1, "total_sequences": 1}
         assert feat_counts == {"unique_features": 1, "total_features": 1}
+
+
+def test_label_free_consensusxml_uses_lfq_labels(tmp_path):
+    cx = tmp_path / "label_free.consensusXML"
+    xml = _TMT_CONSENSUSXML.replace('label="tmt6plex_126"', 'label="label-free"')
+    xml = xml.replace('label="tmt6plex_127"', 'label="label-free"')
+    cx.write_text(xml)
+    out = tmp_path / "out"
+    written = OpenMSConsensusConverter().convert(
+        str(cx),
+        str(out),
+        output_prefix="lfq",
+        structures=("feature", "pg"),
+    )
+    con = duckdb.connect()
+    feature_labels = con.execute(
+        "SELECT UNNEST(intensities).label FROM read_parquet($1)",
+        [str(written["feature"])],
+    ).fetchall()
+    pg_labels = con.execute(
+        "SELECT label FROM read_parquet($1)",
+        [str(written["pg"])],
+    ).fetchall()
+    con.close()
+
+    assert {label for (label,) in feature_labels} == {"LFQ"}
+    assert {label for (label,) in pg_labels} == {"LFQ"}
 
 
 @pytest.mark.parametrize("streaming", [False, True])

@@ -1,6 +1,6 @@
 # Serialization & Parquet Details
 
-QPX uses two serialization formats, each chosen for its suitability to the data it stores: Apache Parquet for columnar proteomics data and metadata, and AnnData (`.h5ad`) for expression views.
+QPX uses three serialization formats, each chosen for its suitability to the data it stores: Apache Parquet for columnar proteomics data and metadata, AnnData (`.h5ad`) for the standalone expression views, and MuData (`.h5mu`) for the combined multi-modal expression container.
 
 ## Supported Serialization Formats
 
@@ -8,6 +8,7 @@ QPX uses two serialization formats, each chosen for its suitability to the data 
 |--------|-----------|---------|-------------|
 | Apache Parquet | `.parquet` | PSM, Feature, PG, Peptide, Protein, MZ, Dataset, Sample, Run | Columnar storage with compression |
 | AnnData (HDF5) | `.h5ad` | AE, DE | Matrix-form expression data (scverse ecosystem) |
+| MuData (HDF5) | `.h5mu` | Combined expression container | Multi-modal bundle of the `precursors`, `proteins`, `expression`, and `differential` modalities plus a `varp["feature_mapping"]` precursor↔protein adjacency (see [MuData](anndata.md#mudata-h5mu)) |
 
 !!! note
     The choice of format for each view is driven by its access patterns. Data views and metadata use Parquet for column-level filtering and large-scale analytical queries. Expression views use AnnData (`.h5ad`) for native interoperability with the scverse ecosystem (scanpy, scvi-tools, muon). The original SDRF (`.sdrf.tsv`) is preserved alongside the Parquet files for provenance but is not a QPX output format.

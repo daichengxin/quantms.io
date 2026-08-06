@@ -134,7 +134,7 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     map_run = {i: _run_stem(headers[i].filename) for i in headers}
     want_feature, want_psm, want_pg = ("feature" in structures, "psm" in structures, "pg" in structures)
     anchor_map = accession_to_anchor(cm) if want_feature else None
-    resolve_run = _run_resolver(cm) if want_psm else None
+    resolve_run = _run_resolver(cm) if want_psm or want_pg else None
     maps = _ProteinMaps() if want_pg else None
     pep_intensity: dict = defaultdict(float) if want_pg else {}
     seen: set = set()
@@ -185,7 +185,7 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
                     # Unassigned PSMs map to no feature -> feature_id stays null.
                     psm_buf.extend(psm_records_for_pid(obj, resolve_run, seen))
                 if maps is not None:
-                    accumulate_unassigned_maps(obj, map_run, maps)
+                    accumulate_unassigned_maps(obj, resolve_run, maps)
             if fw is not None and len(feat_buf) >= batch:
                 fw.write_batch(feat_buf)
                 feat_buf = []
@@ -216,8 +216,35 @@ def _validate_structures(structures: tuple[str, ...], sdrf_path: Optional[str]) 
     unknown = [s for s in structures if s not in _STRUCTURE_ALL]
     if unknown:
         raise ValueError(f"Unknown structure(s) {unknown}; valid values are {list(_STRUCTURE_ALL)}")
-    if ("run" in structures or "sample" in structures) and not sdrf_path:
-        raise ValueError("The 'run'/'sample' structures require an SDRF (pass sdrf_path)")
+    metadata = set(structures).intersection({"run", "sample"})
+    if metadata and not sdrf_path:
+        raise ValueError(f"An SDRF is required to write {sorted(metadata)}")
+
+
+def _write_sdrf_metadata(
+    output_folder: Path,
+    output_prefix: str,
+    sdrf_path: str,
+    requested: set[str],
+) -> dict[str, Path]:
+    """Write the requested SDRF-backed run/sample structures."""
+    metadata = requested.intersection({"run", "sample"})
+    if not metadata:
+        return {}
+
+    from qpx.converters.sdrf import SdrfConverter
+
+    paths = {
+        "sample": output_folder / f"{output_prefix}.sample.parquet",
+        "run": output_folder / f"{output_prefix}.run.parquet",
+    }
+    with SdrfConverter() as sdrf_converter:
+        sdrf_converter.convert(
+            sdrf_path=sdrf_path,
+            sample_output=str(paths["sample"]) if "sample" in metadata else None,
+            run_output=str(paths["run"]) if "run" in metadata else None,
+        )
+    return {name: paths[name] for name in metadata}
 
 
 class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
@@ -250,6 +277,7 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
         faster in-memory pyopenms load. ``True``/``False`` forces the choice.
         """
         _validate_structures(structures, sdrf_path)
+        requested = set(structures)
 
         out = Path(output_folder)
         out.mkdir(parents=True, exist_ok=True)
@@ -269,20 +297,7 @@ class OpenMSConsensusConverter:  # pylint: disable=too-few-public-methods
                     self._convert_in_memory(consensusxml_path, out, output_prefix, structures, sdrf_path, creator, pg_top)
                 )
 
-        if "run" in structures or "sample" in structures:
-            from qpx.converters.sdrf import SdrfConverter
-
-            with SdrfConverter() as sdrf_conv:
-                sdrf_conv.convert(
-                    sdrf_path=sdrf_path,
-                    sample_output=str(out / f"{output_prefix}.sample.parquet"),
-                    run_output=str(out / f"{output_prefix}.run.parquet"),
-                )
-            # Record only the structures the caller actually requested.
-            if "run" in structures:
-                written["run"] = out / f"{output_prefix}.run.parquet"
-            if "sample" in structures:
-                written["sample"] = out / f"{output_prefix}.sample.parquet"
+        written.update(_write_sdrf_metadata(out, output_prefix, sdrf_path, requested))
 
         return written
 

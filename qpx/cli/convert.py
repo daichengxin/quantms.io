@@ -826,12 +826,19 @@ def convert_openms_cmd(**kwargs):
     default=0,
     show_default=True,
     type=int,
-    help="Peptides used for the interim pg intensity (unnormalized unique-peptide sum): 0 = all; 3 mirrors the quantms ProteomicsLFQ/IsobaricWorkflow default.",
+    help=(
+        "Peptides used for the interim pg intensity (unnormalized unique-peptide sum): "
+        "0 = all; 3 mirrors the quantms ProteomicsLFQ/IsobaricWorkflow default."
+    ),
 )
 @click.option(
     "--streaming/--no-streaming",
     default=None,
-    help="Force the low-memory streaming reader on/off. Default: auto (streaming for consensusXML files > 4 GB, which pyopenms would otherwise load whole into ~0.8x-file RAM).",
+    help=(
+        "Force the low-memory streaming reader on/off. Default: auto (streaming for "
+        "consensusXML files > 4 GB, which pyopenms would otherwise load whole into "
+        "~0.8x-file RAM)."
+    ),
 )
 @click.option("--verbose", is_flag=True, help="Enable verbose logging.")
 def convert_openms_consensus_cmd(

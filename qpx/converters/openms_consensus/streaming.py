@@ -359,7 +359,7 @@ class StreamingConsensusMap:
     def getUnassignedPeptideIdentifications(self) -> list[_PeptideIdentification]:
         # Streamed fresh; unassigned IDs are few relative to the element list.
         out: list[_PeptideIdentification] = []
-        for event, el in iterparse(self._path, events=("end",)):
+        for _, el in iterparse(self._path, events=("end",)):
             tag = _localname(el.tag)
             if tag == "UnassignedPeptideIdentification":
                 out.append(_parse_peptide_id(el, self._ph_to_acc))

@@ -130,17 +130,49 @@ class BaseOrchestrator:
         failures are logged and skipped rather than failing the run.
         """
         h5mu_path = output_folder / f"{prefix}.h5mu"
+        h5mu_tmp = h5mu_path.with_name(f"{h5mu_path.stem}.tmp{h5mu_path.suffix}")
         try:
+            # Core parquet files have already been refreshed, so an older MuData
+            # view would be stale if this build fails.
+            h5mu_path.unlink(missing_ok=True)
+
             from qpx.dataset import Dataset
             from qpx.mudata import build_mudata
 
             dataset = Dataset(str(output_folder), file_prefix=prefix)
             try:
-                build_mudata(dataset, all_intensity_labels=True).write(str(h5mu_path))
+                required_modalities = {
+                    name
+                    for name, structure in (
+                        ("precursors", dataset.feature),
+                        ("proteins", dataset.pg),
+                    )
+                    if structure is not None
+                }
+                if not required_modalities:
+                    logger.info("Skipping muData for %s: no feature or pg quantification data", prefix)
+                    return None
+
+                modalities = required_modalities | {"expression", "differential"}
+                mdata = build_mudata(
+                    dataset,
+                    modalities=sorted(modalities),
+                    all_intensity_labels=True,
+                )
+                missing = required_modalities - set(mdata.mod)
+                if missing:
+                    raise ValueError(f"Missing required quantification modalities: {', '.join(sorted(missing))}")
+                mdata.write(str(h5mu_tmp))
+                h5mu_tmp.replace(h5mu_path)
             finally:
                 dataset.close()
         except (ImportError, OSError, RuntimeError, TypeError, ValueError, duckdb.Error) as exc:
             logger.warning("Could not build muData for %s: %s", prefix, exc)
             return None
+        finally:
+            try:
+                h5mu_tmp.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove temporary muData file %s: %s", h5mu_tmp, exc)
         logger.info("Wrote muData to %s", h5mu_path)
         return h5mu_path
