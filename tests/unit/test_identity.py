@@ -1,5 +1,7 @@
 """Tests for the derived mandatory identity ids (feature_id / psm_id / pg_id)."""
 
+import logging
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -148,13 +150,54 @@ def test_unidentified_feature_namespaces_provided_id(tmp_path):
         assert {"cv_name": "provided_feature_id", "cv_value": "123456789"} in params
 
 
-def test_unidentified_feature_requires_provided_id(tmp_path):
-    """QPX must not invent a natural identity for an unidentified Feature."""
-    path = tmp_path / "missing-unidentified-id.feature.parquet"
+def test_unidentified_feature_uses_unique_composite_fallback(tmp_path, caplog):
+    """An unidentified Feature (null peptidoform) with no producer id derives a
+    feature_id only when the resulting full-file primary key is unique."""
+    path = tmp_path / "unidentified.feature.parquet"
     rec = make_feature_record(sequence="", peptidoform="")
-    with pytest.raises(ValueError, match="requires a producer-supplied feature_id"):
+    with caplog.at_level(logging.WARNING, logger="qpx.writers.feature"):
         with FeatureWriter(path) as writer:
             writer.write_batch([rec])
+    ids = pq.read_table(path).column("feature_id").to_pylist()
+    assert ids and ids[0] is not None
+    assert "1 unidentified Feature row(s)" in caplog.text
+    assert "full-file primary-key uniqueness was verified" in caplog.text
+
+
+@pytest.mark.parametrize("write_path", ["batch", "table"])
+def test_unidentified_feature_rejects_non_unique_composite_fallback(tmp_path, write_path):
+    """Distinct unidentified Features cannot share a fallback-derived primary key."""
+    path = tmp_path / "duplicate-unidentified.feature.parquet"
+    first = make_feature_record(sequence="", peptidoform="")
+    second = make_feature_record(
+        sequence="",
+        peptidoform="",
+        intensities=[{"label": "TMT126", "intensity": 2000.0}],
+    )
+
+    with pytest.raises(ValueError, match="Unidentified Feature composite fallback was used for 2 row"):
+        with FeatureWriter(path, batch_size=1) as writer:
+            if write_path == "batch":
+                writer.write_batch([first, second])
+            else:
+                table = writer.align_table_to_schema(pa.Table.from_pylist([first, second]))
+                writer.write_table(table)
+
+
+def test_identified_duplicate_not_attributed_to_fallback(tmp_path):
+    """A duplicate among identified Features keeps the plain PK error even when a
+    (unique) unidentified composite-fallback row is present in the same file."""
+    path = tmp_path / "mixed-duplicate.feature.parquet"
+    fallback = make_feature_record(sequence="", peptidoform="")  # unique unidentified fallback
+    dup_a = make_feature_record(run_file_name="run_09")
+    dup_b = make_feature_record(run_file_name="run_09")  # identical composite -> duplicate PK
+
+    with pytest.raises(ValueError) as excinfo:
+        with FeatureWriter(path, batch_size=10) as writer:
+            writer.write_batch([fallback, dup_a, dup_b])
+    message = str(excinfo.value)
+    assert "duplicate row" in message.lower()
+    assert "Unidentified Feature composite fallback" not in message
 
 
 def test_provided_psm_id_kept_by_default(tmp_path):
@@ -287,3 +330,17 @@ def test_ids_agree_across_write_paths(tmp_path):
         written_id("d.feature.parquet", "df"),
     }
     assert len(ids) == 1
+
+
+def test_write_table_rejects_duplicate_pk(tmp_path):
+    """The table-writing path enforces primary-key uniqueness."""
+    path = tmp_path / "dup_table.feature.parquet"
+    r1 = make_feature_record(peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
+    r2 = make_feature_record(
+        peptidoform="PEPTIDEK", charge=2, run_file_name="run_01", intensities=[{"label": "TMT126", "intensity": 9.0}]
+    )
+    w = FeatureWriter(path)
+    table = w.align_table_to_schema(pa.Table.from_pylist([dict(r1), dict(r2)]))
+    with pytest.raises(ValueError, match="Primary key.*duplicate"):
+        w.write_table(table)
+    assert not path.exists()

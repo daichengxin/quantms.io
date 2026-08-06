@@ -685,7 +685,7 @@ def convert_mzidentml_cmd(
 # ---------------------------------------------------------------------------
 
 
-@convert.command("openms")
+@convert.command("openms", deprecated=True)
 @click.option(
     "--qpx-dir",
     help="Directory containing OpenMS -out_qpx parquet files (*.psm.parquet, *.feature.parquet, *.pg.parquet)",
@@ -737,7 +737,13 @@ def convert_mzidentml_cmd(
 )
 @click.option("--verbose", help="Enable verbose logging", is_flag=True)
 def convert_openms_cmd(**kwargs):
-    r"""Enrich OpenMS ProteomicsLFQ -out_qpx output into a full QPX dataset.
+    r"""[DEPRECATED] Enrich OpenMS ProteomicsLFQ -out_qpx output into a full QPX dataset.
+
+    DEPRECATED: OpenMS -out_qpx mis-assigns every PSM's run_file_name to the first
+    run (OpenMS#9872) and emits duplicate PSMs (OpenMS#9871). Use
+    ``qpxc convert openms-consensus`` — it reads the consensusXML directly and
+    resolves the correct run per PSM. This command is kept for now and will be
+    reconsidered once OpenMS ships an -out_qpx with the correct per-PSM run.
 
     Validates the existing psm/feature/pg parquet files, copies them to the
     output folder, and generates the missing metadata tables (run, sample,
@@ -841,8 +847,28 @@ def convert_openms_cmd(**kwargs):
     ),
 )
 @click.option("--verbose", is_flag=True, help="Enable verbose logging.")
+@click.option(
+    "--project-accession",
+    help="PRIDE / ProteomeXchange accession (e.g. PXD001819)",
+)
+@click.option(
+    "--compression",
+    type=click.Choice(["zstd", "snappy", "gzip", "none"], case_sensitive=False),
+    default="zstd",
+    show_default=True,
+    help="Parquet compression codec.",
+)
 def convert_openms_consensus_cmd(
-    consensusxml_path, sdrf_path, output_folder, output_prefix, structures, pg_top, streaming, verbose
+    consensusxml_path,
+    sdrf_path,
+    output_folder,
+    output_prefix,
+    structures,
+    pg_top,
+    streaming,
+    verbose,
+    project_accession,
+    compression,
 ):
     """Convert an OpenMS consensusXML (+ SDRF) to QPX.
 
@@ -865,6 +891,8 @@ def convert_openms_consensus_cmd(
         structures=structs,
         pg_top=pg_top,
         streaming=streaming,
+        project_accession=project_accession,
+        compression=compression,
     )
     click.echo(f"consensusXML conversion complete. Wrote: {sorted(written)}")
 

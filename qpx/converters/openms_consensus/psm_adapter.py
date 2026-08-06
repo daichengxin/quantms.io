@@ -12,7 +12,14 @@ from __future__ import annotations
 import logging
 import re
 
-from qpx.converters.openms_consensus.feature_adapter import _run_stem, feature_map_info, load_consensus_map, to_proforma
+from qpx.converters.openms_consensus.feature_adapter import (
+    _run_stem,
+    feature_map_info,
+    load_consensus_map,
+    localization_scores,
+    to_modifications,
+    to_proforma,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -153,10 +160,15 @@ def psm_records_for_pid(pid, resolve_run, seen: set[tuple], cf_runs=None) -> lis
                     "higher_better": True,
                 }
             )
+        loc_scores, site_scores = localization_scores(hit)
+        if loc_scores:
+            additional_scores.extend(loc_scores)
+        modifications = to_modifications(seq_obj, site_scores)
         records.append(
             {
                 "sequence": seq_obj.toUnmodifiedString(),
                 "peptidoform": peptidoform,
+                "modifications": modifications,
                 "charge": charge,
                 "run_file_name": run,
                 "scan": scan,
