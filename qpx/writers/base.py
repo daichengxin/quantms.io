@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-import logging
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
@@ -19,8 +18,6 @@ from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
     import pandas as pd
-
-_log = logging.getLogger(__name__)
 
 
 # High-entropy float leaves that compress poorly under the default
@@ -409,16 +406,7 @@ class BaseWriter:
         pass tables whose id column is absent or null.
         """
         table = self._fill_identity_table(table)
-        result = self._schema_class.validate_full(table, strict=True)
-        # A duplicate primary key is reported as a WARNING, not a hard error (as at
-        # close), so a conversion never fails on producer data that collides on the
-        # identity composite (e.g. OpenMS -out_qpx writing one PSM row per search
-        # engine). Every other strict issue (null in a required column, type
-        # mismatch) remains a hard error.
-        errors = [issue.message for issue in result.errors if issue.check != "duplicate_pk"]
-        for issue in result.errors:
-            if issue.check == "duplicate_pk":
-                _log.warning("%s", issue.message)
+        errors = self._schema_class.validate(table, strict=True)
         if errors:
             raise ValueError("Schema validation failed:\n" + "\n".join(errors))
         self._ensure_writer()
@@ -486,18 +474,8 @@ class BaseWriter:
             raise ValueError(f"Primary key ({id_field}) contains {null_count} null row(s) out of {total_count}")
         if unique_count != total_count:
             duplicate_count = total_count - unique_count
-            # A duplicate primary key is reported as a WARNING, not an error, so a
-            # conversion never hard-fails on producer data that collides on the
-            # identity composite (e.g. OpenMS -out_qpx emitting per-protein PSM rows
-            # or co-eluting unidentified features). A null id remains a hard error
-            # (real corruption); duplicates are surfaced for the producer to resolve.
-            _log.warning(
-                "Primary key (%s) has %d duplicate row(s) (%d unique out of %d) in %s",
-                id_field,
-                duplicate_count,
-                unique_count,
-                total_count,
-                self._path.name,
+            raise ValueError(
+                f"Primary key ({id_field}) has {duplicate_count} duplicate row(s) ({unique_count} unique out of {total_count})"
             )
 
     def _write_arrow_batch(self, records: list[dict]):

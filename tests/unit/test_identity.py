@@ -170,22 +170,15 @@ def test_provided_psm_id_kept_by_default(tmp_path):
     assert pq.read_table(path).column("psm_id").to_pylist() == [123456789]
 
 
-def test_writer_warns_on_duplicate_identity_across_batches(tmp_path, caplog):
-    """A duplicate primary key across batches is reported as a WARNING (not a hard
-    error), so a conversion never fails on producer data that collides on the
-    identity composite; the file is still written."""
-    import logging
-
+def test_writer_rejects_duplicate_identity_across_batches(tmp_path):
+    """Whole-file PK validation catches collisions split across writer batches."""
     path = tmp_path / "duplicate.feature.parquet"
     first = make_feature_record()
     second = make_feature_record(intensities=[{"label": "TMT126", "intensity": 2000.0}])
 
-    with caplog.at_level(logging.WARNING, logger="qpx.writers.base"):
+    with pytest.raises(ValueError, match=r"Primary key \(feature_id\) has 1 duplicate row"):
         with FeatureWriter(path, batch_size=1) as writer:
             writer.write_batch([first, second])
-
-    assert "duplicate row" in caplog.text
-    assert path.exists()  # written despite the collision
 
 
 def test_override_provided_id_stashes_to_cv_params(tmp_path):
@@ -299,12 +292,8 @@ def test_ids_agree_across_write_paths(tmp_path):
     assert len(ids) == 1
 
 
-def test_write_table_warns_on_duplicate_pk_not_raises(tmp_path, caplog):
-    """write_table (the OpenMS enrichment path) reports a duplicate PK as a WARNING,
-    not a strict Schema-validation error — so per-search-engine PSM rows that collide
-    on the identity composite still convert."""
-    import logging
-
+def test_write_table_rejects_duplicate_pk(tmp_path):
+    """The table-writing path enforces primary-key uniqueness."""
     path = tmp_path / "dup_table.feature.parquet"
     r1 = make_feature_record(peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
     r2 = make_feature_record(
@@ -312,8 +301,6 @@ def test_write_table_warns_on_duplicate_pk_not_raises(tmp_path, caplog):
     )
     w = FeatureWriter(path)
     table = w.align_table_to_schema(pa.Table.from_pylist([dict(r1), dict(r2)]))
-    with caplog.at_level(logging.WARNING, logger="qpx.writers.base"):
-        w.write_table(table)  # must NOT raise
-    w.close()
-    assert "duplicate row" in caplog.text
-    assert path.exists()
+    with pytest.raises(ValueError, match="Primary key.*duplicate"):
+        w.write_table(table)
+    assert not path.exists()
