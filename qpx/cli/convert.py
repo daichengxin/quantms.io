@@ -847,8 +847,28 @@ def convert_openms_cmd(**kwargs):
     ),
 )
 @click.option("--verbose", is_flag=True, help="Enable verbose logging.")
+@click.option(
+    "--project-accession",
+    help="PRIDE / ProteomeXchange accession (e.g. PXD001819)",
+)
+@click.option(
+    "--compression",
+    type=click.Choice(["zstd", "snappy", "gzip", "none"], case_sensitive=False),
+    default="zstd",
+    show_default=True,
+    help="Parquet compression codec.",
+)
 def convert_openms_consensus_cmd(
-    consensusxml_path, sdrf_path, output_folder, output_prefix, structures, pg_top, streaming, verbose
+    consensusxml_path,
+    sdrf_path,
+    output_folder,
+    output_prefix,
+    structures,
+    pg_top,
+    streaming,
+    verbose,
+    project_accession,
+    compression,
 ):
     """Convert an OpenMS consensusXML (+ SDRF) to QPX.
 
@@ -871,6 +891,8 @@ def convert_openms_consensus_cmd(
         structures=structs,
         pg_top=pg_top,
         streaming=streaming,
+        project_accession=project_accession,
+        compression=compression,
     )
     click.echo(f"consensusXML conversion complete. Wrote: {sorted(written)}")
 
