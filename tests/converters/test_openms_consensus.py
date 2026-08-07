@@ -613,6 +613,129 @@ def test_consensusxml_to_qpx_feature_has_channels_and_interim_pg_intensity(tmp_p
         assert feat_counts == {"unique_features": 1, "total_features": 1}
 
 
+def test_feature_pg_accessions_populated_full_membership(tmp_path):
+    """feature.pg_accessions carries the full protein-group membership (not just the
+    leader), and matches the pg view's pg_accessions for that group (bigbio/qpx#266)."""
+    cx = tmp_path / "test.consensusXML"
+    _write_tmt_consensusxml(cx)
+    out = tmp_path / "out"
+    written = OpenMSConsensusConverter().convert(str(cx), str(out), output_prefix="t", structures=("feature", "pg"))
+    con = duckdb.connect()
+    feat = con.execute(
+        "SELECT anchor_protein, pg_accessions FROM read_parquet($1)",
+        [str(written["feature"])],
+    ).fetchall()
+    pg = con.execute(
+        "SELECT pg_accessions FROM read_parquet($1)",
+        [str(written["pg"])],
+    ).fetchall()
+    con.close()
+
+    assert len(feat) == 1
+    anchor, pg_accessions = feat[0]
+    assert pg_accessions is not None  # populated, not omitted
+    accs = [p["accession"] for p in pg_accessions]
+    assert accs == ["P12345"] and anchor == "P12345"  # the full membership, incl. the leader
+    # the feature's membership equals the pg view's membership for that group
+    assert accs == list(pg[0][0])
+
+
+# Two DISTINCT indistinguishable groups that SHARE a leading protein A: [A, B] and
+# [A, C] (the bigbio/qpx#240 class). Each peptide/feature maps to one group (its
+# first protein evidence is the distinguishing member B / C). Anchor alone (A) does
+# not identify the group; the full pg_accessions membership does.
+_SHARED_LEADER_CONSENSUSXML = """<?xml version="1.0" encoding="ISO-8859-1"?>
+<consensusXML version="1.7" experiment_type="label-free"
+  xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/OpenMS/OpenMS/develop/share/OpenMS/SCHEMAS/ConsensusXML_1_7.xsd"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <IdentificationRun id="PI_0" date="0000-00-00T00:00:00" search_engine="" search_engine_version="">
+    <SearchParameters db="" db_version="" taxonomy="" mass_type="monoisotopic" charges=""
+      enzyme="unknown_enzyme" missed_cleavages="0" precursor_peak_tolerance="0"
+      precursor_peak_tolerance_ppm="false" peak_mass_tolerance="0"
+      peak_mass_tolerance_ppm="false">
+    </SearchParameters>
+    <ProteinIdentification score_type="" higher_score_better="true" significance_threshold="0">
+      <ProteinHit id="PH_0" accession="A" score="0" sequence=""></ProteinHit>
+      <ProteinHit id="PH_1" accession="B" score="0" sequence=""></ProteinHit>
+      <ProteinHit id="PH_2" accession="C" score="0" sequence=""></ProteinHit>
+      <UserParam type="string" name="indistinguishable_proteins_0" value="0,PH_0,PH_1"/>
+      <UserParam type="string" name="indistinguishable_proteins_1" value="0,PH_0,PH_2"/>
+    </ProteinIdentification>
+  </IdentificationRun>
+  <mapList count="1">
+    <map id="0" name="run_01.mzML" unique_id="1" label="label-free" size="2">
+    </map>
+  </mapList>
+  <consensusElementList>
+    <consensusElement id="e_0" quality="0.0" charge="2">
+      <centroid rt="100.0" mz="450.25" it="0.0"/>
+      <groupedElementList>
+        <element map="0" id="0" rt="100.0" mz="450.25" it="1000.0"/>
+      </groupedElementList>
+      <PeptideIdentification identification_run_ref="PI_0" score_type=""
+        higher_score_better="true" significance_threshold="0" MZ="450.26" RT="100"
+        spectrum_reference="scan=42">
+        <PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_1 PH_0">
+          <UserParam type="string" name="target_decoy" value="target"/>
+        </PeptideHit>
+      </PeptideIdentification>
+    </consensusElement>
+    <consensusElement id="e_1" quality="0.0" charge="2">
+      <centroid rt="200.0" mz="500.25" it="0.0"/>
+      <groupedElementList>
+        <element map="0" id="1" rt="200.0" mz="500.25" it="3000.0"/>
+      </groupedElementList>
+      <PeptideIdentification identification_run_ref="PI_0" score_type=""
+        higher_score_better="true" significance_threshold="0" MZ="500.26" RT="200"
+        spectrum_reference="scan=43">
+        <PeptideHit score="0" sequence="ELVISLIVK" charge="2" protein_refs="PH_2 PH_0">
+          <UserParam type="string" name="target_decoy" value="target"/>
+        </PeptideHit>
+      </PeptideIdentification>
+    </consensusElement>
+  </consensusElementList>
+</consensusXML>
+"""
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_feature_pg_accessions_disambiguate_shared_leader(tmp_path, streaming):
+    """Two distinct groups sharing a leader ([A,B] and [A,C]) give the two features
+    DISTINCT feature.pg_accessions even though both share anchor_protein A, and each
+    feature's pg_accessions matches its pg row's pg_accessions (bigbio/qpx#266)."""
+    cx = tmp_path / "shared_leader.consensusXML"
+    cx.write_text(_SHARED_LEADER_CONSENSUSXML)
+    out = tmp_path / ("stream" if streaming else "mem")
+    written = OpenMSConsensusConverter().convert(
+        str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming
+    )
+    con = duckdb.connect()
+    feat = con.execute(
+        "SELECT sequence, anchor_protein, pg_accessions FROM read_parquet($1)",
+        [str(written["feature"])],
+    ).fetchall()
+    pg = con.execute(
+        "SELECT anchor_protein, pg_accessions FROM read_parquet($1)",
+        [str(written["pg"])],
+    ).fetchall()
+    con.close()
+
+    feat_membership = {seq: [p["accession"] for p in (pg_accessions or [])] for seq, _, pg_accessions in feat}
+    feat_anchor = {seq: anchor for seq, anchor, _ in feat}
+    # Both features share the leader as anchor_protein ...
+    assert feat_anchor == {"PEPTIDEK": "A", "ELVISLIVK": "A"}
+    # ... but pg_accessions distinguishes their groups (the #240 ambiguity resolved).
+    assert feat_membership["PEPTIDEK"] == ["A", "B"]
+    assert feat_membership["ELVISLIVK"] == ["A", "C"]
+    assert feat_membership["PEPTIDEK"] != feat_membership["ELVISLIVK"]
+
+    # Each feature's membership matches exactly one pg row's pg_accessions.
+    pg_memberships = [list(members) for _, members in pg]
+    assert sorted(pg_memberships) == [["A", "B"], ["A", "C"]]
+    assert feat_membership["PEPTIDEK"] in pg_memberships
+    assert feat_membership["ELVISLIVK"] in pg_memberships
+
+
 def test_label_free_consensusxml_uses_lfq_labels(tmp_path):
     cx = tmp_path / "label_free.consensusXML"
     xml = _TMT_CONSENSUSXML.replace('label="tmt6plex_126"', 'label="label-free"')

@@ -186,17 +186,15 @@ def _merge_protein_ids(cm) -> tuple[dict[str, bool], dict[str, float], dict[str,
     return acc_decoy, acc_qvalue, acc_gene, groups
 
 
-def accession_to_anchor(cm) -> dict[str, str]:
-    """Map each accession to its protein-group leader (the pg ``anchor_protein``).
+def accession_to_group(cm) -> dict[str, list[str]]:
+    """Map each accession to its full protein-group membership (feature.pg_accessions).
 
-    OpenMS defines the group leader as the group's first accession; the pg view
-    uses it as ``anchor_protein``. Sharing this map with the feature adapter lets
-    a feature stamp the SAME anchor as its protein group, so the documented
-    feature->pg join on ``anchor_protein`` holds for multi-accession groups
-    (a peptide's evidence order alone does not identify the leader).
-    """
+    group[0] is still the leader (feature.anchor_protein). Sharing the whole
+    membership lets a feature stamp BOTH anchor_protein AND pg_accessions, so the
+    feature->pg join is unambiguous even when two distinct groups share a leader
+    (bigbio/qpx#266, cf. #240)."""
     _, _, _, groups = _merge_protein_ids(cm)
-    return {acc: grp[0] for grp in groups for acc in grp}
+    return {acc: list(grp) for grp in groups for acc in grp}
 
 
 def _map_info(cm) -> dict[int, tuple[str, str]]:
