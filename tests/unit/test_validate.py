@@ -311,3 +311,42 @@ def test_cli_validate(dataset_dir, feature_parquet):
 
     result = runner.invoke(qpx_main, ["validate"])
     assert result.exit_code != 0
+
+
+def _feature_anchor_table(rows):
+    """Minimal valid feature table with anchor_protein / pg_accessions overridden.
+
+    ``rows`` is a list of ``(anchor, [accession, ...] | None)``.
+    """
+    schema = FeatureSchema.get_arrow_schema()
+    arrays = _valid_arrays(schema, len(rows))
+    pg_type = schema.field("pg_accessions").type
+
+    def member(accs):
+        if accs is None:
+            return None
+        return [{"accession": a, "start": None, "end": None, "pre": None, "post": None} for a in accs]
+
+    arrays["anchor_protein"] = pa.array([r[0] for r in rows], type=pa.string())
+    arrays["pg_accessions"] = pa.array([member(r[1]) for r in rows], type=pg_type)
+    return pa.table(arrays, schema=schema)
+
+
+def test_anchor_without_pg_accessions_is_flagged():
+    # anchor set + membership present -> ok; anchor set + no membership -> violation;
+    # no anchor + no membership -> ok (an unmapped feature).
+    table = _feature_anchor_table([("P1", ["P1", "P2"]), ("P2", None), (None, None)])
+
+    lenient = FeatureSchema.validate_full(table)
+    warns = [i for i in lenient.issues if i.check == "anchor_without_membership"]
+    assert len(warns) == 1 and warns[0].severity == "warning"
+
+    strict = FeatureSchema.validate_full(table, strict=True)
+    errs = [i for i in strict.issues if i.check == "anchor_without_membership"]
+    assert len(errs) == 1 and errs[0].severity == "error"
+
+
+def test_anchor_with_pg_accessions_ok():
+    table = _feature_anchor_table([("P1", ["P1"]), (None, None)])
+    issues = [i for i in FeatureSchema.validate_full(table).issues if i.check == "anchor_without_membership"]
+    assert issues == []

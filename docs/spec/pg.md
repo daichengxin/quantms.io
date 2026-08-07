@@ -46,6 +46,7 @@ A `pg` row is an **analyte**: the quantified unit is the protein group *as a who
 - **Be fail-safe when parsing group members.** In the most general case a producer's group label may be an opaque string; QPX parses it into `pg_accessions` where possible, but a consumer that cannot resolve protein IDs from a group (e.g. for biological annotation) should continue without error rather than fail.
 - **For gene- or pathway-level analysis**, aggregate on `gg_accessions` (gene groups) / unique gene entries — do not pick a single protein out of a group.
 - **feature → pg** joins via `feature.pg_ids` (`pg_id`) or the full `feature.pg_accessions` membership — never `anchor_protein` alone.
+- **Integrity check:** a row with a non-null `anchor_protein` MUST also carry `pg_accessions` (its full group membership). Since the group is the analyte and the join key, a protein-mapped feature that lacked membership would be an orphan. QPX validates this (a warning on the write/convert path, an error under `qpxc validate --strict`).
 
 ### Counts
 
