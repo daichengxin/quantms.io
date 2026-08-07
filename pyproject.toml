@@ -26,6 +26,13 @@ dependencies = [
     # Canonical channel-label vocabulary (TMT/iTRAQ/SILAC/mTRAQ + synonyms) —
     # single source of truth shared with the OpenMS/DIA-NN SDRF converters.
     "sdrf-pipelines>=0.1.6",
+    # MuData export is a first-class QPX output (the portal, quantms and
+    # quantmsdiann all build it), so its stack is a required dependency, not an
+    # optional extra. scipy is imported directly by qpx/mudata.py, so it must be
+    # declared explicitly rather than relied on transitively through anndata.
+    "mudata>=0.2.4",
+    "anndata>=0.9.0",
+    "scipy>=1.10",
 ]
 [project.optional-dependencies]
 mzidentml = ["lxml>=4.9.0"]
@@ -33,7 +40,7 @@ pdc = ["pridepy>=0.0.15"]
 transforms = ["biopython", "mygene>=1.0.0", "anndata>=0.9.0"]
 plotting = ["plotly>=5.0.0", "scikit-learn>=1.5.0"]
 quantify = ["mokume>=0.1.0", "directlfq"]
-mudata = ["mudata>=0.2.4", "anndata>=0.9.0"]
+mudata = []  # now core dependencies; kept as a no-op for back-compat with `pip install qpx[mudata]`
 all = ["lxml>=4.9.0", "biopython", "mygene>=1.0.0", "anndata>=0.9.0", "plotly>=5.0.0", "scikit-learn>=1.5.0", "mokume>=0.1.0", "directlfq", "mudata>=0.2.4"]
 dev = [
     "pytest",
