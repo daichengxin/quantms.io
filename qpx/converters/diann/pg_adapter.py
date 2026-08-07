@@ -22,7 +22,6 @@ import pandas as pd
 from qpx.converters.base import resolve_columns
 from qpx.converters.diann.base_adapter import DiaNNBaseAdapter
 from qpx.converters.mappings import get_field_mappings
-from qpx.converters.pg_linking import update_pg_id_lookup
 from qpx.converters.utils import safe_float
 from qpx.core.sql import sql_build, validate_identifier
 from qpx.writers.pg import PgWriter
@@ -135,11 +134,6 @@ class DiannPgAdapter(DiaNNBaseAdapter):
                 carries no PG q-value column, the filter is skipped with a
                 warning.
         """
-        # feature->pg lookup accumulated as pg records are built (bigbio/qpx#266):
-        # (canonical membership, run) -> [pg_id]. Byte-identical to the written
-        # pg_ids; consumed by the feature adapter to stamp feature.pg_ids.
-        self.pg_id_lookup: dict[tuple[tuple[str, ...], str], list[int]] = {}
-
         # Step 1: Load report into DuckDB
         self._load_diann_report(diann_report)
 
@@ -170,7 +164,6 @@ class DiannPgAdapter(DiaNNBaseAdapter):
                     qvalue_threshold=qvalue_threshold,
                 )
                 if records:
-                    update_pg_id_lookup(self.pg_id_lookup, records)
                     writer.write_batch(records)
 
         self.logger.info(f"DIA-NN PG conversion complete -> {output_path}")

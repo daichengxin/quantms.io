@@ -96,28 +96,6 @@ class MaxQuantConverter(BaseOrchestrator):
                 self._resolved_mappings_by_view[PSM] = adapter.get_resolved_columns()
             logger.info("MaxQuant PSM conversion complete")
 
-        # Convert the pg view BEFORE features when a proteinGroups file is present:
-        # it builds the feature->pg lookup that the feature adapter consumes to
-        # stamp feature.pg_ids (bigbio/qpx#266). Without a pg view, pg_ids stay null.
-        pg_id_lookup: dict | None = None
-        if PG in structures and protein_groups_file:
-            with MaxQuantPgAdapter(
-                duckdb_memory=self._memory,
-                duckdb_threads=duckdb_threads,
-                compression=self._compression,
-            ) as adapter:
-                adapter.convert(
-                    protein_groups_path=str(protein_groups_file),
-                    output_path=str(output_folder / f"{prefix}.pg.parquet"),
-                    sdrf_path=str(sdrf_file) if sdrf_file else None,
-                    evidence_path=str(evidence_file) if evidence_file else None,
-                    chunksize=batch_size,
-                )
-                pg_id_lookup = adapter.pg_id_lookup
-                ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=PG))
-                self._resolved_mappings_by_view[PG] = adapter.get_resolved_columns()
-            logger.info("MaxQuant PG conversion complete")
-
         if FEATURE in structures and evidence_file:
             with MaxQuantFeatureAdapter(
                 duckdb_memory=self._memory,
@@ -131,11 +109,27 @@ class MaxQuantConverter(BaseOrchestrator):
                     protein_groups_path=(str(protein_groups_file) if protein_groups_file else None),
                     chunksize=batch_size,
                     fixed_mod_only=fixed_mod_only,
-                    pg_id_lookup=pg_id_lookup,
                 )
                 ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=FEATURE))
                 self._resolved_mappings_by_view[FEATURE] = adapter.get_resolved_columns()
             logger.info("MaxQuant feature conversion complete")
+
+        if PG in structures and protein_groups_file:
+            with MaxQuantPgAdapter(
+                duckdb_memory=self._memory,
+                duckdb_threads=duckdb_threads,
+                compression=self._compression,
+            ) as adapter:
+                adapter.convert(
+                    protein_groups_path=str(protein_groups_file),
+                    output_path=str(output_folder / f"{prefix}.pg.parquet"),
+                    sdrf_path=str(sdrf_file) if sdrf_file else None,
+                    evidence_path=str(evidence_file) if evidence_file else None,
+                    chunksize=batch_size,
+                )
+                ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=PG))
+                self._resolved_mappings_by_view[PG] = adapter.get_resolved_columns()
+            logger.info("MaxQuant PG conversion complete")
 
         for view_name, mappings in self._resolved_mappings_by_view.items():
             ontology_entries.extend(

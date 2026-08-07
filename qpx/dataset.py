@@ -300,6 +300,92 @@ class Dataset:
         """Execute arbitrary SQL across registered structures."""
         return QueryResult(self._engine.execute(query))
 
+    # --- Feature <-> protein-group softlink (bigbio/qpx#269) ---
+    #
+    # The feature->pg association is a *computed softlink*: instead of persisting
+    # feature.pg_ids on write, it is derived on read by joining the registered
+    # ``feature`` and ``pg`` views. The join is label-aware so a feature links
+    # only to the pg rows for the labels it actually carries (LFQ: one row; TMT /
+    # plexDIA: one row per channel the feature has), never over-linking to a
+    # same-membership pg row that exists only for a channel the feature lacks.
+    #
+    # Match rule (all three must hold):
+    #   1. membership  — canonical(feature.pg_accessions) == canonical(pg.pg_accessions),
+    #                    set-wise (sorted accession strings), the same canonical
+    #                    membership that keys the pg identity;
+    #   2. run         — feature.run_file_name IN pg.grouped_runs;
+    #   3. label       — a label from feature.intensities IS NOT DISTINCT FROM pg.label.
+    # ``pg.pg_id`` is read straight from the matched pg row (never re-derived).
+    # A feature whose group has no matching pg row — or which carries no
+    # quantified label — simply produces no rows: identified but not quantified.
+    _LINK_FEATURE_PG_SQL = """
+        WITH feat_labels AS (
+            SELECT
+                f.feature_id AS feature_id,
+                f.run_file_name AS run_file_name,
+                list_sort(list_transform(f.pg_accessions, x -> x.accession)) AS membership,
+                UNNEST(list_transform(f.intensities, i -> i.label)) AS feature_label
+            FROM feature f
+        )
+        SELECT DISTINCT
+            fl.feature_id AS feature_id,
+            p.pg_id AS pg_id,
+            p.label AS label
+        FROM feat_labels fl
+        JOIN pg p
+            ON list_sort(p.pg_accessions) = fl.membership
+           AND list_contains(p.grouped_runs, fl.run_file_name)
+           AND p.label IS NOT DISTINCT FROM fl.feature_label
+        ORDER BY fl.feature_id, p.pg_id
+    """
+
+    def link_feature_pg(self) -> QueryResult:
+        """Compute the feature->pg softlink as ``(feature_id, pg_id, label)`` rows.
+
+        A label-aware read-side join of the registered ``feature`` and ``pg``
+        views (bigbio/qpx#269): a feature links to a pg row only when their
+        canonical ``pg_accessions`` membership matches set-wise, the feature's
+        ``run_file_name`` is in the pg row's ``grouped_runs``, and the pg row's
+        ``label`` is one of the labels in the feature's ``intensities``. ``pg_id``
+        is taken directly from the matched pg row (not re-derived). Works the same
+        on the local and S3 read paths (it is a DuckDB query over the views).
+
+        Returns
+        -------
+        QueryResult
+            Lazy result of ``(feature_id, pg_id, label)`` — one row per matched
+            (feature, channel). Features identified but not quantified in a given
+            channel/fraction produce no rows (this is correct, not an error).
+        """
+        self._require_feature_pg("link_feature_pg")
+        return QueryResult(self._engine.execute(self._LINK_FEATURE_PG_SQL))
+
+    def features_without_pg_link(self) -> QueryResult:
+        """Return ``feature_id`` for features that resolve to no pg row.
+
+        Convenience for the identified-but-not-quantified question: the features
+        whose computed softlink (:meth:`link_feature_pg`) is empty — no pg row
+        shares their canonical membership, run and a carried label. Minimal by
+        design; a fuller conversion summary is built on top of the softlink.
+        """
+        self._require_feature_pg("features_without_pg_link")
+        sql = f"""
+            SELECT f.feature_id AS feature_id
+            FROM feature f
+            WHERE f.feature_id NOT IN (
+                SELECT link.feature_id FROM ({self._LINK_FEATURE_PG_SQL}) AS link
+            )
+            ORDER BY f.feature_id
+        """
+        return QueryResult(self._engine.execute(sql))
+
+    def _require_feature_pg(self, operation: str) -> None:
+        """Raise if the feature or pg view is not available for the softlink."""
+        if self.feature is None or self.pg is None:
+            raise ValueError(
+                f"{operation}() requires both the 'feature' and 'pg' structures; available: {self.available_structures}"
+            )
+
     @property
     def available_structures(self) -> list[str]:
         return list(self._structures.keys())

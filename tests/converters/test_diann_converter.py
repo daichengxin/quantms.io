@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from tests.conftest import assert_pg_table_wellformed
-from tests.converters.pg_ids_roundtrip import assert_pg_ids_join_valid, read_feature_pg
+from tests.converters.pg_ids_roundtrip import assert_softlink_valid, open_converted, pg_ids_by_sequence
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples" / "diann" / "small"
 
@@ -1073,39 +1073,41 @@ class TestDiannReportLoading:
 
 
 # ---------------------------------------------------------------------------
-# feature.pg_ids cross-reference round-trip (bigbio/qpx#266)
+# feature<->pg softlink round-trip (bigbio/qpx#269)
 # ---------------------------------------------------------------------------
 
 
 def _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, sdrf_path=None, pg_qvalue=None, feature_qvalue=None):
-    """Run pg-then-feature so feature.pg_ids is stamped from the pg lookup."""
+    """Convert both views and open the Dataset for the computed softlink."""
     from qpx.converters.diann.converter import DiaNNConverter
 
     out = tmp_path / "roundtrip"
     out.mkdir(exist_ok=True)
     conv = DiaNNConverter(report_path=str(report_path), sdrf_path=str(sdrf_path) if sdrf_path else None)
-    conv.convert_pg(pg_matrix_path=str(matrix_path), output_folder=str(out), output_prefix="d", qvalue_threshold=pg_qvalue)
     conv.convert_features(output_folder=str(out), output_prefix="d", qvalue_threshold=feature_qvalue)
-    return read_feature_pg(out / "d.feature.parquet", out / "d.pg.parquet")
+    conv.convert_pg(pg_matrix_path=str(matrix_path), output_folder=str(out), output_prefix="d", qvalue_threshold=pg_qvalue)
+    return open_converted(out, prefix="d")
 
 
-def test_feature_pg_ids_roundtrip_plexdia_multilabel(tmp_path):
-    """Every populated feature.pg_ids is a real pg.pg_id with the matching membership +
-    run; the one plexDIA feature references one pg_id per channel/label."""
+def test_feature_pg_softlink_plexdia_multilabel(tmp_path):
+    """The computed softlink links each feature only to real pg rows with matching
+    membership + run + a label it carries; the one plexDIA feature (two channels)
+    links to one pg row per channel/label, never over-linking."""
     report_path, matrix_path, sdrf_path = _write_plexdia_inputs(tmp_path)
-    feat, pg = _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, sdrf_path, feature_qvalue=0.01)
+    with _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, sdrf_path, feature_qvalue=0.01) as ds:
+        feat, pg, link = assert_softlink_valid(ds)
 
-    assert_pg_ids_join_valid(feat, pg)
     assert len(feat) == 1  # channels folded into one feature
-    _seq, _run, _accs, pg_ids = feat[0]
-    assert pg_ids is not None and len(pg_ids) == 2  # one pg row per channel
-    assert set(pg_ids) == {row[0] for row in pg}
-    assert {row[3] for row in pg} == {"L", "H"}  # both channel labels
+    fid = feat[0][0]
+    linked = {(pid, label) for f, pid, label in link if f == fid}
+    assert len(linked) == 2  # one pg row per channel
+    assert {label for _pid, label in linked} == {"L", "H"}  # both channel labels
+    assert {pid for pid, _label in linked} == {row[0] for row in pg}
 
 
-def test_feature_pg_ids_roundtrip_shared_leader_distinct(tmp_path):
-    """Two distinct groups sharing leader P1 -> each feature references the CORRECT
-    distinct pg row, not the other's."""
+def test_feature_pg_softlink_shared_leader_distinct(tmp_path):
+    """Two distinct groups sharing leader P1 -> each feature links to the CORRECT
+    distinct pg row, not the other's (membership match is set-wise, not by leader)."""
     common = {
         "Run": "run_A",
         "PG.Quantity": 1000.0,
@@ -1147,20 +1149,20 @@ def test_feature_pg_ids_roundtrip_shared_leader_distinct(tmp_path):
         ]
     ).to_csv(matrix_path, sep="\t", index=False)
 
-    feat, pg = _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path)
-    assert_pg_ids_join_valid(feat, pg)
+    with _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path) as ds:
+        feat, pg, link = assert_softlink_valid(ds)
 
-    pg_id_by_membership = {tuple(sorted(accs)): pg_id for pg_id, accs, *_ in pg}
-    ids_by_seq = {seq: list(pg_ids) for seq, _run, _accs, pg_ids in feat}
+    pg_id_by_membership = {tuple(sorted(memb)): pg_id for pg_id, memb, *_ in pg}
+    ids_by_seq = pg_ids_by_sequence(feat, link)
     assert ids_by_seq["PEPTIDEK"] == [pg_id_by_membership[("P1", "P2")]]
     assert ids_by_seq["PEPTIDER"] == [pg_id_by_membership[("P1", "P3")]]
-    # the two features do not reference each other's pg row
+    # the two features do not link to each other's pg row
     assert set(ids_by_seq["PEPTIDEK"]).isdisjoint(ids_by_seq["PEPTIDER"])
 
 
-def test_feature_pg_ids_null_when_group_has_no_pg_row(tmp_path):
-    """A feature whose group was filtered out of the pg view gets null pg_ids
-    (ids are never fabricated)."""
+def test_feature_pg_softlink_empty_when_group_has_no_pg_row(tmp_path):
+    """A feature whose group was filtered out of the pg view produces no softlink
+    edge (identified but not quantified — not an error)."""
     common = {
         "Run": "run_A",
         "PG.Quantity": 1000.0,
@@ -1204,18 +1206,18 @@ def test_feature_pg_ids_null_when_group_has_no_pg_row(tmp_path):
     ).to_csv(matrix_path, sep="\t", index=False)
 
     # pg q-value filter drops P2 from the pg view; feature view keeps both.
-    feat, pg = _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, pg_qvalue=0.01, feature_qvalue=None)
-    assert_pg_ids_join_valid(feat, pg)
+    with _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, pg_qvalue=0.01, feature_qvalue=None) as ds:
+        feat, _pg, link = assert_softlink_valid(ds)
 
-    ids_by_seq = {seq: pg_ids for seq, _run, _accs, pg_ids in feat}
-    assert ids_by_seq["PEPTIDEK"]  # P1 kept in pg -> populated
-    assert not ids_by_seq["PEPTIDER"]  # P2 filtered from pg -> null/empty
+    ids_by_seq = pg_ids_by_sequence(feat, link)
+    assert ids_by_seq["PEPTIDEK"]  # P1 kept in pg -> linked
+    assert ids_by_seq["PEPTIDER"] == []  # P2 filtered from pg -> no link
 
 
 @pytest.mark.integration
-def test_feature_pg_ids_roundtrip_real_small_dataset(tmp_path_factory):
-    """Real DIA-NN example: every populated feature.pg_ids joins to a real pg row
-    with matching membership + run (bigbio/qpx#266)."""
+def test_feature_pg_softlink_real_small_dataset(tmp_path_factory):
+    """Real DIA-NN example: the computed softlink links features to real pg rows
+    with matching membership + run + carried label (bigbio/qpx#269)."""
     from qpx.converters.diann.converter import DiaNNConverter
 
     if not _REPORT.exists():
@@ -1229,6 +1231,6 @@ def test_feature_pg_ids_roundtrip_real_small_dataset(tmp_path_factory):
     conv.convert_pg(pg_matrix_path=str(_PG_MATRIX), output_folder=str(out), output_prefix="d")
     conv.convert_features(mzml_info_folder=str(mz), output_folder=str(out), output_prefix="d")
 
-    feat, pg = read_feature_pg(out / "d.feature.parquet", out / "d.pg.parquet")
-    assert_pg_ids_join_valid(feat, pg)
-    assert any(pg_ids for *_, pg_ids in feat), "expected at least some populated feature.pg_ids"
+    with open_converted(out, prefix="d") as ds:
+        _feat, _pg, link = assert_softlink_valid(ds)
+    assert link, "expected at least some computed feature->pg softlink edges"

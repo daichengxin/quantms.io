@@ -544,14 +544,14 @@ class TestMaxQuantOntologyConversion:
 
 
 # ---------------------------------------------------------------------------
-# feature.pg_ids cross-reference round-trip (bigbio/qpx#266)
+# feature<->pg softlink round-trip (bigbio/qpx#269)
 # ---------------------------------------------------------------------------
 
-from tests.converters.pg_ids_roundtrip import assert_pg_ids_join_valid, read_feature_pg  # noqa: E402
+from tests.converters.pg_ids_roundtrip import assert_softlink_valid, open_converted, pg_ids_by_sequence  # noqa: E402
 
 
 def _write_pg_link_inputs(tmp_path):
-    """Minimal LFQ MaxQuant inputs exercising shared-leader + a null pg_ids case.
+    """Minimal LFQ MaxQuant inputs exercising shared-leader + a no-pg-row case.
 
     PEPTIDEA -> group P1;P2, PEPTIDEB -> P1;P3 (distinct groups, shared leader P1),
     PEPTIDEC -> P9 which is absent from proteinGroups (so its feature has no pg row).
@@ -579,10 +579,10 @@ def _write_pg_link_inputs(tmp_path):
     return evidence, protein_groups
 
 
-def test_feature_pg_ids_roundtrip_shared_leader_and_null(tmp_path):
-    """Full pg+feature conversion: every populated feature.pg_ids joins to a real
-    pg row with matching membership + run; shared-leader groups stay distinct; a
-    feature whose group has no pg row gets null pg_ids."""
+def test_feature_pg_softlink_shared_leader_and_no_pg_row(tmp_path):
+    """Full pg+feature conversion: the computed softlink links each feature to a
+    real pg row with matching membership + run + carried label; shared-leader
+    groups stay distinct; a feature whose group has no pg row produces no link."""
     from qpx.converters.maxquant.converter import MaxQuantConverter
     from qpx.core.constants import FEATURE, PG
 
@@ -596,21 +596,21 @@ def test_feature_pg_ids_roundtrip_shared_leader_and_null(tmp_path):
         structures=[FEATURE, PG],
     )
 
-    feat, pg = read_feature_pg(out / "mq.feature.parquet", out / "mq.pg.parquet")
-    assert_pg_ids_join_valid(feat, pg)
+    with open_converted(out, prefix="mq") as ds:
+        feat, pg, link = assert_softlink_valid(ds)
 
-    pg_id_by_membership = {tuple(sorted(accs)): pg_id for pg_id, accs, *_ in pg}
-    ids_by_seq = {seq: list(pg_ids) if pg_ids else [] for seq, _run, _accs, pg_ids in feat}
+    pg_id_by_membership = {tuple(sorted(memb)): pg_id for pg_id, memb, *_ in pg}
+    ids_by_seq = pg_ids_by_sequence(feat, link)
     assert ids_by_seq["PEPTIDEA"] == [pg_id_by_membership[("P1", "P2")]]
     assert ids_by_seq["PEPTIDEB"] == [pg_id_by_membership[("P1", "P3")]]
     assert set(ids_by_seq["PEPTIDEA"]).isdisjoint(ids_by_seq["PEPTIDEB"])
-    assert ids_by_seq["PEPTIDEC"] == []  # group P9 absent from pg -> null pg_ids
+    assert ids_by_seq["PEPTIDEC"] == []  # group P9 absent from pg -> no link
 
 
 @pytest.mark.integration
-def test_feature_pg_ids_roundtrip_real_full_dataset(tmp_path_factory):
-    """Real MaxQuant example (maxquant_full): every populated feature.pg_ids joins
-    to a real pg row with matching membership + run (bigbio/qpx#266)."""
+def test_feature_pg_softlink_real_full_dataset(tmp_path_factory):
+    """Real MaxQuant example (maxquant_full): the computed softlink links features
+    to real pg rows with matching membership + run + carried label (bigbio/qpx#269)."""
     from qpx.converters.maxquant.converter import MaxQuantConverter
     from qpx.core.constants import FEATURE, PG
 
@@ -630,6 +630,6 @@ def test_feature_pg_ids_roundtrip_real_full_dataset(tmp_path_factory):
         structures=[FEATURE, PG],
     )
 
-    feat, pg = read_feature_pg(out / "mq.feature.parquet", out / "mq.pg.parquet")
-    assert_pg_ids_join_valid(feat, pg)
-    assert any(pg_ids for *_, pg_ids in feat), "expected at least some populated feature.pg_ids"
+    with open_converted(out, prefix="mq") as ds:
+        _feat, _pg, link = assert_softlink_valid(ds)
+    assert link, "expected at least some computed feature->pg softlink edges"

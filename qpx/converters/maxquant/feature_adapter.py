@@ -31,7 +31,6 @@ from qpx.converters.maxquant.constants import (
     TMT_LABEL_TO_MQ_COL,
     to_proforma,
 )
-from qpx.converters.pg_linking import pg_ids_for_feature
 from qpx.converters.ptm import from_proforma
 from qpx.converters.utils import mq_flag_to_bool, safe_float, strip_uniprot_prefix
 from qpx.core.sql import sql_build, validate_identifier
@@ -76,8 +75,6 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
             compression=compression,
         )
         self._warned_tmt_channels: set[str] = set()
-        # feature->pg lookup (bigbio/qpx#266); set per-run in convert().
-        self._pg_id_lookup: dict | None = None
 
     def convert(
         self,
@@ -88,7 +85,6 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         chunksize: int = 500_000,
         creator: str = "maxquant",
         fixed_mod_only: bool = False,
-        pg_id_lookup: Optional[dict] = None,
     ) -> None:
         """Run the evidence.txt -> feature.parquet conversion.
 
@@ -100,14 +96,7 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
                 populating ``pg_global_qvalue`` and gene names on features.
             chunksize: Rows per batch.
             creator: Creator tag in Parquet metadata.
-            pg_id_lookup: Optional feature->pg lookup (bigbio/qpx#266) built by
-                the pg adapter — ``(canonical membership, run) -> [pg_id]`` — used
-                to stamp ``feature.pg_ids``. None when no pg view was produced, in
-                which case ``pg_ids`` stays null (ids are never fabricated).
         """
-        # feature->pg cross-reference lookup consumed by _transform_row.
-        self._pg_id_lookup = pg_id_lookup
-
         # Track which dropped-TMT-channel warnings have already been emitted so
         # the message is logged once, not once per batch.
         self._warned_tmt_channels.clear()
@@ -502,11 +491,6 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
             anchor_protein = pg_acc_list[0]
         pg_accessions = [{"accession": acc, "start": None, "end": None, "pre": None, "post": None} for acc in pg_acc_list] or None
 
-        # feature->pg cross-reference (bigbio/qpx#266): the pg row(s) whose
-        # membership equals this feature's group and whose run contains this run.
-        # Null when no pg view was produced or the group has no pg row.
-        pg_ids = pg_ids_for_feature(self._pg_id_lookup, pg_accessions, run_file_name) if self._pg_id_lookup else None
-
         # Unique peptide indicator
         unique = len(pg_acc_list) <= 1
 
@@ -577,7 +561,6 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
             "intensities": intensities or None,
             "additional_intensities": additional_intensities,
             "pg_accessions": pg_accessions,
-            "pg_ids": pg_ids,
             "anchor_protein": anchor_protein,
             "unique": unique,
             "pg_global_qvalue": pg_qvalue,

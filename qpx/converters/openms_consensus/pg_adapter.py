@@ -30,7 +30,6 @@ from qpx.converters.openms_consensus.feature_adapter import (
     to_proforma,
 )
 from qpx.converters.openms_consensus.psm_adapter import _run_resolver
-from qpx.converters.pg_linking import derive_pg_id
 
 _GENE_RE = re.compile(r"GN=([^\s]+)")
 
@@ -289,12 +288,11 @@ def consensus_protein_groups_to_records(
 def pg_units_and_labels(map_info, sdrf_path) -> tuple[set[tuple[str, ...]], list[str]]:
     """Return the ``(grouped_runs units, labels)`` a pg build spans for this map.
 
-    Shared by :func:`build_pg_records` (which emits one row per (group, unit,
-    label)) and :func:`build_feature_pg_linker` (which derives the pg_id of each
-    such row) so the two never drift on how runs are grouped into quantification
-    units or which labels exist. A unit is the set of raw files aggregated
-    together (SDRF fractions grouped; else all runs as one unit); labels are the
-    isobaric channels or ``LFQ``.
+    Used by :func:`build_pg_records` (which emits one row per (group, unit,
+    label)) to decide how runs are grouped into quantification units and which
+    labels exist. A unit is the set of raw files aggregated together (SDRF
+    fractions grouped; else all runs as one unit); labels are the isobaric
+    channels or ``LFQ``.
     """
     all_runs = sorted({run for run, _ in map_info.values()})
     # grouped_runs unit per run, from the SDRF (fractions grouped); else one unit.
@@ -302,38 +300,6 @@ def pg_units_and_labels(map_info, sdrf_path) -> tuple[set[tuple[str, ...]], list
     units = {tuple(v) for v in run_to_grouped.values()} if run_to_grouped else {tuple(all_runs)}
     labels = sorted({label for _, label in map_info.values()})
     return units, labels
-
-
-def build_feature_pg_linker(map_info, sdrf_path):
-    """Return ``pg_ids_for(group, run) -> list[int] | None`` for feature.pg_ids.
-
-    A feature (one run, one protein group ``group`` = its full pg_accessions
-    membership) maps to the pg row(s) whose ``pg_accessions`` equals that
-    membership AND whose ``grouped_runs`` unit contains the feature's run — one
-    row per label (so a TMT feature references one pg_id per channel). The pg_id
-    is derived from the pg identity composite ``[pg_accessions, grouped_runs,
-    label]`` with the SAME ``derive_id`` + order-independent hashing the PgWriter
-    uses, so the returned ids are byte-identical to the ids stamped on the pg
-    rows (bigbio/qpx#266). ``build_pg_records`` always emits every (group, unit,
-    label) row, and a feature's run is always a member of its group's unit, so
-    every id returned here references a pg row that is actually written.
-
-    Returns ``None`` for a feature with no protein group (``group`` falsy) or a
-    run outside every unit — those features get null pg_ids (no fabricated ids).
-    """
-    units, labels = pg_units_and_labels(map_info, sdrf_path)
-    run_to_unit: dict[str, list[str]] = {run: list(unit) for unit in units for run in unit}
-
-    def pg_ids_for(group, run):
-        if not group:
-            return None
-        unit = run_to_unit.get(run)
-        if unit is None:
-            return None
-        # One pg_id per label (the shared linker's byte-identical derivation).
-        return [derive_pg_id(group, unit, label) for label in labels]
-
-    return pg_ids_for
 
 
 def build_pg_records(cm, map_info, m: _ProteinMaps, pep_intensity: dict, sdrf_path, top: int) -> list[dict]:

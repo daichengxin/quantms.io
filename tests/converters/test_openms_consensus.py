@@ -792,110 +792,76 @@ _MULTIRUN_CONSENSUSXML = """<?xml version="1.0" encoding="ISO-8859-1"?>
 """
 
 
-def _read_feature_pg(written):
-    """Read back (feature rows, pg rows) for the feature.pg_ids round-trip checks.
-
-    feature rows: (sequence, run_file_name, [pg_accessions...], [pg_ids...]); pg rows:
-    (pg_id, [pg_accessions...], [grouped_runs...], label).
-    """
-    con = duckdb.connect()
-    feat = con.execute(
-        "SELECT sequence, run_file_name, list_transform(pg_accessions, x -> x.accession), pg_ids FROM read_parquet($1)",
-        [str(written["feature"])],
-    ).fetchall()
-    pg = con.execute(
-        "SELECT pg_id, pg_accessions, grouped_runs, label FROM read_parquet($1)",
-        [str(written["pg"])],
-    ).fetchall()
-    con.close()
-    return feat, pg
-
-
-def _assert_pg_ids_join_valid(feat, pg):
-    """Every populated feature.pg_ids id references a real pg row whose pg_accessions
-    equals the feature's pg_accessions and whose grouped_runs contains the feature's run.
-    """
-    pg_by_id = {pg_id: (list(accs), list(grouped_runs)) for pg_id, accs, grouped_runs, _ in pg}
-    assert len(pg_by_id) == len(pg), "pg_id values are not unique across pg rows"
-    for _seq, run, accs, pg_ids in feat:
-        if not pg_ids:
-            continue
-        feat_accs = list(accs) if accs is not None else None
-        for pg_id in pg_ids:
-            assert pg_id in pg_by_id, f"feature.pg_ids references unknown pg_id {pg_id}"
-            row_accs, row_runs = pg_by_id[pg_id]
-            assert row_accs == feat_accs, f"pg row {pg_id} accessions {row_accs} != feature {feat_accs}"
-            assert run in row_runs, f"feature run {run!r} not in pg row {pg_id} grouped_runs {row_runs}"
+from tests.converters.pg_ids_roundtrip import assert_softlink_valid, open_converted, pg_ids_by_sequence  # noqa: E402
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-def test_feature_pg_ids_roundtrip_tmt_multilabel(tmp_path, streaming):
-    """Full conversion round-trip: every feature.pg_ids id is a real pg.pg_id with the
-    matching pg_accessions + run membership, and a TMT feature references one pg_id per
-    channel/label (bigbio/qpx#266 Phase 2)."""
+def test_feature_pg_softlink_tmt_multilabel(tmp_path, streaming):
+    """The computed softlink links each feature to real pg rows with matching
+    pg_accessions + run + a carried label; a TMT feature (two channels) links to
+    one pg row per channel/label, never over-linking (bigbio/qpx#269)."""
     cx = tmp_path / "tmt.consensusXML"
     _write_tmt_consensusxml(cx)
     out = tmp_path / ("stream" if streaming else "mem")
-    written = OpenMSConsensusConverter().convert(
-        str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming
-    )
-    feat, pg = _read_feature_pg(written)
-    _assert_pg_ids_join_valid(feat, pg)
+    OpenMSConsensusConverter().convert(str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming)
+    with open_converted(out, prefix="t") as ds:
+        feat, pg, link = assert_softlink_valid(ds)
 
     assert len(feat) == 1  # one run, channels folded into intensities
-    _seq, _run, _accs, pg_ids = feat[0]
-    # TMT126 + TMT127 -> one pg row per channel, so the feature references BOTH pg_ids.
-    assert pg_ids is not None and len(pg_ids) == 2
-    assert set(pg_ids) == {pg_id for pg_id, *_ in pg}
-    assert {label for *_, label in pg} == {"TMT126", "TMT127"}
+    fid = feat[0][0]
+    linked = {(pid, label) for f, pid, label in link if f == fid}
+    # TMT126 + TMT127 -> one pg row per channel, so the feature links to BOTH.
+    assert len(linked) == 2
+    assert {label for _pid, label in linked} == {"TMT126", "TMT127"}
+    assert {pid for pid, _label in linked} == {pg_id for pg_id, *_ in pg}
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-def test_feature_pg_ids_shared_leader_distinct(tmp_path, streaming):
-    """Shared-leader ([A,B] vs [A,C]): the two features get pg_ids pointing at the
-    CORRECT distinct pg rows (not each other's) (bigbio/qpx#266 Phase 2)."""
+def test_feature_pg_softlink_shared_leader_distinct(tmp_path, streaming):
+    """Shared-leader ([A,B] vs [A,C]): the two features link to the CORRECT distinct
+    pg rows (not each other's) — membership match is set-wise (bigbio/qpx#269)."""
     cx = tmp_path / "shared_leader.consensusXML"
     cx.write_text(_SHARED_LEADER_CONSENSUSXML)
     out = tmp_path / ("stream" if streaming else "mem")
-    written = OpenMSConsensusConverter().convert(
-        str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming
-    )
-    feat, pg = _read_feature_pg(written)
-    _assert_pg_ids_join_valid(feat, pg)
+    OpenMSConsensusConverter().convert(str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming)
+    with open_converted(out, prefix="t") as ds:
+        feat, pg, link = assert_softlink_valid(ds)
 
-    pg_id_by_membership = {tuple(accs): pg_id for pg_id, accs, *_ in pg}
-    ids_by_seq = {seq: list(pg_ids) for seq, _run, _accs, pg_ids in feat}
+    pg_id_by_membership = {tuple(sorted(memb)): pg_id for pg_id, memb, *_ in pg}
+    ids_by_seq = pg_ids_by_sequence(feat, link)
     assert ids_by_seq["PEPTIDEK"] == [pg_id_by_membership[("A", "B")]]
     assert ids_by_seq["ELVISLIVK"] == [pg_id_by_membership[("A", "C")]]
-    # The two features do NOT reference each other's pg row.
+    # The two features do NOT link to each other's pg row.
     assert set(ids_by_seq["PEPTIDEK"]).isdisjoint(ids_by_seq["ELVISLIVK"])
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-def test_feature_pg_ids_multirun_and_null(tmp_path, streaming):
+def test_feature_pg_softlink_multirun_and_no_pg_row(tmp_path, streaming):
     """Multi-run grouped_runs: a feature's run is a member of a multi-run grouped_runs
-    set, so both runs' features reference the same pg_id; and a feature whose group has
-    NO pg row (no protein evidence) gets null pg_ids (bigbio/qpx#266 Phase 2)."""
+    set, so both runs' features link to the same pg_id; and a feature whose group has
+    NO pg row (no protein evidence) produces no softlink edge (bigbio/qpx#269)."""
     cx = tmp_path / "multirun.consensusXML"
     cx.write_text(_MULTIRUN_CONSENSUSXML)
     out = tmp_path / ("stream" if streaming else "mem")
-    written = OpenMSConsensusConverter().convert(
-        str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming
-    )
-    feat, pg = _read_feature_pg(written)
-    _assert_pg_ids_join_valid(feat, pg)
+    OpenMSConsensusConverter().convert(str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming)
+    with open_converted(out, prefix="t") as ds:
+        feat, pg, link = assert_softlink_valid(ds)
 
     # One pg row: P99999 quantified over the two-run unit.
     assert len(pg) == 1
-    pg_id, _accs, grouped_runs, _label = pg[0]
+    pg_id, _memb, grouped_runs, _label = pg[0]
     assert sorted(grouped_runs) == ["run_01", "run_02"]  # multi-run grouped_runs
 
-    ids_by_key = {(seq, run): pg_ids for seq, run, _accs, pg_ids in feat}
-    # Both runs' PEPTIDEK features reference the SAME single multi-run pg row.
-    assert ids_by_key[("PEPTIDEK", "run_01")] == [pg_id]
-    assert ids_by_key[("PEPTIDEK", "run_02")] == [pg_id]
-    # The peptide with no protein evidence has no pg row -> null pg_ids (not fabricated).
-    assert ids_by_key[("NOPROTEINR", "run_01")] is None
+    # feature_id -> (sequence, run) so we can key the multi-run assertions.
+    fmeta = {fid: (seq, run) for fid, seq, run, _memb, _labels in feat}
+    ids_by_key: dict[tuple, set] = {}
+    for fid, pid, _label in link:
+        ids_by_key.setdefault(fmeta[fid], set()).add(pid)
+    # Both runs' PEPTIDEK features link to the SAME single multi-run pg row.
+    assert ids_by_key[("PEPTIDEK", "run_01")] == {pg_id}
+    assert ids_by_key[("PEPTIDEK", "run_02")] == {pg_id}
+    # The peptide with no protein evidence has no pg row -> no softlink edge.
+    assert ("NOPROTEINR", "run_01") not in ids_by_key
 
 
 def test_label_free_consensusxml_uses_lfq_labels(tmp_path):
