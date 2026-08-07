@@ -145,6 +145,18 @@ class DuckDBEngine:
             )
         )
 
+    def register_view(self, name: str, sql: str) -> None:
+        """Register ``sql`` as a named DuckDB view, without string DDL.
+
+        The query is turned into a relation via :meth:`connection.sql` and bound
+        to ``name`` through the relation API (``create_view(name, replace=True)``);
+        no ``CREATE VIEW`` text is constructed from ``sql``, so a fixed constant
+        query passed here is not a formatted-SQL construction. ``name`` is
+        validated as a table identifier before use.
+        """
+        view = validate_table(name)
+        self._conn.sql(sql).create_view(view, replace=True)
+
     def execute(self, sql: str, params=None):
         if params:
             return self._conn.execute(sql, params)
