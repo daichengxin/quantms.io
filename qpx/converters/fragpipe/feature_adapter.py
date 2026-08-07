@@ -12,7 +12,13 @@ from typing import Optional
 import pandas as pd
 
 from qpx.converters.base import BaseConverter, resolve_columns
+from qpx.converters.channel_labels import experiment_runs_from_sdrf
 from qpx.converters.fragpipe.constants import is_decoy_accession, to_modifications, to_proforma
+from qpx.converters.fragpipe.pg_adapter import (
+    load_experiment_annotation,
+    normalize_experiment_mapping,
+    normalize_run_name,
+)
 from qpx.converters.mappings import get_field_mappings
 from qpx.converters.utils import parse_uniprot_id, safe_float
 from qpx.core.sql import escape_path, sql_build
@@ -80,6 +86,8 @@ class FragPipeFeatureAdapter(BaseConverter):
         output_path: str,
         sdrf_path: Optional[str] = None,
         psm_path: Optional[str] = None,
+        experiment_to_runs: dict[str, list[str]] | None = None,
+        experiment_annotation_path: Optional[str] = None,
         chunksize: int = 500_000,
         creator: str = "fragpipe",
     ) -> None:
@@ -88,9 +96,13 @@ class FragPipeFeatureAdapter(BaseConverter):
         Args:
             feature_path: Path to FragPipe ``combined_ion.tsv``.
             output_path: Destination Parquet path.
-            sdrf_path: Optional SDRF file (not used in current impl).
+            sdrf_path: Optional SDRF fallback for mapping experiments to raw runs.
             psm_path: Optional path to FragPipe ``psm.tsv`` for PSM-level lookups
                 (mass error, PEP, scan, is_decoy).
+            experiment_to_runs: Optional explicit mapping from each experiment
+                intensity prefix to its member raw runs.
+            experiment_annotation_path: Optional FragPipe
+                ``experiment_annotation.tsv`` providing that mapping.
             chunksize: Rows per batch.
             creator: Creator tag in Parquet metadata.
         """
@@ -113,6 +125,13 @@ class FragPipeFeatureAdapter(BaseConverter):
 
         # Step 4: Build PSM lookup if psm.tsv provided
         psm_lookup = self._build_psm_lookup(psm_path) if psm_path else {}
+        experiment_psm_sources = self._resolve_experiment_psm_sources(
+            experiments,
+            experiment_to_runs,
+            experiment_annotation_path,
+            sdrf_path,
+            warn_on_ambiguous=bool(psm_lookup),
+        )
 
         # Step 5: Stream and transform
         with FeatureWriter(
@@ -123,7 +142,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         ) as writer:
             for batch in self._query_batched("SELECT * FROM fragpipe_features", chunksize):
                 df = batch.to_pandas()
-                records = self._transform_batch(df, experiments, psm_lookup)
+                records = self._transform_batch(df, experiments, psm_lookup, experiment_psm_sources)
                 if records:
                     self._track_scores(records)
                     writer.write_batch(records)
@@ -181,19 +200,45 @@ class FragPipeFeatureAdapter(BaseConverter):
 
         return sorted(experiments)
 
+    def _resolve_experiment_psm_sources(
+        self,
+        experiments: list[str],
+        experiment_to_runs: dict[str, list[str]] | None,
+        experiment_annotation_path: str | None,
+        sdrf_path: str | None,
+        *,
+        warn_on_ambiguous: bool,
+    ) -> dict[str, str]:
+        """Resolve experiments that can be enriched from exactly one raw run."""
+        if experiment_to_runs is not None and experiment_annotation_path is not None:
+            raise ValueError("Provide either experiment_to_runs or experiment_annotation_path, not both")
+        if experiment_annotation_path is not None:
+            experiment_runs = load_experiment_annotation(experiment_annotation_path)
+        else:
+            experiment_runs = normalize_experiment_mapping(experiment_to_runs or {})
+        if not experiment_runs:
+            experiment_runs = experiment_runs_from_sdrf(sdrf_path) or {}
+
+        sources: dict[str, str] = {}
+        ambiguous: list[str] = []
+        for experiment in experiments:
+            runs = experiment_runs.get(experiment)
+            if runs is None:
+                sources[experiment] = normalize_run_name(experiment)
+            elif len(runs) == 1:
+                sources[experiment] = normalize_run_name(runs[0])
+            else:
+                ambiguous.append(experiment)
+        if warn_on_ambiguous and ambiguous:
+            self.logger.warning(
+                "Skipping PSM enrichment for multi-run FragPipe experiment(s): %s",
+                ", ".join(ambiguous),
+            )
+        return sources
+
     # ------------------------------------------------------------------
     # PSM lookup
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _add_unambiguous_psm_fallbacks(
-        lookup: dict[tuple, dict],
-        candidates: dict[tuple, dict[str, dict]],
-    ) -> None:
-        """Register run-agnostic keys that resolve to one source file."""
-        for fallback_key, by_source in candidates.items():
-            if len(by_source) == 1:
-                lookup[fallback_key] = next(iter(by_source.values()))
 
     def _build_psm_lookup(self, psm_path: str) -> dict[tuple, dict]:
         """Build a lookup for feature-level PSM enrichment.
@@ -201,19 +246,13 @@ class FragPipeFeatureAdapter(BaseConverter):
         Loads FragPipe ``psm.tsv`` into a temporary DuckDB table and extracts the
         first-occurrence PSM providing mass error, PEP, scan, and decoy flag.
 
-        Each PSM is registered under an exact key, plus a run-agnostic key only
-        when that precursor occurs in exactly one source file:
-
-        * ``(source_file, peptidoform, charge)`` — exact, used when the FragPipe
-          experiment name equals the raw-file stem (non-fractionated case);
-        * ``(peptidoform, charge)`` — fallback when experiment != raw file and
-          the source PSM is unambiguous. A precursor present in multiple raw
-          files has no safe experiment-to-run match here and is not enriched.
-
-        The 2- and 3-element tuples never collide, so a single dict holds both.
+        Each PSM is registered under its exact
+        ``(source_file, peptidoform, charge)`` key. The experiment-to-source
+        mapping is resolved separately from FragPipe metadata; no run-agnostic
+        precursor fallback is used because it can attach one run's PSM to every
+        experiment in a combined results table.
         """
         lookup: dict[tuple, dict] = {}
-        fallback_candidates: dict[tuple, dict[str, dict]] = {}
 
         try:
             self._conn.execute(
@@ -292,7 +331,7 @@ class FragPipeFeatureAdapter(BaseConverter):
             ) in rows:
                 # Parse source file and scan from Spectrum column
                 tokens = str(spectrum).split(".") if spectrum else []
-                source_file = tokens[0] if tokens else ""
+                source_file = normalize_run_name(tokens[0]) if tokens else ""
                 scan_number = 0
                 if len(tokens) >= 2:
                     try:
@@ -306,7 +345,6 @@ class FragPipeFeatureAdapter(BaseConverter):
                 charge_str = str(charge) if charge is not None else "0"
 
                 key = (source_file, peptidoform, charge_str)
-                fallback_key = (peptidoform, charge_str)
                 if key not in lookup:
                     # PEP = 1 - PeptideProphet Probability
                     pep = None
@@ -325,9 +363,6 @@ class FragPipeFeatureAdapter(BaseConverter):
                         "missed_cleavages": (int(missed_cleavages_val) if missed_cleavages_val is not None else None),
                     }
                     lookup[key] = info
-                    fallback_candidates.setdefault(fallback_key, {}).setdefault(source_file, info)
-
-            self._add_unambiguous_psm_fallbacks(lookup, fallback_candidates)
 
             # Clean up temporary table
             self._conn.execute("DROP TABLE IF EXISTS _fp_psm_lookup")
@@ -351,6 +386,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         df: pd.DataFrame,
         experiments: list[str],
         psm_lookup: dict[tuple, dict] | None = None,
+        experiment_psm_sources: dict[str, str] | None = None,
     ) -> list[dict]:
         records: list[dict] = []
         skipped = 0
@@ -360,7 +396,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         for i in range(n_rows):
             try:
                 row = {col: vals[i] for col, vals in col_arrays.items()}
-                recs = self._transform_row(row, experiments, psm_lookup)
+                recs = self._transform_row(row, experiments, psm_lookup, experiment_psm_sources)
                 records.extend(recs)
             except Exception as e:
                 skipped += 1
@@ -380,6 +416,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         row,
         experiments: list[str],
         psm_lookup: dict[tuple, dict] | None = None,
+        experiment_psm_sources: dict[str, str] | None = None,
     ) -> list[dict]:
         """Transform a single row into one or more feature records.
 
@@ -426,14 +463,14 @@ class FragPipeFeatureAdapter(BaseConverter):
 
             intensities = [{"label": "LFQ", "intensity": float(intensity_val)}]
 
-            # PSM lookup: enrich with mass error, PEP, scan, decoy flag. Try the
-            # exact (experiment==raw-file) key first, then the run-agnostic
-            # fallback only when the lookup found one unambiguous source file.
+            # PSM lookup: enrich only through the exact raw source resolved for
+            # this experiment. Multi-run experiments intentionally have no
+            # source here because one combined Feature cannot represent one
+            # arbitrarily selected fraction's PSM.
             psm_info = {}
-            if psm_lookup:
-                psm_info = psm_lookup.get((experiment, peptidoform, str(charge)))
-                if not psm_info:
-                    psm_info = psm_lookup.get((peptidoform, str(charge)), {})
+            psm_source = (experiment_psm_sources or {}).get(experiment)
+            if psm_lookup and psm_source:
+                psm_info = psm_lookup.get((psm_source, peptidoform, str(charge)), {})
 
             _calc = psm_info.get("calculated_mz")
             _obs = psm_info.get("observed_mz")

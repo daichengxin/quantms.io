@@ -262,14 +262,21 @@ def _write_feature_inputs(tmp_path, *, experiment, spectrum_source, protein="sp|
     return ion, psm
 
 
-def test_feature_psm_enrichment_survives_experiment_raw_mismatch(tmp_path):
-    """#247 (H): the feature is keyed by *experiment* while the PSM is keyed by the
-    raw-file stem. When they differ (fractionated case) enrichment must still hit,
-    populating PEP, scan, mass error, and the decoy flag."""
-    ion, psm = _write_feature_inputs(tmp_path, experiment="sampleA", spectrum_source="run_01")
-    out = tmp_path / "feature.parquet"
-    with FragPipeFeatureAdapter() as adapter:
-        adapter.convert(feature_path=str(ion), output_path=str(out), psm_path=str(psm))
+def test_feature_psm_enrichment_uses_experiment_annotation(tmp_path):
+    """A one-run experiment resolves to the exact raw-file PSM through FragPipe metadata."""
+    from qpx.converters.fragpipe.converter import FragPipeConverter
+
+    ion, psm = _write_feature_inputs(tmp_path, experiment="mc38_p_1", spectrum_source="mc38_p1")
+    annotation = tmp_path / "experiment_annotation.tsv"
+    annotation.write_text("file\tsample\nD:\\data\\mc38_p1.mzML\tmc38_p_1\n")
+    output = tmp_path / "converted"
+    FragPipeConverter(output_directory=output).convert(
+        ion_file=ion,
+        psm_file=psm,
+        experiment_annotation_file=annotation,
+        output_prefix="fragpipe",
+    )
+    out = output / "fragpipe.feature.parquet"
     df = pq.read_table(str(out)).to_pandas()
     assert len(df) == 1
     rec = df.iloc[0]
@@ -288,12 +295,46 @@ def test_feature_psm_fallback_does_not_cross_multiple_raw_files(tmp_path):
 
     out = tmp_path / "ambiguous.feature.parquet"
     with FragPipeFeatureAdapter() as adapter:
-        adapter.convert(feature_path=str(ion), output_path=str(out), psm_path=str(psm))
+        adapter.convert(
+            feature_path=str(ion),
+            output_path=str(out),
+            psm_path=str(psm),
+            experiment_to_runs={"sampleA": ["run_01", "run_02"]},
+        )
 
     record = pq.read_table(out).to_pylist()[0]
     assert record["scan"] == []
     assert record["posterior_error_probability"] is None
     assert record["mass_error_ppm"] is None
+
+
+def test_feature_psm_enrichment_does_not_cross_experiments(tmp_path):
+    """One run's PSM must not enrich another experiment with the same precursor."""
+    ion = tmp_path / "combined_ion.tsv"
+    ion.write_text(
+        "Peptide Sequence\tModified Sequence\tProtein\tGene\tM/Z\tCharge\tAssigned Modifications\t"
+        "sampleA Intensity\tsampleB Intensity\n"
+        "PEPTIDEK\tPEPTIDEK\tsp|P12345|PROT_HUMAN\tGENE1\t500.0\t2\t\t1000\t2000\n"
+    )
+    psm = tmp_path / "psm.tsv"
+    psm.write_text(
+        "Spectrum\tPeptide\tCharge\tAssigned Modifications\t"
+        "Calibrated Observed M/Z\tCalculated M/Z\tPeptideProphet Probability\tProtein\n"
+        "run_A.00500.00500.2\tPEPTIDEK\t2\t\t500.001\t500.000\t0.99\tsp|P12345|PROT_HUMAN\n"
+    )
+    out = tmp_path / "feature.parquet"
+    with FragPipeFeatureAdapter() as adapter:
+        adapter.convert(
+            feature_path=str(ion),
+            output_path=str(out),
+            psm_path=str(psm),
+            experiment_to_runs={"sampleA": ["run_A"], "sampleB": ["run_B"]},
+        )
+
+    rows = {row["run_file_name"]: row for row in pq.read_table(out).to_pylist()}
+    assert rows["sampleA"]["scan"] == [500]
+    assert rows["sampleB"]["scan"] == []
+    assert rows["sampleB"]["posterior_error_probability"] is None
 
 
 def test_feature_decoy_from_raw_accession_without_psm(tmp_path):

@@ -71,6 +71,8 @@ class FragPipeConverter(BaseOrchestrator):
                     output_path=str(out / f"{prefix}.feature.parquet"),
                     sdrf_path=str(sdrf_file) if sdrf_file else None,
                     psm_path=str(psm_file) if psm_file else None,
+                    experiment_to_runs=experiment_to_runs,
+                    experiment_annotation_path=(str(experiment_annotation_file) if experiment_annotation_file else None),
                     chunksize=batch_size,
                 )
                 ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=FEATURE))
