@@ -56,20 +56,22 @@ class CdapPgAdapter(CdapBaseAdapter):
         filed shared peptides under whichever accession happened to be listed
         first. This mirrors the pg-identity fix (bigbio/qpx#240) that keys
         ``pg_id`` on ``pg_accessions``; ``anchor_protein`` stays a descriptive
-        leader carried through with ``any_value``.
+        leader selected deterministically.
         """
         return (
             "WITH keyed AS (\n"
             "    SELECT\n"
             "        *,\n"
             "        COALESCE(\n"
-            "            array_to_string(list_sort(list_transform(pg_accessions, x -> x.accession)), ';'),\n"
+            "            array_to_string(\n"
+            "                list_sort(list_distinct(list_transform(pg_accessions, x -> x.accession))), ';'\n"
+            "            ),\n"
             "            anchor_protein\n"
             "        ) AS pg_membership_key\n"
             "    FROM features\n"
             ")\n"
             "SELECT\n"
-            "    any_value(anchor_protein) AS anchor_protein,\n"
+            "    min(anchor_protein) AS anchor_protein,\n"
             "    run_file_name,\n"
             "    any_value(is_decoy) AS any_decoy,\n"
             "    bool_and(is_decoy) AS all_decoy,\n"

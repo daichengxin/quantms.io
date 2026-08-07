@@ -245,6 +245,15 @@ def _normalize_peptidoform(peptidoform: str) -> str:
     return result
 
 
+def _modification_site(seq_pos: int, last_aa: str | None, cterm: bool, sequence_length: int) -> tuple[int, str | None]:
+    """Return the QPX position and residue for a ProForma modification."""
+    if seq_pos == 0:
+        return 0, None
+    if cterm:
+        return sequence_length + 1, None
+    return seq_pos, last_aa
+
+
 def _from_proforma_impl(
     peptidoform: str,
     sequence: str,
@@ -264,6 +273,7 @@ def _from_proforma_impl(
     seq_pos = 0
     n = len(peptidoform)
     last_aa = None
+    cterm = False
 
     i = 0
     while i < n:
@@ -274,14 +284,7 @@ def _from_proforma_impl(
                 return peptidoform, None  # Malformed ProForma
             mod_str = peptidoform[i + 1 : end]
 
-            if seq_pos == 0:
-                # N-term
-                position = 0
-                aa = None
-            else:
-                # 1-based position
-                position = seq_pos
-                aa = last_aa
+            position, aa = _modification_site(seq_pos, last_aa, cterm, len(sequence))
 
             name = mod_str
             accession = None
@@ -314,8 +317,10 @@ def _from_proforma_impl(
 
             i = end + 1
         elif peptidoform[i] == "-":
+            cterm = seq_pos > 0
             i += 1
         else:
+            cterm = False
             last_aa = peptidoform[i]
             seq_pos += 1
             i += 1
@@ -340,7 +345,7 @@ def from_proforma(
     """Parse modifications from a ProForma-style peptidoform string.
 
     Handles: ``M[UNIMOD:35]PEPTIDEK``, ``M[+15.9949]PEPTIDEK``,
-    ``[UNIMOD:1]-PEPTIDEK``
+    ``[UNIMOD:1]-PEPTIDEK``, ``PEPTIDEK-[UNIMOD:2]``
 
     Uses an LRU cache for the common case (no *meta*, no *site_scores*).
     Callers must **not** mutate the returned list or its nested dicts, as

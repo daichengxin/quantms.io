@@ -30,7 +30,7 @@ Define these once; the rest of the spec uses them consistently.
 | **quantification unit** | The thing a protein quantity is measured *over*: one `grouped_runs` set. A protein abundance exists per quantification unit, **not** per single raw file, because a protein quantity only emerges after aggregating its peptides across the sample's fractions. | `pg` (one row per `(pg_accessions, grouped_runs, label)`) |
 | **peptidoform** | Peptide sequence + modifications in ProForma notation. The identity thread linking PSM ↔ feature ↔ pepmap. | `psm`, `feature`, `pepmap` |
 | **entity ID** | Mandatory opaque primary key for a PSM, Feature, or protein-group row: `psm_id`, `feature_id`, or `pg_id`. It may be supplied by the producer or derived by QPX from the file's footer-declared `identity_composite`. | `psm`, `feature`, `pg` |
-| **anchor_protein** | The representative (leading) protein of a protein group. On `feature` it is an annotation used for semantic protein mapping; an explicit Feature-to-PG link uses `feature.pg_ids[]` → `pg.pg_id`. On `pg` it participates in the default identity composite. | `feature`, `pg` |
+| **anchor_protein** | The representative (leading) protein of a protein group. On `feature` it is an annotation used for semantic protein mapping; an explicit Feature-to-PG link uses `feature.pg_ids[]` → `pg.pg_id`. On `pg` it is descriptive; full `pg_accessions` membership participates in the default identity composite. | `feature`, `pg` |
 | **intensities** | Primary/raw abundance measurements. On **feature** a `list<{label, intensity}>` (one element per channel). On **pg** it is **flattened** to a scalar `label` + `intensity`, one row per label. | `feature.intensities`, `pg.label`/`pg.intensity` |
 | **additional_intensities** | Tool-computed derived values (normalized, LFQ, iBAQ, MaxLFQ) read from upstream output — never computed by QPX. | `feature`, `pg` |
 
@@ -134,6 +134,7 @@ erDiagram
     }
     PG {
         int64 pg_id PK
+        list pg_accessions
         string anchor_protein
         list grouped_runs
         string label

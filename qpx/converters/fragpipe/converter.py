@@ -88,6 +88,7 @@ class FragPipeConverter(BaseOrchestrator):
                     chunksize=batch_size,
                     experiment_to_runs=experiment_to_runs,
                     experiment_annotation_path=(str(experiment_annotation_file) if experiment_annotation_file else None),
+                    sdrf_path=str(sdrf_file) if sdrf_file else None,
                 )
                 ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=PG))
                 self._resolved_mappings_by_view[PG] = adapter.get_resolved_columns()

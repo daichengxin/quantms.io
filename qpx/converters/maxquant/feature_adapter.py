@@ -61,6 +61,21 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
             )
     """
 
+    def __init__(
+        self,
+        duckdb_memory: str = "16GB",
+        duckdb_threads: int = 4,
+        conn: duckdb.DuckDBPyConnection | None = None,
+        compression: str = "zstd",
+    ):
+        super().__init__(
+            duckdb_memory=duckdb_memory,
+            duckdb_threads=duckdb_threads,
+            conn=conn,
+            compression=compression,
+        )
+        self._warned_tmt_channels: set[str] = set()
+
     def convert(
         self,
         evidence_path: str,
@@ -84,7 +99,7 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         """
         # Track which dropped-TMT-channel warnings have already been emitted so
         # the message is logged once, not once per batch.
-        self._warned_tmt_channels: set = set()
+        self._warned_tmt_channels.clear()
 
         # Step 1: Load evidence into DuckDB
         self._load_evidence(evidence_path)
@@ -343,8 +358,6 @@ class MaxQuantFeatureAdapter(MaxQuantBaseAdapter):
         A ``Reporter intensity N`` column missing for a declared channel means
         that channel is silently dropped from every feature; surface it once.
         """
-        if getattr(self, "_warned_tmt_channels", None) is None:  # pragma: no cover - defensive
-            self._warned_tmt_channels = set()
         exp_type = re.sub(r"\d+", "", experiment_type or "").upper()
         if exp_type not in ("TMT", "ITRAQ") or not tmt_channels:
             return

@@ -185,23 +185,35 @@ class FragPipeFeatureAdapter(BaseConverter):
     # PSM lookup
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _add_unambiguous_psm_fallbacks(
+        lookup: dict[tuple, dict],
+        candidates: dict[tuple, dict[str, dict]],
+    ) -> None:
+        """Register run-agnostic keys that resolve to one source file."""
+        for fallback_key, by_source in candidates.items():
+            if len(by_source) == 1:
+                lookup[fallback_key] = next(iter(by_source.values()))
+
     def _build_psm_lookup(self, psm_path: str) -> dict[tuple, dict]:
         """Build a lookup for feature-level PSM enrichment.
 
         Loads FragPipe ``psm.tsv`` into a temporary DuckDB table and extracts the
         first-occurrence PSM providing mass error, PEP, scan, and decoy flag.
 
-        Each PSM is registered under two keys so that the feature side (which is
-        keyed by *experiment*, not raw file) can always resolve a match:
+        Each PSM is registered under an exact key, plus a run-agnostic key only
+        when that precursor occurs in exactly one source file:
 
         * ``(source_file, peptidoform, charge)`` — exact, used when the FragPipe
           experiment name equals the raw-file stem (non-fractionated case);
-        * ``(peptidoform, charge)`` — fallback, used when experiment != raw file
-          (fractionated runs), where the 3-tuple would otherwise always miss.
+        * ``(peptidoform, charge)`` — fallback when experiment != raw file and
+          the source PSM is unambiguous. A precursor present in multiple raw
+          files has no safe experiment-to-run match here and is not enriched.
 
         The 2- and 3-element tuples never collide, so a single dict holds both.
         """
         lookup: dict[tuple, dict] = {}
+        fallback_candidates: dict[tuple, dict[str, dict]] = {}
 
         try:
             self._conn.execute(
@@ -313,10 +325,9 @@ class FragPipeFeatureAdapter(BaseConverter):
                         "missed_cleavages": (int(missed_cleavages_val) if missed_cleavages_val is not None else None),
                     }
                     lookup[key] = info
-                    # Register the run-agnostic fallback (first occurrence wins) so
-                    # the experiment-keyed feature query still resolves when the
-                    # experiment name differs from the raw-file stem.
-                    lookup.setdefault(fallback_key, info)
+                    fallback_candidates.setdefault(fallback_key, {}).setdefault(source_file, info)
+
+            self._add_unambiguous_psm_fallbacks(lookup, fallback_candidates)
 
             # Clean up temporary table
             self._conn.execute("DROP TABLE IF EXISTS _fp_psm_lookup")
@@ -417,7 +428,7 @@ class FragPipeFeatureAdapter(BaseConverter):
 
             # PSM lookup: enrich with mass error, PEP, scan, decoy flag. Try the
             # exact (experiment==raw-file) key first, then the run-agnostic
-            # (peptidoform, charge) fallback so fractionated experiments still hit.
+            # fallback only when the lookup found one unambiguous source file.
             psm_info = {}
             if psm_lookup:
                 psm_info = psm_lookup.get((experiment, peptidoform, str(charge)))

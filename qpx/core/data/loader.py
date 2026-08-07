@@ -41,7 +41,7 @@ def _load_custom_types() -> dict[str, pa.DataType]:
     if _custom_types is not None:
         return _custom_types
 
-    with open(SPECS_DIR / "types.yaml") as f:
+    with open(SPECS_DIR / "types.yaml", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     _custom_types = {}
@@ -118,7 +118,7 @@ def load_schema(name: str) -> ViewSchema:
     """
     custom_types = _load_custom_types()
 
-    with open(SPECS_DIR / f"{name}.yaml") as f:
+    with open(SPECS_DIR / f"{name}.yaml", encoding="utf-8") as f:
         spec = yaml.safe_load(f)
 
     fields: dict[str, FieldDef] = {}

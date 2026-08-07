@@ -136,12 +136,12 @@ def _canonicalize_primary_key_column(column: pa.ChunkedArray) -> pa.Array | pa.C
     return pa.array(values, type=pa.string())
 
 
-def _pg_referential_issues(
-    table: pa.Table,
+def _query_pg_referential_issues(
+    con,
     structure: str,
     severity: str,
 ) -> list[ValidationIssue]:
-    """Protein-group referential invariants, stated at the measurement level.
+    """Query protein-group referential invariants from ``pg_validate``.
 
     Both are intrinsic to the pg table — no run→sample resolution:
 
@@ -156,6 +156,65 @@ def _pg_referential_issues(
       groups that share a leading protein are not conflated into a false
       double-count. This is the join-free form of the double-count check.
     """
+    issues: list[ValidationIssue] = []
+    dup_lists = con.execute(
+        "SELECT COUNT(*) FROM pg_validate WHERE grouped_runs IS NOT NULL "
+        "AND length(grouped_runs) <> length(list_distinct(grouped_runs))"
+    ).fetchone()[0]
+    if dup_lists:
+        issues.append(
+            ValidationIssue(
+                structure=structure,
+                check="duplicate_grouped_run",
+                severity=severity,
+                column="grouped_runs",
+                message=f"{dup_lists} pg row(s) have duplicate raw files within grouped_runs (must be a set of distinct files)",
+            )
+        )
+    double = con.execute(
+        """
+        WITH exploded AS (
+            -- Deduplicate each row's own grouped_runs first (a within-row
+            -- duplicate is already reported by duplicate_grouped_run); this
+            -- way run_double_count measures only cross-row disjointness.
+            -- Key on the canonical (order-independent) group MEMBERSHIP, so
+            -- distinct groups sharing a leader are not conflated.
+            SELECT list_sort(list_distinct(pg_accessions)) AS members, label,
+                   UNNEST(list_distinct(grouped_runs)) AS run
+            FROM pg_validate
+        ),
+        repeated AS (
+            SELECT COUNT(*) AS c
+            FROM exploded
+            GROUP BY members, label, run
+            HAVING COUNT(*) > 1
+        )
+        SELECT COALESCE(SUM(c - 1), 0) FROM repeated
+        """
+    ).fetchone()[0]
+    if double:
+        issues.append(
+            ValidationIssue(
+                structure=structure,
+                check="run_double_count",
+                severity=severity,
+                column=None,
+                message=(
+                    f"{double} run occurrence(s) repeat across pg rows sharing the same "
+                    "(pg_accessions, label): grouped_runs sets must be disjoint or protein "
+                    "intensity is double-counted"
+                ),
+            )
+        )
+    return issues
+
+
+def _pg_referential_issues(
+    table: pa.Table,
+    structure: str,
+    severity: str,
+) -> list[ValidationIssue]:
+    """Validate PG referential invariants for an in-memory Arrow table."""
     names = set(table.schema.names)
     if not {"pg_accessions", "grouped_runs", "label"} <= names or len(table) == 0:
         return []
@@ -165,57 +224,26 @@ def _pg_referential_issues(
     con = duckdb.connect()
     try:
         con.register("pg_validate", table)
-        issues: list[ValidationIssue] = []
-        dup_lists = con.execute(
-            "SELECT COUNT(*) FROM pg_validate WHERE grouped_runs IS NOT NULL "
-            "AND length(grouped_runs) <> length(list_distinct(grouped_runs))"
-        ).fetchone()[0]
-        if dup_lists:
-            issues.append(
-                ValidationIssue(
-                    structure=structure,
-                    check="duplicate_grouped_run",
-                    severity=severity,
-                    column="grouped_runs",
-                    message=f"{dup_lists} pg row(s) have duplicate raw files within grouped_runs (must be a set of distinct files)",
-                )
-            )
-        double = con.execute(
-            """
-            WITH exploded AS (
-                -- Deduplicate each row's own grouped_runs first (a within-row
-                -- duplicate is already reported by duplicate_grouped_run); this
-                -- way run_double_count measures only cross-row disjointness.
-                -- Key on the canonical (order-independent) group MEMBERSHIP, so
-                -- distinct groups sharing a leader are not conflated.
-                SELECT list_sort(list_distinct(pg_accessions)) AS members, label,
-                       UNNEST(list_distinct(grouped_runs)) AS run
-                FROM pg_validate
-            ),
-            repeated AS (
-                SELECT COUNT(*) AS c
-                FROM exploded
-                GROUP BY members, label, run
-                HAVING COUNT(*) > 1
-            )
-            SELECT COALESCE(SUM(c - 1), 0) FROM repeated
-            """
-        ).fetchone()[0]
-        if double:
-            issues.append(
-                ValidationIssue(
-                    structure=structure,
-                    check="run_double_count",
-                    severity=severity,
-                    column=None,
-                    message=(
-                        f"{double} run occurrence(s) repeat across pg rows sharing the same "
-                        "(pg_accessions, label): grouped_runs sets must be disjoint or protein "
-                        "intensity is double-counted"
-                    ),
-                )
-            )
-        return issues
+        return _query_pg_referential_issues(con, structure, severity)
+    finally:
+        con.close()
+
+
+def pg_referential_issues_from_parquet(
+    path: str,
+    structure: str,
+    severity: str,
+) -> list[ValidationIssue]:
+    """Validate PG referential invariants against a file-backed Parquet relation."""
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        relation = con.read_parquet(path)
+        if not {"pg_accessions", "grouped_runs", "label"} <= set(relation.columns):
+            return []
+        relation.create_view("pg_validate")
+        return _query_pg_referential_issues(con, structure, severity)
     finally:
         con.close()
 
@@ -279,6 +307,11 @@ class ViewSchema:
     def primary_key(self) -> tuple[str, ...]:
         """The view's primary-key column(s)."""
         return self._primary_key
+
+    @property
+    def view_name(self) -> str:
+        """The schema view name."""
+        return self._view_name
 
     @property
     def identity_composite(self) -> tuple[str, ...] | None:

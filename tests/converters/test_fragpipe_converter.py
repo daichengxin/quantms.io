@@ -98,6 +98,33 @@ def test_sdrf_fallback_maps_experiment_to_runs(tmp_path):
     assert grouped[2000.0] == ["run_B1"]
 
 
+def test_fragpipe_orchestrator_passes_sdrf_to_pg_adapter(tmp_path):
+    """The public FragPipe converter must expose the PG adapter's SDRF fallback,
+    not require callers to invoke the adapter directly."""
+    from qpx.converters.fragpipe.converter import FragPipeConverter
+
+    protein_path = _write_input(tmp_path)
+    sdrf_path = tmp_path / "test.sdrf.tsv"
+    sdrf_path.write_text(
+        "source name\tcharacteristics[organism]\tcharacteristics[organism part]\t"
+        "comment[data file]\tcomment[label]\n"
+        "exp1\tHomo sapiens\tliver\trun_A1.raw\tlabel free sample\n"
+        "exp1\tHomo sapiens\tliver\trun_A2.raw\tlabel free sample\n"
+        "exp2\tHomo sapiens\tliver\trun_B1.raw\tlabel free sample\n"
+    )
+    output = tmp_path / "converted"
+
+    FragPipeConverter(output_directory=output).convert(
+        pg_file=protein_path,
+        sdrf_file=sdrf_path,
+        output_prefix="fragpipe",
+    )
+
+    grouped = _grouped_runs_by_intensity(pq.read_table(output / "fragpipe.pg.parquet"))
+    assert grouped[1000.0] == ["run_A1", "run_A2"]
+    assert grouped[2000.0] == ["run_B1"]
+
+
 def test_experiment_annotation_expands_and_normalizes_member_runs(tmp_path):
     """The official FragPipe annotation file drives grouped_runs directly."""
     protein_path = _write_input(tmp_path)
@@ -250,6 +277,23 @@ def test_feature_psm_enrichment_survives_experiment_raw_mismatch(tmp_path):
     assert list(rec["scan"]) == [500]
     assert rec["mass_error_ppm"] == pytest.approx(1e6 * (500.001 - 500.000) / 500.000)
     assert bool(rec["is_decoy"]) is True
+
+
+def test_feature_psm_fallback_does_not_cross_multiple_raw_files(tmp_path):
+    """A run-agnostic precursor match is unsafe when the PSM occurs in more
+    than one raw file; leave enrichment empty instead of taking the first run."""
+    ion, psm = _write_feature_inputs(tmp_path, experiment="sampleA", spectrum_source="run_01")
+    with psm.open("a") as handle:
+        handle.write("run_02.00600.00600.2\tPEPTIDEK\t2\t\t501.001\t501.000\t0.90\tsp|P12345|PROT_HUMAN\n")
+
+    out = tmp_path / "ambiguous.feature.parquet"
+    with FragPipeFeatureAdapter() as adapter:
+        adapter.convert(feature_path=str(ion), output_path=str(out), psm_path=str(psm))
+
+    record = pq.read_table(out).to_pylist()[0]
+    assert record["scan"] == []
+    assert record["posterior_error_probability"] is None
+    assert record["mass_error_ppm"] is None
 
 
 def test_feature_decoy_from_raw_accession_without_psm(tmp_path):

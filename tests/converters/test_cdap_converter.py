@@ -415,8 +415,49 @@ def test_cdap_feature_representative_from_single_psm(tmp_path):
     assert got == (200, 500.0, 6.0)
 
 
+def test_cdap_feature_representative_is_stable_on_full_tie(tmp_path):
+    """Ties on the leading sort fields must not make payload selection depend
+    on source-row order."""
+    from qpx.converters.cdap.feature_adapter import CdapFeatureAdapter
+
+    rows = [
+        _base_row(
+            OriginalPrecursorMz="499.0",
+            **{"PrecursorError(ppm)": "1.0"},
+            MSGFScore="80",
+            PrecursorArea="1234",
+            Protein="P1(pre=K,post=A)",
+        ),
+        _base_row(
+            OriginalPrecursorMz="501.0",
+            **{"PrecursorError(ppm)": "2.0"},
+            MSGFScore="20",
+            PrecursorArea="9876",
+            Protein="P2(pre=K,post=A)",
+        ),
+    ]
+
+    outputs = []
+    for name, ordered_rows in (("forward", rows), ("reverse", list(reversed(rows)))):
+        psm_dir = tmp_path / name
+        _write_psm(psm_dir, f"{name}.psm", ordered_rows)
+        out = tmp_path / f"{name}.feature.parquet"
+        with CdapFeatureAdapter() as adapter:
+            adapter.convert(psm_dir=str(psm_dir), output_path=str(out))
+        outputs.append(pq.read_table(out).to_pylist()[0])
+
+    for record in outputs:
+        assert record["anchor_protein"] == "P1"
+        assert record["intensities"] == [{"label": "LFQ", "intensity": 1234.0}]
+        scores = {score["score_name"]: score["score_value"] for score in record["additional_scores"]}
+        assert scores["msgf_rawscore"] == 80.0
+    assert outputs[0]["anchor_protein"] == outputs[1]["anchor_protein"]
+    assert outputs[0]["intensities"] == outputs[1]["intensities"]
+    assert outputs[0]["additional_scores"] == outputs[1]["additional_scores"]
+
+
 def test_cdap_feature_chemmod_calc_mz_is_null_not_observed(tmp_path):
-    """An unparseable CHEMMOD must leave calculated_mz NULL/0, not fall back
+    """An unparseable CHEMMOD must leave calculated_mz NULL, not fall back
     to the observed precursor m/z (#250)."""
     from qpx.converters.cdap.feature_adapter import CdapFeatureAdapter
 
@@ -431,8 +472,7 @@ def test_cdap_feature_chemmod_calc_mz_is_null_not_observed(tmp_path):
     table = pq.read_table(str(out))
     assert table.num_rows == 1
     calc = table.column("calculated_mz").to_pylist()[0]
-    # NULL calc mass is stored as 0.0; it must NOT be the measured 777.7.
-    assert not calc, f"CHEMMOD calc_mz leaked observed m/z: {calc}"
+    assert calc is None
 
 
 def test_cdap_pg_distinct_groups_sharing_leader(tmp_path):

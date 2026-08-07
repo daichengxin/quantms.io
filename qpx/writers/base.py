@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 
 from qpx._version import __version__
 from qpx.core.data.identity import derive_id
+from qpx.core.data.schema import pg_referential_issues_from_parquet
 from qpx.core.sql import sql_build, validate_identifier
 from qpx.version import QPX_SPEC_VERSION
 
@@ -111,6 +112,20 @@ def _stamp_footer_metadata(
     return table.replace_schema_metadata(merged)
 
 
+def _validate_partitioned_table(schema_class, table: pa.Table) -> None:
+    """Reject structural errors and log non-strict partitioned-write findings."""
+    result = schema_class.validate_full(table, strict=False)
+    if result.errors:
+        raise ValueError("Schema validation failed:\n" + "\n".join(issue.message for issue in result.errors))
+    for issue in result.warnings:
+        logger.warning(
+            "%s partitioned-write validation '%s': %s",
+            schema_class.view_name,
+            issue.check,
+            issue.message,
+        )
+
+
 def _schema_leaf_paths(schema: pa.Schema) -> list[str]:
     """Return every leaf column path in pyarrow's dotted convention."""
 
@@ -206,7 +221,7 @@ class BaseWriter:
             unknown_fields = [field for field in effective_composite if field not in available_fields]
             if unknown_fields:
                 raise ValueError(
-                    f"identity_composite contains fields outside the {self._schema_class._view_name} schema: {unknown_fields}"
+                    f"identity_composite contains fields outside the {self._schema_class.view_name} schema: {unknown_fields}"
                 )
 
         # Build Parquet footer metadata. Two distinct versions are stamped:
@@ -471,13 +486,11 @@ class BaseWriter:
         maintainer policy (1.1.2) these are **warnings** on the write/convert
         path, never a raise; ``qpxc validate --strict`` stays the strict gate.
         """
-        if getattr(self._schema_class, "_view_name", None) != "pg":
+        if getattr(self._schema_class, "view_name", None) != "pg":
             return
-        table = pq.read_table(str(self._path))
-        result = self._schema_class.validate_full(table, strict=False)
-        for issue in result.warnings:
-            if issue.check in ("run_double_count", "duplicate_grouped_run"):
-                logger.warning("pg referential check '%s': %s", issue.check, issue.message)
+        issues = pg_referential_issues_from_parquet(str(self._path), self._schema_class.view_name, "warning")
+        for issue in issues:
+            logger.warning("pg referential check '%s': %s", issue.check, issue.message)
 
     def _validate_identity_uniqueness(self) -> None:
         """Reject duplicate or null identity ids across the complete output file."""
@@ -565,10 +578,10 @@ class BaseWriter:
         is routed through the **same id-derivation and schema validation** as
         the single-file writers before it is written, so a partitioned dump no
         longer bypasses those checks (bigbio/qpx#252): the derived id is stamped
-        when absent, and referential / null / primary-key problems are emitted
-        as ``logger.warning`` (matching the write-path policy — not a raise).
-        Called on the un-bound ``BaseWriter`` (no schema is known) it stays a
-        raw partitioned dump, unchanged.
+        when absent, structural validation errors are rejected, and non-strict
+        findings such as duplicate identities are logged as warnings. Called on
+        the un-bound ``BaseWriter`` (no schema is known) it stays a raw
+        partitioned dump, unchanged.
 
         Encoding parity with the single-file writers: the same
         :func:`parquet_write_options` path is used, so partitioned output gets
@@ -613,14 +626,7 @@ class BaseWriter:
         if schema_class is not None:
             deriver = cls(output_dir, compression=compression)
             table = deriver._fill_identity_table(table)
-            result = schema_class.validate_full(table, strict=False)
-            for issue in result.issues:
-                logger.warning(
-                    "%s partitioned-write validation '%s': %s",
-                    schema_class._view_name,
-                    issue.check,
-                    issue.message,
-                )
+            _validate_partitioned_table(schema_class, table)
 
         # Validate the partition columns up front so the default path (or an
         # unsupported key) fails with an actionable message instead of a raw

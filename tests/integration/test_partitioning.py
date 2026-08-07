@@ -182,3 +182,21 @@ class TestPartitionedWriting:
         ids = back.column("feature_id").to_pylist()
         assert all(i is not None for i in ids), "feature_id must be derived, not left null"
         assert len(set(ids)) == 2
+
+    def test_write_partitioned_rejects_schema_errors_before_writing(self, tmp_path):
+        """Concrete writers must not persist a partitioned dataset after full
+        validation reports a structural error."""
+        import pytest
+
+        from qpx.writers import FeatureWriter
+        from tests.conftest import make_feature_record
+
+        source = tmp_path / "source.feature.parquet"
+        with FeatureWriter(source) as writer:
+            writer.write_batch([make_feature_record()])
+        invalid = pq.read_table(source).drop_columns(["sequence"])
+        output = tmp_path / "invalid-partitioned"
+
+        with pytest.raises(ValueError, match="Missing required column: sequence"):
+            FeatureWriter.write_partitioned(invalid, output, ["run_file_name"])
+        assert not output.exists()

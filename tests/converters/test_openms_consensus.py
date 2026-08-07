@@ -470,10 +470,44 @@ def test_consensus_psm_unknown_nativeid_uses_surrogate_scan(tmp_path):
     path.write_text(xml)
 
     records = consensus_psms_to_records(str(path))
+    repeated = consensus_psms_to_records(str(path))
 
     assert len(records) == 1  # not dropped
     scan = list(records[0]["scan"])
     assert len(scan) == 1 and 0 <= scan[0] <= 0x7FFFFFFF  # deterministic, int32-safe
+    assert repeated[0]["scan"] == records[0]["scan"]
+
+
+def test_streaming_retains_all_protein_identification_run_paths(tmp_path):
+    """Multiple ProteinIdentification blocks contribute to id_merge_index in
+    document order; the streaming reader must not retain only the last block."""
+    from qpx.converters.openms_consensus.psm_adapter import _merge_index_runs
+    from qpx.converters.openms_consensus.streaming import StreamingConsensusMap
+
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<consensusXML>
+  <IdentificationRun id="PI_0">
+    <ProteinIdentification score_type="">
+      <ProteinHit id="PH_0" accession="P1" score="0"/>
+      <UserParam type="stringList" name="spectra_data" value="[run_A.mzML]"/>
+    </ProteinIdentification>
+  </IdentificationRun>
+  <IdentificationRun id="PI_1">
+    <ProteinIdentification score_type="">
+      <ProteinHit id="PH_1" accession="P2" score="0"/>
+      <UserParam type="stringList" name="spectra_data" value="[run_B.mzML]"/>
+    </ProteinIdentification>
+  </IdentificationRun>
+  <mapList count="0"/>
+  <consensusElementList/>
+</consensusXML>
+"""
+    path = tmp_path / "multiple-identification-runs.consensusXML"
+    path.write_text(xml)
+
+    consensus_map = StreamingConsensusMap(str(path))
+    assert len(consensus_map.getProteinIdentifications()) == 2
+    assert _merge_index_runs(consensus_map) == ["run_A", "run_B"]
 
 
 def _write_multi_reference_consensusxml(path):

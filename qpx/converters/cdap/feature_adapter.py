@@ -139,10 +139,26 @@ class CdapFeatureAdapter(CdapBaseAdapter):
         # Representative fields must all come from the SAME best PSM row --
         # independent ``arg_min`` per column produced a "Frankenstein" record
         # (scan/observed_mz/rt from different PSMs) on tied or NULL Evalue.
-        # Applying one deterministic ORDER BY to every ``first()`` guarantees a
-        # single source row. NULLS LAST so a real Evalue is preferred over a
-        # missing one; scan/mz/rt break ties reproducibly.
-        best_order = "evalue ASC NULLS LAST, scan_num ASC NULLS LAST, observed_mz ASC NULLS LAST, rt ASC NULLS LAST"
+        # Applying one total ORDER BY to every ``first()`` guarantees a single
+        # source row. Include every representative payload field so even PSMs
+        # tied on e-value/scan/mz/RT select the same row independently of input
+        # order.
+        best_order_fields = [
+            "evalue ASC NULLS LAST",
+            "scan_num ASC NULLS LAST",
+            "observed_mz ASC NULLS LAST",
+            "rt ASC NULLS LAST",
+            "original_mz ASC NULLS LAST",
+            "ppm ASC NULLS LAST",
+            "msgf ASC NULLS LAST",
+            "denovo ASC NULLS LAST",
+            "qvalue ASC NULLS LAST",
+            "pep_qvalue ASC NULLS LAST",
+            "protein_cell ASC NULLS LAST",
+        ]
+        if has_precursor_area:
+            best_order_fields.append("precursor_area ASC NULLS LAST")
+        best_order = ", ".join(best_order_fields)
         agg_cols: list[str] = [
             "peptide_raw",
             "charge",
@@ -157,7 +173,7 @@ class CdapFeatureAdapter(CdapBaseAdapter):
             f"first(denovo ORDER BY {best_order}) AS best_denovo",
             f"first(qvalue ORDER BY {best_order}) AS best_qvalue",
             f"first(pep_qvalue ORDER BY {best_order}) AS best_pep_qvalue",
-            "list(protein_cell ORDER BY evalue) AS protein_cells",
+            f"list(protein_cell ORDER BY {best_order}) AS protein_cells",
             "count(*) AS psm_count",
         ]
         if has_precursor_area:

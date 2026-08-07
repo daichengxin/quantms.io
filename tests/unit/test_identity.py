@@ -268,6 +268,7 @@ def test_derive_id_preserves_ordered_list_components():
 def test_derive_id_can_canonicalize_set_valued_lists():
     """Explicitly unordered grouped_runs values are compared set-wise."""
     assert derive_id([["r1", "r2"]], unordered_list_indices=(0,)) == derive_id([["r2", "r1"]], unordered_list_indices=(0,))
+    assert derive_id([["r1", "r2", "r1"]], unordered_list_indices=(0,)) == derive_id([["r2", "r1"]], unordered_list_indices=(0,))
     assert derive_id([["r1", "r2"]], unordered_list_indices=(0,)) != derive_id([["r1", "r3"]], unordered_list_indices=(0,))
 
 

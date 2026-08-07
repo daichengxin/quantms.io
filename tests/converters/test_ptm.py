@@ -80,6 +80,18 @@ class TestFromProforma:
         assert result is not None
         assert result[0]["positions"][0]["position"] == 0
 
+    def test_cterm(self):
+        """Parse a C-terminal ProForma tag at the length-plus-one position."""
+        meta = {"UNIMOD:2": ("Amidated", ["X"], ["C-term"])}
+        _, result = from_proforma("PEPTIDEK-[UNIMOD:2]", "PEPTIDEK", meta=meta)
+        assert result == [
+            {
+                "name": "Amidated",
+                "accession": "UNIMOD:2",
+                "positions": [{"position": 9, "amino_acid": None, "scores": None}],
+            }
+        ]
+
     def test_site_scores_attached(self):
         """Site scores are attached to the correct modification position."""
         site_scores = {
