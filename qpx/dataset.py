@@ -339,6 +339,21 @@ class Dataset:
         ORDER BY fl.feature_id, p.pg_id
     """
 
+    # Fixed identifiers for the DuckDB temp views that back the softlinks. The
+    # link diagnostics reference these views by these literal names inside
+    # constant-literal queries (no f-string / concat SQL), so there is no
+    # formatted-SQL construction to flag.
+    _FEATURE_PG_LINK_VIEW = "qpx_feature_pg_link"
+    _FEATURE_PSM_LINK_VIEW = "qpx_feature_psm_link"
+
+    def _register_feature_pg_link_view(self) -> None:
+        """Register the feature->pg softlink as the ``qpx_feature_pg_link`` view."""
+        self._engine.register_view(self._FEATURE_PG_LINK_VIEW, self._LINK_FEATURE_PG_SQL)
+
+    def _register_feature_psm_link_view(self) -> None:
+        """Register the feature<->psm softlink as the ``qpx_feature_psm_link`` view."""
+        self._engine.register_view(self._FEATURE_PSM_LINK_VIEW, self._LINK_FEATURE_PSM_SQL)
+
     def link_feature_pg(self) -> QueryResult:
         """Compute the feature->pg softlink as ``(feature_id, pg_id, label)`` rows.
 
@@ -369,15 +384,14 @@ class Dataset:
         design; a fuller conversion summary is built on top of the softlink.
         """
         self._require_feature_pg("features_without_pg_link")
-        sql = f"""
-            SELECT f.feature_id AS feature_id
-            FROM feature f
-            WHERE f.feature_id NOT IN (
-                SELECT link.feature_id FROM ({self._LINK_FEATURE_PG_SQL}) AS link
+        self._register_feature_pg_link_view()
+        return QueryResult(
+            self._engine.execute(
+                "SELECT feature_id FROM feature "
+                "WHERE feature_id NOT IN (SELECT feature_id FROM qpx_feature_pg_link) "
+                "ORDER BY feature_id"
             )
-            ORDER BY f.feature_id
-        """
-        return QueryResult(self._engine.execute(sql))
+        )
 
     def _require_feature_pg(self, operation: str) -> None:
         """Raise if the feature or pg view is not available for the softlink."""
@@ -439,6 +453,53 @@ class Dataset:
             raise ValueError(
                 f"{operation}() requires both the 'feature' and 'psm' structures; available: {self.available_structures}"
             )
+
+    def _link_scalar(self, sql: str) -> int | None:
+        """Run a constant-literal scalar COUNT, returning ``None`` on failure."""
+        row = self._engine.execute(sql).fetchone()
+        if not row or row[0] is None:
+            return 0
+        return int(row[0])
+
+    def feature_link_diagnostics(self) -> dict:
+        """Return feature<->pg and feature<->psm softlink counts for reporting.
+
+        Public diagnostics API consumed by the conversion summary. Each count is
+        computed with a constant-literal ``COUNT`` / ``COUNT(DISTINCT ...)`` over
+        the registered softlink views (:attr:`_FEATURE_PG_LINK_VIEW`,
+        :attr:`_FEATURE_PSM_LINK_VIEW`), which are (re)registered here on demand.
+
+        Returns
+        -------
+        dict
+            Keys ``n_feature_pg_links``, ``n_features_linked``,
+            ``n_features_without_pg``, ``n_features_with_psm`` and
+            ``n_psms_without_feature``. The feature<->pg group is ``None`` unless
+            both the ``feature`` and ``pg`` views exist; the feature<->psm group
+            is ``None`` unless both the ``feature`` and ``psm`` views exist.
+        """
+        diagnostics: dict = {
+            "n_feature_pg_links": None,
+            "n_features_linked": None,
+            "n_features_without_pg": None,
+            "n_features_with_psm": None,
+            "n_psms_without_feature": None,
+        }
+
+        if self.feature is not None and self.pg is not None:
+            self._register_feature_pg_link_view()
+            diagnostics["n_feature_pg_links"] = self._link_scalar("SELECT COUNT(*) FROM qpx_feature_pg_link")
+            diagnostics["n_features_linked"] = self._link_scalar("SELECT COUNT(DISTINCT feature_id) FROM qpx_feature_pg_link")
+            diagnostics["n_features_without_pg"] = self._link_scalar(
+                "SELECT COUNT(*) FROM feature WHERE feature_id NOT IN (SELECT feature_id FROM qpx_feature_pg_link)"
+            )
+
+        if self.feature is not None and self.psm is not None:
+            self._register_feature_psm_link_view()
+            diagnostics["n_features_with_psm"] = self._link_scalar("SELECT COUNT(DISTINCT feature_id) FROM qpx_feature_psm_link")
+            diagnostics["n_psms_without_feature"] = self._link_scalar("SELECT COUNT(*) FROM psm WHERE feature_id IS NULL")
+
+        return diagnostics
 
     @property
     def available_structures(self) -> list[str]:

@@ -37,7 +37,7 @@ def _scalar(dataset: Dataset, sql: str) -> int | None:
     """
     try:
         row = dataset.sql(sql).fetchone()
-    except Exception as exc:  # noqa: BLE001 - a summary must never raise
+    except Exception as exc:  # noqa: BLE001 - a summary must never raise  # pylint: disable=broad-exception-caught
         _log.debug("conversion summary metric failed for %r: %s", sql, exc)
         return None
     if not row or row[0] is None:
@@ -102,7 +102,7 @@ def _collect(ds: Dataset) -> dict:
         row = None
         try:
             row = ds.sql("SELECT project_accession FROM dataset LIMIT 1").fetchone()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             _log.debug("could not read project_accession: %s", exc)
         if row and row[0]:
             summary["accession"] = str(row[0])
@@ -131,35 +131,35 @@ def _collect(ds: Dataset) -> dict:
             "SELECT COUNT(DISTINCT gg) FROM (SELECT UNNEST(gg_accessions) AS gg FROM pg)",
         )
 
-    # Link diagnostics — only when BOTH feature and pg exist (the softlink join).
-    if ds.feature is not None and ds.pg is not None:
-        _collect_link_diagnostics(ds, summary)
-
-    # psm<->feature diagnostics — the inverse of the authoritative psm.feature_id
-    # (bigbio/qpx#267): features carrying >=1 assigned psm, and psms with no feature.
-    if ds.feature is not None and ds.psm is not None:
-        _collect_psm_feature_diagnostics(ds, summary)
+    # Link diagnostics — feature->pg and feature<->psm softlink counts, computed
+    # by the public Dataset diagnostics API (each group is guarded to None when the
+    # backing views are absent, so copying every key is safe).
+    _collect_link_diagnostics(ds, summary)
 
     return summary
 
 
-def _collect_psm_feature_diagnostics(ds: Dataset, summary: dict) -> None:
-    """Populate psm<->feature diagnostics via the computed inverse softlink."""
-    link_sql = ds._LINK_FEATURE_PSM_SQL
-    summary["n_features_with_psm"] = _scalar(ds, f"SELECT COUNT(DISTINCT feature_id) FROM ({link_sql}) AS link")
-    summary["n_psms_without_feature"] = _scalar(ds, "SELECT COUNT(*) FROM psm WHERE feature_id IS NULL")
-
-
 def _collect_link_diagnostics(ds: Dataset, summary: dict) -> None:
-    """Populate feature->pg link diagnostics via the computed softlink."""
-    link_sql = ds._LINK_FEATURE_PG_SQL
-    summary["n_feature_pg_links"] = _scalar(ds, f"SELECT COUNT(*) FROM ({link_sql}) AS link")
-    summary["n_features_linked"] = _scalar(ds, f"SELECT COUNT(DISTINCT feature_id) FROM ({link_sql}) AS link")
-    # Mirror Dataset.features_without_pg_link(): features with no softlink edge.
-    summary["n_features_without_pg"] = _scalar(
-        ds,
-        f"SELECT COUNT(*) FROM feature f WHERE f.feature_id NOT IN (SELECT link.feature_id FROM ({link_sql}) AS link)",
-    )
+    """Populate feature<->pg and feature<->psm diagnostics via the public API.
+
+    Delegates to :meth:`qpx.dataset.Dataset.feature_link_diagnostics`, which
+    registers the softlink views and computes the counts with constant-literal
+    queries. A failure degrades the diagnostics to ``None`` without aborting the
+    summary.
+    """
+    try:
+        diagnostics = ds.feature_link_diagnostics()
+    except Exception as exc:  # noqa: BLE001 - a summary must never raise  # pylint: disable=broad-exception-caught
+        _log.debug("conversion summary link diagnostics failed: %s", exc)
+        return
+    for key in (
+        "n_feature_pg_links",
+        "n_features_linked",
+        "n_features_without_pg",
+        "n_features_with_psm",
+        "n_psms_without_feature",
+    ):
+        summary[key] = diagnostics.get(key)
 
 
 def _fmt(value: int | None) -> str:
@@ -218,5 +218,5 @@ def log_conversion_summary(output_folder: Path | str, logger: logging.Logger | N
     try:
         summary = conversion_summary(output_folder)
         log.info("%s", format_conversion_summary(summary))
-    except Exception as exc:  # noqa: BLE001 - never break a good conversion
+    except Exception as exc:  # noqa: BLE001 - never break a good conversion  # pylint: disable=broad-exception-caught
         log.warning("Could not build conversion summary for %s: %s", output_folder, exc)
