@@ -736,6 +736,167 @@ def test_feature_pg_accessions_disambiguate_shared_leader(tmp_path, streaming):
     assert feat_membership["ELVISLIVK"] in pg_memberships
 
 
+# A single protein group P shared across TWO label-free runs (run_01, run_02) so the
+# pg row's grouped_runs is multi-run ([run_01, run_02]); plus a peptide with NO protein
+# evidence (protein_refs="") whose feature has no protein group and therefore no pg row.
+_MULTIRUN_CONSENSUSXML = """<?xml version="1.0" encoding="ISO-8859-1"?>
+<consensusXML version="1.7" experiment_type="label-free"
+  xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/OpenMS/OpenMS/develop/share/OpenMS/SCHEMAS/ConsensusXML_1_7.xsd"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <IdentificationRun id="PI_0" date="0000-00-00T00:00:00" search_engine="" search_engine_version="">
+    <SearchParameters db="" db_version="" taxonomy="" mass_type="monoisotopic" charges=""
+      enzyme="unknown_enzyme" missed_cleavages="0" precursor_peak_tolerance="0"
+      precursor_peak_tolerance_ppm="false" peak_mass_tolerance="0" peak_mass_tolerance_ppm="false">
+    </SearchParameters>
+    <ProteinIdentification score_type="" higher_score_better="true" significance_threshold="0">
+      <ProteinHit id="PH_0" accession="P99999" score="0" sequence=""></ProteinHit>
+    </ProteinIdentification>
+  </IdentificationRun>
+  <mapList count="2">
+    <map id="0" name="run_01.mzML" unique_id="1" label="label-free" size="1"></map>
+    <map id="1" name="run_02.mzML" unique_id="2" label="label-free" size="1"></map>
+  </mapList>
+  <consensusElementList>
+    <consensusElement id="e_0" quality="0.0" charge="2">
+      <centroid rt="100.0" mz="450.25" it="0.0"/>
+      <groupedElementList><element map="0" id="0" rt="100.0" mz="450.25" it="1000.0"/></groupedElementList>
+      <PeptideIdentification identification_run_ref="PI_0" score_type="" higher_score_better="true"
+        significance_threshold="0" MZ="450.26" RT="100" spectrum_reference="scan=1">
+        <PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
+          <UserParam type="string" name="target_decoy" value="target"/>
+        </PeptideHit>
+      </PeptideIdentification>
+    </consensusElement>
+    <consensusElement id="e_1" quality="0.0" charge="2">
+      <centroid rt="110.0" mz="450.25" it="0.0"/>
+      <groupedElementList><element map="1" id="1" rt="110.0" mz="450.25" it="2000.0"/></groupedElementList>
+      <PeptideIdentification identification_run_ref="PI_0" score_type="" higher_score_better="true"
+        significance_threshold="0" MZ="450.26" RT="110" spectrum_reference="scan=2">
+        <PeptideHit score="0" sequence="PEPTIDEK" charge="2" protein_refs="PH_0">
+          <UserParam type="string" name="target_decoy" value="target"/>
+        </PeptideHit>
+      </PeptideIdentification>
+    </consensusElement>
+    <consensusElement id="e_2" quality="0.0" charge="2">
+      <centroid rt="200.0" mz="600.25" it="0.0"/>
+      <groupedElementList><element map="0" id="2" rt="200.0" mz="600.25" it="500.0"/></groupedElementList>
+      <PeptideIdentification identification_run_ref="PI_0" score_type="" higher_score_better="true"
+        significance_threshold="0" MZ="600.26" RT="200" spectrum_reference="scan=3">
+        <PeptideHit score="0" sequence="NOPROTEINR" charge="2" protein_refs="">
+          <UserParam type="string" name="target_decoy" value="target"/>
+        </PeptideHit>
+      </PeptideIdentification>
+    </consensusElement>
+  </consensusElementList>
+</consensusXML>
+"""
+
+
+def _read_feature_pg(written):
+    """Read back (feature rows, pg rows) for the feature.pg_ids round-trip checks.
+
+    feature rows: (sequence, run_file_name, [pg_accessions...], [pg_ids...]); pg rows:
+    (pg_id, [pg_accessions...], [grouped_runs...], label).
+    """
+    con = duckdb.connect()
+    feat = con.execute(
+        "SELECT sequence, run_file_name, list_transform(pg_accessions, x -> x.accession), pg_ids FROM read_parquet($1)",
+        [str(written["feature"])],
+    ).fetchall()
+    pg = con.execute(
+        "SELECT pg_id, pg_accessions, grouped_runs, label FROM read_parquet($1)",
+        [str(written["pg"])],
+    ).fetchall()
+    con.close()
+    return feat, pg
+
+
+def _assert_pg_ids_join_valid(feat, pg):
+    """Every populated feature.pg_ids id references a real pg row whose pg_accessions
+    equals the feature's pg_accessions and whose grouped_runs contains the feature's run.
+    """
+    pg_by_id = {pg_id: (list(accs), list(grouped_runs)) for pg_id, accs, grouped_runs, _ in pg}
+    for _seq, run, accs, pg_ids in feat:
+        if not pg_ids:
+            continue
+        feat_accs = list(accs) if accs is not None else None
+        for pg_id in pg_ids:
+            assert pg_id in pg_by_id, f"feature.pg_ids references unknown pg_id {pg_id}"
+            row_accs, row_runs = pg_by_id[pg_id]
+            assert row_accs == feat_accs, f"pg row {pg_id} accessions {row_accs} != feature {feat_accs}"
+            assert run in row_runs, f"feature run {run!r} not in pg row {pg_id} grouped_runs {row_runs}"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_feature_pg_ids_roundtrip_tmt_multilabel(tmp_path, streaming):
+    """Full conversion round-trip: every feature.pg_ids id is a real pg.pg_id with the
+    matching pg_accessions + run membership, and a TMT feature references one pg_id per
+    channel/label (bigbio/qpx#266 Phase 2)."""
+    cx = tmp_path / "tmt.consensusXML"
+    _write_tmt_consensusxml(cx)
+    out = tmp_path / ("stream" if streaming else "mem")
+    written = OpenMSConsensusConverter().convert(
+        str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming
+    )
+    feat, pg = _read_feature_pg(written)
+    _assert_pg_ids_join_valid(feat, pg)
+
+    assert len(feat) == 1  # one run, channels folded into intensities
+    _seq, _run, _accs, pg_ids = feat[0]
+    # TMT126 + TMT127 -> one pg row per channel, so the feature references BOTH pg_ids.
+    assert pg_ids is not None and len(pg_ids) == 2
+    assert set(pg_ids) == {pg_id for pg_id, *_ in pg}
+    assert {label for *_, label in pg} == {"TMT126", "TMT127"}
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_feature_pg_ids_shared_leader_distinct(tmp_path, streaming):
+    """Shared-leader ([A,B] vs [A,C]): the two features get pg_ids pointing at the
+    CORRECT distinct pg rows (not each other's) (bigbio/qpx#266 Phase 2)."""
+    cx = tmp_path / "shared_leader.consensusXML"
+    cx.write_text(_SHARED_LEADER_CONSENSUSXML)
+    out = tmp_path / ("stream" if streaming else "mem")
+    written = OpenMSConsensusConverter().convert(
+        str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming
+    )
+    feat, pg = _read_feature_pg(written)
+    _assert_pg_ids_join_valid(feat, pg)
+
+    pg_id_by_membership = {tuple(accs): pg_id for pg_id, accs, *_ in pg}
+    ids_by_seq = {seq: list(pg_ids) for seq, _run, _accs, pg_ids in feat}
+    assert ids_by_seq["PEPTIDEK"] == [pg_id_by_membership[("A", "B")]]
+    assert ids_by_seq["ELVISLIVK"] == [pg_id_by_membership[("A", "C")]]
+    # The two features do NOT reference each other's pg row.
+    assert set(ids_by_seq["PEPTIDEK"]).isdisjoint(ids_by_seq["ELVISLIVK"])
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_feature_pg_ids_multirun_and_null(tmp_path, streaming):
+    """Multi-run grouped_runs: a feature's run is a member of a multi-run grouped_runs
+    set, so both runs' features reference the same pg_id; and a feature whose group has
+    NO pg row (no protein evidence) gets null pg_ids (bigbio/qpx#266 Phase 2)."""
+    cx = tmp_path / "multirun.consensusXML"
+    cx.write_text(_MULTIRUN_CONSENSUSXML)
+    out = tmp_path / ("stream" if streaming else "mem")
+    written = OpenMSConsensusConverter().convert(
+        str(cx), str(out), output_prefix="t", structures=("feature", "pg"), streaming=streaming
+    )
+    feat, pg = _read_feature_pg(written)
+    _assert_pg_ids_join_valid(feat, pg)
+
+    # One pg row: P99999 quantified over the two-run unit.
+    assert len(pg) == 1
+    pg_id, _accs, grouped_runs, _label = pg[0]
+    assert sorted(grouped_runs) == ["run_01", "run_02"]  # multi-run grouped_runs
+
+    ids_by_key = {(seq, run): pg_ids for seq, run, _accs, pg_ids in feat}
+    # Both runs' PEPTIDEK features reference the SAME single multi-run pg row.
+    assert ids_by_key[("PEPTIDEK", "run_01")] == [pg_id]
+    assert ids_by_key[("PEPTIDEK", "run_02")] == [pg_id]
+    # The peptide with no protein evidence has no pg row -> null pg_ids (not fabricated).
+    assert ids_by_key[("NOPROTEINR", "run_01")] is None
+
+
 def test_label_free_consensusxml_uses_lfq_labels(tmp_path):
     cx = tmp_path / "label_free.consensusXML"
     xml = _TMT_CONSENSUSXML.replace('label="tmt6plex_126"', 'label="label-free"')

@@ -299,7 +299,7 @@ def _group_subfeatures_by_run(cf, map_info: dict[int, tuple[str, str]]) -> dict[
     return by_run
 
 
-def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, group_map=None) -> list[dict]:
+def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, group_map=None, pg_ids_for=None) -> list[dict]:
     """Return QPX feature record dicts extracted from a consensusXML.
 
     Pass either ``consensusxml_path`` (loaded here) or an already-loaded ``cm``.
@@ -314,7 +314,7 @@ def consensus_features_to_records(consensusxml_path: str | None = None, cm=None,
     map_info = feature_map_info(cm)
     records: list[dict] = []
     for cf in cm:
-        records.extend(feature_records_for_cf(cf, map_info, group_map))
+        records.extend(feature_records_for_cf(cf, map_info, group_map, pg_ids_for))
     return records
 
 
@@ -328,8 +328,14 @@ def feature_map_info(cm) -> dict[int, tuple[str, str]]:
     return {idx: (_run_stem(headers[idx].filename), _map_label(headers[idx].label)) for idx in headers}
 
 
-def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], group_map=None) -> list[dict]:
-    """Feature records for one consensus feature (one per run, channels as intensities)."""
+def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], group_map=None, pg_ids_for=None) -> list[dict]:
+    """Feature records for one consensus feature (one per run, channels as intensities).
+
+    ``pg_ids_for`` (``pg_adapter.build_feature_pg_linker``) stamps each record's
+    ``pg_ids`` — the pg rows this feature maps to (its group's membership, its run
+    in that pg row's grouped_runs, one per label). Null when absent or the feature
+    has no protein group.
+    """
     pids = cf.getPeptideIdentifications()
     if not pids or not pids[0].getHits():
         return []
@@ -382,6 +388,7 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], group_map=N
                 "consensus_rt": consensus_rt,
                 "anchor_protein": anchor_protein,
                 "pg_accessions": pg_accessions,
+                "pg_ids": pg_ids_for(group, run) if pg_ids_for else None,
                 "additional_scores": additional_scores,
             }
         )

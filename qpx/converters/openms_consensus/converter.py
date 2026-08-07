@@ -21,7 +21,11 @@ from qpx.converters.openms_consensus.feature_adapter import (
     check_channels_vs_sdrf,
     load_consensus_map,
 )
-from qpx.converters.openms_consensus.pg_adapter import accession_to_group, consensus_protein_groups_to_records
+from qpx.converters.openms_consensus.pg_adapter import (
+    accession_to_group,
+    build_feature_pg_linker,
+    consensus_protein_groups_to_records,
+)
 from qpx.converters.orchestrator import BaseOrchestrator
 from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
 from qpx.core.data import FeatureSchema, PsmSchema
@@ -101,14 +105,19 @@ def _should_stream(path: str) -> bool:
         return False
 
 
-def _cf_feature_psm_records(cf, map_info, group_map, resolve_run, seen, *, want_feature, want_psm):
+def _cf_feature_psm_records(cf, map_info, group_map, resolve_run, seen, *, want_feature, want_psm, pg_link=None):
     """Feature + PSM records for one consensus feature, cross-linked when both views
     are emitted. Shared by the streaming and in-memory paths so their output matches.
+
+    ``pg_link`` (``build_feature_pg_linker``) stamps feature.pg_ids — the direct
+    feature->pg cross-reference (bigbio/qpx#266). It is global (a group's grouped_runs
+    spans many features) but is a pure function of the group membership + run, so it
+    can be applied per consensus feature without buffering all rows.
     """
     from qpx.converters.openms_consensus.feature_adapter import feature_records_for_cf
     from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, psm_records_for_pid
 
-    cf_feats = feature_records_for_cf(cf, map_info, group_map) if want_feature else []
+    cf_feats = feature_records_for_cf(cf, map_info, group_map, pg_link) if want_feature else []
     cf_psms: list[dict] = []
     if want_psm:
         # Multi-run isobaric PIDs carry a local id_merge_index; the feature's
@@ -133,7 +142,7 @@ def _write_view(writer_cls, path, records, *, creator, compression, identity_com
     return path
 
 
-def _stream_feature_psm(cm, fw, pw, *, map_info, group_map, resolve_run, maps, pep_intensity, map_run, seen, batch):
+def _stream_feature_psm(cm, fw, pw, *, map_info, group_map, resolve_run, maps, pep_intensity, map_run, seen, batch, pg_link=None):
     """One ordered element/unassigned pass: write feature/psm in batches and
     accumulate the pg maps in place (the streaming path's inner loop)."""
     from qpx.converters.openms_consensus.pg_adapter import (
@@ -148,7 +157,7 @@ def _stream_feature_psm(cm, fw, pw, *, map_info, group_map, resolve_run, maps, p
     for kind, obj in cm.iter_all():
         if kind == "element":
             cf_feats, cf_psms = _cf_feature_psm_records(
-                obj, map_info, group_map, resolve_run, seen, want_feature=fw is not None, want_psm=pw is not None
+                obj, map_info, group_map, resolve_run, seen, want_feature=fw is not None, want_psm=pw is not None, pg_link=pg_link
             )
             feat_buf.extend(cf_feats)
             psm_buf.extend(cf_psms)
@@ -185,7 +194,12 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     from contextlib import ExitStack
 
     from qpx.converters.openms_consensus.feature_adapter import _run_stem, feature_map_info
-    from qpx.converters.openms_consensus.pg_adapter import _ProteinMaps, accession_to_group, build_pg_records
+    from qpx.converters.openms_consensus.pg_adapter import (
+        _ProteinMaps,
+        accession_to_group,
+        build_feature_pg_linker,
+        build_pg_records,
+    )
     from qpx.converters.openms_consensus.psm_adapter import _run_resolver
     from qpx.converters.openms_consensus.streaming import StreamingConsensusMap
 
@@ -199,6 +213,9 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     map_run = {i: _run_stem(headers[i].filename) for i in headers}
     want_feature, want_psm, want_pg = ("feature" in structures, "psm" in structures, "pg" in structures)
     group_map = accession_to_group(cm) if want_feature else None
+    # Stamp feature.pg_ids only when the pg view is also emitted (the ids reference
+    # pg rows written in this dataset), mirroring the feature<->psm cross-ref policy.
+    pg_link = build_feature_pg_linker(map_info, sdrf_path) if (want_feature and want_pg) else None
     resolve_run = _run_resolver(cm) if want_psm or want_pg else None
     maps = _ProteinMaps() if want_pg else None
     pep_intensity: dict = defaultdict(float) if want_pg else {}
@@ -237,6 +254,7 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
             map_run=map_run,
             seen=seen,
             batch=100_000,
+            pg_link=pg_link,
         )
         if fw is not None:
             written["feature"] = out / f"{output_prefix}.feature.parquet"
@@ -494,13 +512,16 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
             # Share the full protein-group membership so feature.anchor_protein and
             # feature.pg_accessions match pg (unambiguous even for shared leaders).
             group_map = accession_to_group(cm) if want_feature else None
+            # feature.pg_ids: derived pg_id per (group membership, run, label). Only
+            # when pg is also emitted (the ids reference pg rows in this dataset).
+            pg_link = build_feature_pg_linker(map_info, sdrf_path) if (want_feature and "pg" in structures) else None
             resolve_run = _run_resolver(cm) if want_psm else None
             seen: set = set()
             feat_recs: list[dict] = []
             psm_recs: list[dict] = []
             for cf in cm:
                 cf_feats, cf_psms = _cf_feature_psm_records(
-                    cf, map_info, group_map, resolve_run, seen, want_feature=want_feature, want_psm=want_psm
+                    cf, map_info, group_map, resolve_run, seen, want_feature=want_feature, want_psm=want_psm, pg_link=pg_link
                 )
                 feat_recs.extend(cf_feats)
                 psm_recs.extend(cf_psms)
