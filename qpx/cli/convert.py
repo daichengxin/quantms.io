@@ -27,6 +27,17 @@ from qpx.converters.openms import OpenMSConverter
 logger = logging.getLogger("qpx.cli.convert")
 
 
+def _log_summary(output_folder) -> None:
+    """Log a conversion summary for a just-written output folder.
+
+    Shared by every convert subcommand. Guarded so a summary failure NEVER fails
+    an otherwise-successful conversion (a warning is logged instead).
+    """
+    from qpx.converters.summary import log_conversion_summary
+
+    log_conversion_summary(output_folder, logger=logger)
+
+
 def _maybe_enrich_pride(output_folder, project_accession: str | None, enrich: bool) -> None:
     """Optionally enrich a converted dataset with PRIDE metadata."""
     if not enrich:
@@ -84,8 +95,14 @@ def convert():
 )
 @click.option(
     "--qvalue-threshold",
-    help="Q-value threshold for filtering",
-    default=0.05,
+    help=(
+        "Optional q-value threshold. Unset (the default) converts the DIA-NN "
+        "report as reported — no filtering — since DIA-NN already FDR-filters its "
+        "main report and every per-row q-value column is carried through for "
+        "downstream filtering. When given, the feature view filters on precursor "
+        "Q.Value and the pg view on PG-level q-value at their own levels."
+    ),
+    default=None,
     type=float,
 )
 @click.option(
@@ -157,7 +174,7 @@ def convert_diann_cmd(
     report_path: Path,
     sdrf_file: Path,
     mzml_info_folder: Path,
-    qvalue_threshold: float,
+    qvalue_threshold: Optional[float],
     output_folder: Path,
     output_prefix: Optional[str],
     pg_matrix_path: Optional[Path],
@@ -229,6 +246,7 @@ def convert_diann_cmd(
             output_prefix=output_prefix,
             batch_size=batch_size,
             standardized_intensities=standardized_intensities,
+            qvalue_threshold=qvalue_threshold,
         )
 
     converter.convert_sdrf(output_folder=output_folder, prefix=prefix)
@@ -238,6 +256,7 @@ def convert_diann_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"DIA-NN conversion complete. Output: {output_folder}")
 
 
@@ -422,6 +441,7 @@ def convert_maxquant_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"MaxQuant conversion complete. Output: {output_folder}")
 
 
@@ -453,7 +473,7 @@ def convert_maxquant_cmd(
 )
 @click.option(
     "--experiment-annotation-file",
-    help=("FragPipe experiment_annotation.tsv mapping protein-group experiments to member raw files"),
+    help=("FragPipe experiment_annotation.tsv mapping experiments to member raw files"),
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
@@ -561,6 +581,7 @@ def convert_fragpipe_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"FragPipe conversion complete. Output: {output_folder}")
 
 
@@ -677,6 +698,7 @@ def convert_mzidentml_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"mzIdentML conversion complete. Output: {output_folder}")
 
 
@@ -894,6 +916,7 @@ def convert_openms_consensus_cmd(
         project_accession=project_accession,
         compression=compression,
     )
+    _log_summary(output_folder)
     click.echo(f"consensusXML conversion complete. Wrote: {sorted(written)}")
 
 
@@ -982,8 +1005,12 @@ def convert_sdrf_cmd(
 )
 @click.option(
     "--qvalue-threshold",
-    help="Q-value threshold for filtering",
-    default=0.05,
+    help=(
+        "Optional q-value threshold. Unset (the default) converts the report as "
+        "reported — no filtering. When given, the feature view filters on the "
+        "precursor q-value."
+    ),
+    default=None,
     type=float,
 )
 @click.option(
@@ -1023,7 +1050,7 @@ def convert_sdrf_cmd(
 def convert_spectronaut_cmd(
     report_path: Path,
     sdrf_file: Optional[Path],
-    qvalue_threshold: float,
+    qvalue_threshold: Optional[float],
     output_folder: Path,
     output_prefix: Optional[str],
     max_memory: Optional[str],
@@ -1204,6 +1231,7 @@ def convert_cdap_cmd(
         project_accession=project_accession,
     )
 
+    _log_summary(output_folder)
     click.echo(f"CDAP conversion complete. Output: {output_folder}")
 
 

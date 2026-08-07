@@ -45,6 +45,51 @@ _PG_EXTRA_COLS = [
 _DECOY_PREFIXES = ("DECOY_", "decoy_", "rev_", "REV_")
 
 
+def _pg_members(value) -> list[str]:
+    """Return the deduplicated, sorted protein-group membership."""
+    if pd.isna(value):
+        return []
+    return sorted({part.strip() for part in str(value).split(";") if part.strip()})
+
+
+def _canonical_pg_membership(value) -> str:
+    """Return one order-independent key for a DIA-NN protein group."""
+    return ";".join(_pg_members(value))
+
+
+def _producer_group_leader(values: pd.Series) -> str:
+    """Select a deterministic producer-reported leader for one membership."""
+    representations = sorted(str(value) for value in values if pd.notna(value) and str(value).strip())
+    if not representations:
+        return ""
+    return representations[0].split(";", 1)[0].strip()
+
+
+def _first_non_null(series: pd.Series):
+    """Return the first non-null, non-empty value in *series* (else None).
+
+    Used to collapse a protein group's per-precursor name/gene annotations to a
+    single representative value so inconsistent annotations do not split the
+    group into duplicate-identity records.
+    """
+    for value in series:
+        if pd.notna(value) and value != "":
+            return value
+    return None
+
+
+def _col_first(group: pd.DataFrame, column: str):
+    """Return the first value of *column* in *group*, or None if column absent.
+
+    Older DIA-NN reports may omit the PG q-value columns entirely. Accessing a
+    missing column would raise ``KeyError`` and crash the whole conversion, so
+    fall back to None when the column was not resolved into the group frame.
+    """
+    if column not in group.columns:
+        return None
+    return group[column].iloc[0]
+
+
 class DiannPgAdapter(DiaNNBaseAdapter):
     """Convert DIA-NN report + PG matrix to ``pg.parquet``.
 
@@ -67,6 +112,7 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         sdrf_path: Optional[str] = None,
         file_num: int = 20,
         creator: str = "diann",
+        qvalue_threshold: Optional[float] = None,
     ) -> None:
         """Run the DIA-NN report+matrix -> pg.parquet conversion.
 
@@ -77,6 +123,16 @@ class DiannPgAdapter(DiaNNBaseAdapter):
             sdrf_path: Optional SDRF file for sample mapping.
             file_num: Number of runs to process per batch.
             creator: Creator tag in Parquet metadata.
+            qvalue_threshold: Optional PG-level q-value cutoff. Filtering is
+                opt-in (bigbio/qpx#241): with the default ``None`` every protein
+                group in the report is emitted (DIA-NN already FDR-filters its
+                report and all PG q-value columns are carried through for
+                downstream filtering). When a threshold is provided, protein
+                groups whose PG q-value exceeds it are excluded — preferring the
+                experiment-wide ``Global.PG.Q.Value`` and falling back to the
+                run-wise ``PG.Q.Value``. If a threshold is given but the report
+                carries no PG q-value column, the filter is skipped with a
+                warning.
         """
         # Step 1: Load report into DuckDB
         self._load_diann_report(diann_report)
@@ -105,6 +161,7 @@ class DiannPgAdapter(DiaNNBaseAdapter):
                     pg_matrix_indexed,
                     report_cols,
                     channel_col,
+                    qvalue_threshold=qvalue_threshold,
                 )
                 if records:
                     writer.write_batch(records)
@@ -139,6 +196,12 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         )
         # Strip common file extensions from run column names
         df.columns = [_EXT_RE.sub("", c) for c in df.columns]
+        df["pg_accessions"] = df["pg_accessions"].map(_canonical_pg_membership)
+        duplicate_keys = sorted(df.loc[df["pg_accessions"].duplicated(keep=False), "pg_accessions"].unique())
+        if duplicate_keys:
+            raise ValueError(
+                "DIA-NN PG matrix contains duplicate canonical protein-group memberships: " + ", ".join(duplicate_keys[:10])
+            )
         return df
 
     def _get_unique_runs(self) -> list[str]:
@@ -163,6 +226,7 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         pg_matrix_indexed: pd.DataFrame,
         actual_report_cols: set[str] | None = None,
         channel_col: str | None = None,
+        qvalue_threshold: Optional[float] = None,
     ) -> list[dict]:
         """Process a batch of runs for PG quantification."""
         records: list[dict] = []
@@ -199,6 +263,29 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         # Use resolved column names for filtering
         pg_col = r["pg_accessions"]
 
+        # PG-level q-value filter is opt-in (bigbio/qpx#241). With no threshold
+        # the pg view is emitted as reported (DIA-NN already FDR-filters its
+        # report and every PG q-value column is carried through for downstream
+        # filtering), mirroring the feature view's as-reported default. When a
+        # threshold IS given, apply the analogous PG-level FDR: prefer the
+        # experiment-wide Global.PG.Q.Value; fall back to the run-wise
+        # PG.Q.Value. If neither column is present (older DIA-NN reports), skip
+        # the filter with a warning rather than crash.
+        qvalue_filter = ""
+        if qvalue_threshold is not None:
+            pg_qvalue_col = r.get("global_qvalue") or r.get("qvalue")
+            if pg_qvalue_col and pg_qvalue_col in actual_report_cols:
+                qvalue_filter = sql_build(
+                    "AND CAST(report.$qv_col AS DOUBLE) <= $threshold",
+                    qv_col=validate_identifier(pg_qvalue_col),
+                    threshold=str(float(qvalue_threshold)),
+                )
+            else:
+                self.logger.warning(
+                    "DIA-NN report has no PG q-value column (Global.PG.Q.Value / PG.Q.Value); "
+                    "skipping PG-level q-value filter — protein groups are NOT FDR-filtered."
+                )
+
         placeholders = ", ".join(["?" for _ in runs])
         channel_join = ""
         if channel_col:
@@ -217,12 +304,14 @@ class DiannPgAdapter(DiaNNBaseAdapter):
             $channel_join
             WHERE $run_col IN ($placeholders)
               AND $pg_col IS NOT NULL
+              $qvalue_filter
             """,
             select_clause=select_clause,
             channel_join=channel_join,
             run_col=validate_identifier(run_col),
             placeholders=placeholders,
             pg_col=validate_identifier(pg_col),
+            qvalue_filter=qvalue_filter,
         )
         report_df = self._conn.execute(stmt, runs).df()
 
@@ -232,18 +321,27 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         # Use SQL-computed clean run names
         report_df["run_file_name"] = report_df["run_file_name_clean"]
         report_df.drop(columns=["run_file_name_clean"], inplace=True)
+        report_df["pg_membership_key"] = report_df["pg_accessions"].map(_canonical_pg_membership)
+        report_df = report_df[report_df["pg_membership_key"] != ""]
 
-        # Aggregate per protein group per run — single groupby over the whole batch
+        # Aggregate per protein group per run — one record per (pg_accessions, run).
+        # Grouping additionally on pg_names/gg_accessions would split a single
+        # protein group into multiple records when DIA-NN emits inconsistent
+        # name/gene annotations across a group's precursor rows; those records
+        # share the same (pg_accessions, grouped_runs, label) identity and would
+        # collide on pg_id. Names/genes are instead derived within the group
+        # below (first non-null), so annotation noise no longer splits a group.
         pg_groups = report_df.groupby(
-            ["pg_accessions", "pg_names", "gg_accessions", "run_file_name"],
+            ["pg_membership_key", "run_file_name"],
             dropna=False,
         )
 
-        for (pg_acc, pg_nm, gg_acc, ref), group in pg_groups:
+        for (pg_acc, ref), group in pg_groups:
             rec = self._build_pg_record(
                 pg_acc=str(pg_acc),
-                pg_names_raw=pg_nm,
-                gg_acc_raw=gg_acc,
+                anchor_protein=_producer_group_leader(group["pg_accessions"]),
+                pg_names_raw=_first_non_null(group["pg_names"]),
+                gg_acc_raw=_first_non_null(group["gg_accessions"]),
                 run_file_name=str(ref),
                 group=group,
                 pg_matrix_indexed=pg_matrix_indexed,
@@ -256,6 +354,7 @@ class DiannPgAdapter(DiaNNBaseAdapter):
     def _build_pg_record(
         self,
         pg_acc: str,
+        anchor_protein: str,
         pg_names_raw,
         gg_acc_raw,
         run_file_name: str,
@@ -264,12 +363,12 @@ class DiannPgAdapter(DiaNNBaseAdapter):
     ) -> Optional[dict]:
         """Build a single PG record."""
 
-        pg_accessions = pg_acc.split(";")
+        pg_accessions = _pg_members(pg_acc)
         pg_names = str(pg_names_raw).split(";") if pd.notna(pg_names_raw) and pg_names_raw else None
         gg_accessions = str(gg_acc_raw).split(";") if pd.notna(gg_acc_raw) and gg_acc_raw else None
 
-        anchor_protein = pg_accessions[0] if pg_accessions else ""
-        global_qvalue = safe_float(group["global_qvalue"].iloc[0])
+        anchor_protein = anchor_protein or (pg_accessions[0] if pg_accessions else "")
+        global_qvalue = safe_float(_col_first(group, "global_qvalue"))
 
         # is_decoy: a PG made up ENTIRELY of decoy proteins is a decoy group.
         # Mirrors the feature adapter's prefix-based derivation (DIA-NN carries no
@@ -297,14 +396,31 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         # MaxLFQ as a compatibility fallback; the experimental channel remains
         # the label, while "maxlfq" is recorded as the algorithm name in
         # additional_intensities.
-        def first_quantity(frame: pd.DataFrame, column: str) -> float | None:
+        #
+        # PG.Quantity / PG.MaxLFQ are protein-group-level values that DIA-NN
+        # repeats identically on every precursor row of a group within a run, so
+        # a group's rows should agree. When annotation noise merges rows that
+        # disagree on the quantity (Codex HIGH), picking the "first" row makes the
+        # emitted intensity depend on SQL row order, which is undefined. Take the
+        # max of the finite values instead: deterministic, order-independent, and
+        # equal to the shared value in the normal (consistent) case. Warn when the
+        # finite values actually disagree so the data anomaly stays visible.
+        def deterministic_quantity(frame: pd.DataFrame, column: str) -> float | None:
             if column not in frame.columns:
                 return None
-            for value in frame[column]:
-                quantity = safe_float(value)
-                if quantity is not None:
-                    return quantity
-            return None
+            values = [q for q in (safe_float(v) for v in frame[column]) if q is not None]
+            if not values:
+                return None
+            if len(set(values)) > 1:
+                self.logger.warning(
+                    "Protein group %s in run %s has conflicting %s values %s; using max (%s) deterministically.",
+                    pg_acc,
+                    run_file_name,
+                    column,
+                    sorted(set(values)),
+                    max(values),
+                )
+            return max(values)
 
         if "channel_label" in group.columns:
             quant_groups = list(group.groupby("channel_label", sort=True))
@@ -314,8 +430,8 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         intensities = []
         additional_intensities = []
         for label, channel_group in quant_groups:
-            raw_quantity = first_quantity(channel_group, "pg_quantity_raw")
-            maxlfq_val = first_quantity(channel_group, "lfq")
+            raw_quantity = deterministic_quantity(channel_group, "pg_quantity_raw")
+            maxlfq_val = deterministic_quantity(channel_group, "lfq")
             if maxlfq_val is None and "channel_label" not in group.columns:
                 maxlfq_val = pg_quantity or None
 
@@ -347,7 +463,7 @@ class DiannPgAdapter(DiaNNBaseAdapter):
         peptides = [{"protein_name": acc, "peptide_count": peptide_count} for acc in pg_accessions]
 
         # Additional scores — track inline
-        qvalue_val = safe_float(group["qvalue"].iloc[0])
+        qvalue_val = safe_float(_col_first(group, "qvalue"))
         additional_scores = []
         if qvalue_val is not None:
             additional_scores.append({"score_name": "qvalue", "score_value": qvalue_val, "higher_better": False})
@@ -358,11 +474,11 @@ class DiannPgAdapter(DiaNNBaseAdapter):
             "pg_names": pg_names,
             "gg_accessions": gg_accessions,
             "gg_names": gg_accessions,  # Gene symbols serve as both accession and name
-            "gg_qvalue": (safe_float(group["gg_qvalue"].iloc[0]) if "gg_qvalue" in group.columns else None),
+            "gg_qvalue": safe_float(_col_first(group, "gg_qvalue")),
             "anchor_protein": anchor_protein,
             "grouped_runs": [run_file_name],
             "global_qvalue": global_qvalue,
-            "pg_qvalue": safe_float(group["qvalue"].iloc[0]),
+            "pg_qvalue": qvalue_val,
             "intensities": intensities or None,
             "additional_intensities": additional_intensities or None,
             "is_decoy": is_decoy,

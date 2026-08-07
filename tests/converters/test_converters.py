@@ -81,6 +81,20 @@ class TestFragPipeToProforma:
         result = to_proforma("N-term(42.0106)", "PEPTIDEK")
         assert result == "[UNIMOD:1]-PEPTIDEK"
 
+    def test_cterm(self):
+        """Preserve a FragPipe C-terminal token and its terminal position."""
+        from qpx.converters.fragpipe.constants import to_modifications
+
+        peptidoform, modifications = to_modifications("C-term(-0.9840)", "PEPTIDEK")
+        assert peptidoform == "PEPTIDEK-[-0.984]"
+        assert modifications == [
+            {
+                "name": "CHEMMOD:-0.984",
+                "accession": None,
+                "positions": [{"position": 9, "amino_acid": None, "scores": None}],
+            }
+        ]
+
     def test_multiple_mods(self):
         from qpx.converters.fragpipe.constants import to_proforma
 

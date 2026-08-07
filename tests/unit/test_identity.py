@@ -50,7 +50,7 @@ def test_schema_identity_metadata():
     assert tuple(PsmSchema._primary_key) == ("psm_id",)
     assert tuple(PsmSchema.identity_composite) == ("peptidoform", "charge", "run_file_name", "scan")
     assert tuple(PgSchema._primary_key) == ("pg_id",)
-    assert tuple(PgSchema.identity_composite) == ("anchor_protein", "grouped_runs", "label")
+    assert tuple(PgSchema.identity_composite) == ("pg_accessions", "grouped_runs", "label")
 
 
 def test_writer_rejects_unknown_identity_composite_field(tmp_path):
@@ -114,13 +114,13 @@ def test_pg_roundtrip_derives_id(tmp_path):
 
     table = pq.read_table(path)
     ids = table.column("pg_id").to_pylist()
-    anchors = table.column("anchor_protein").to_pylist()
+    pg_accessions = table.column("pg_accessions").to_pylist()
     grouped = table.column("grouped_runs").to_pylist()
     labels = table.column("label").to_pylist()
     assert None not in ids
     assert len(set(ids)) == len(ids)
     for i, got in enumerate(ids):
-        assert got == derive_id([anchors[i], grouped[i], labels[i]])
+        assert got == derive_id([pg_accessions[i], grouped[i], labels[i]], unordered_list_indices=(0, 1))
 
 
 def test_identified_feature_id_is_derived_by_default(tmp_path):
@@ -165,8 +165,8 @@ def test_unidentified_feature_uses_unique_composite_fallback(tmp_path, caplog):
 
 
 @pytest.mark.parametrize("write_path", ["batch", "table"])
-def test_unidentified_feature_rejects_non_unique_composite_fallback(tmp_path, write_path):
-    """Distinct unidentified Features cannot share a fallback-derived primary key."""
+def test_unidentified_feature_warns_on_non_unique_composite_fallback(tmp_path, write_path, caplog):
+    """Distinct unidentified Features sharing a fallback PK are tolerated with a warning."""
     path = tmp_path / "duplicate-unidentified.feature.parquet"
     first = make_feature_record(sequence="", peptidoform="")
     second = make_feature_record(
@@ -175,7 +175,7 @@ def test_unidentified_feature_rejects_non_unique_composite_fallback(tmp_path, wr
         intensities=[{"label": "TMT126", "intensity": 2000.0}],
     )
 
-    with pytest.raises(ValueError, match="Unidentified Feature composite fallback was used for 2 row"):
+    with caplog.at_level(logging.WARNING):
         with FeatureWriter(path, batch_size=1) as writer:
             if write_path == "batch":
                 writer.write_batch([first, second])
@@ -183,21 +183,25 @@ def test_unidentified_feature_rejects_non_unique_composite_fallback(tmp_path, wr
                 table = writer.align_table_to_schema(pa.Table.from_pylist([first, second]))
                 writer.write_table(table)
 
+    assert path.exists()
+    assert "duplicate row" in caplog.text.lower()
 
-def test_identified_duplicate_not_attributed_to_fallback(tmp_path):
-    """A duplicate among identified Features keeps the plain PK error even when a
+
+def test_identified_duplicate_warns_without_fallback_note(tmp_path, caplog):
+    """A duplicate among identified Features warns with the plain PK message even when a
     (unique) unidentified composite-fallback row is present in the same file."""
     path = tmp_path / "mixed-duplicate.feature.parquet"
     fallback = make_feature_record(sequence="", peptidoform="")  # unique unidentified fallback
     dup_a = make_feature_record(run_file_name="run_09")
     dup_b = make_feature_record(run_file_name="run_09")  # identical composite -> duplicate PK
 
-    with pytest.raises(ValueError) as excinfo:
+    with caplog.at_level(logging.WARNING):
         with FeatureWriter(path, batch_size=10) as writer:
             writer.write_batch([fallback, dup_a, dup_b])
-    message = str(excinfo.value)
-    assert "duplicate row" in message.lower()
-    assert "Unidentified Feature composite fallback" not in message
+
+    assert path.exists()
+    assert "duplicate row" in caplog.text.lower()
+    assert "Unidentified Feature composite fallback" not in caplog.text
 
 
 def test_provided_psm_id_kept_by_default(tmp_path):
@@ -210,15 +214,18 @@ def test_provided_psm_id_kept_by_default(tmp_path):
     assert pq.read_table(path).column("psm_id").to_pylist() == [123456789]
 
 
-def test_writer_rejects_duplicate_identity_across_batches(tmp_path):
-    """Whole-file PK validation catches collisions split across writer batches."""
+def test_writer_warns_on_duplicate_identity_across_batches(tmp_path, caplog):
+    """Whole-file PK validation warns on collisions split across writer batches."""
     path = tmp_path / "duplicate.feature.parquet"
     first = make_feature_record()
     second = make_feature_record(intensities=[{"label": "TMT126", "intensity": 2000.0}])
 
-    with pytest.raises(ValueError, match=r"Primary key \(feature_id\) has 1 duplicate row"):
+    with caplog.at_level(logging.WARNING):
         with FeatureWriter(path, batch_size=1) as writer:
             writer.write_batch([first, second])
+
+    assert path.exists()
+    assert "Primary key (feature_id) has 1 duplicate row" in caplog.text
 
 
 def test_override_provided_id_stashes_to_cv_params(tmp_path):
@@ -261,6 +268,7 @@ def test_derive_id_preserves_ordered_list_components():
 def test_derive_id_can_canonicalize_set_valued_lists():
     """Explicitly unordered grouped_runs values are compared set-wise."""
     assert derive_id([["r1", "r2"]], unordered_list_indices=(0,)) == derive_id([["r2", "r1"]], unordered_list_indices=(0,))
+    assert derive_id([["r1", "r2", "r1"]], unordered_list_indices=(0,)) == derive_id([["r2", "r1"]], unordered_list_indices=(0,))
     assert derive_id([["r1", "r2"]], unordered_list_indices=(0,)) != derive_id([["r1", "r3"]], unordered_list_indices=(0,))
 
 
@@ -332,15 +340,16 @@ def test_ids_agree_across_write_paths(tmp_path):
     assert len(ids) == 1
 
 
-def test_write_table_rejects_duplicate_pk(tmp_path):
-    """The table-writing path enforces primary-key uniqueness."""
+def test_write_table_warns_on_duplicate_pk(tmp_path, caplog):
+    """The table-writing path tolerates a duplicate primary key with a warning."""
     path = tmp_path / "dup_table.feature.parquet"
     r1 = make_feature_record(peptidoform="PEPTIDEK", charge=2, run_file_name="run_01")
     r2 = make_feature_record(
         peptidoform="PEPTIDEK", charge=2, run_file_name="run_01", intensities=[{"label": "TMT126", "intensity": 9.0}]
     )
-    w = FeatureWriter(path)
-    table = w.align_table_to_schema(pa.Table.from_pylist([dict(r1), dict(r2)]))
-    with pytest.raises(ValueError, match="Primary key.*duplicate"):
-        w.write_table(table)
-    assert not path.exists()
+    with caplog.at_level(logging.WARNING):
+        with FeatureWriter(path) as w:
+            table = w.align_table_to_schema(pa.Table.from_pylist([dict(r1), dict(r2)]))
+            w.write_table(table)
+    assert path.exists()
+    assert "duplicate row" in caplog.text.lower()

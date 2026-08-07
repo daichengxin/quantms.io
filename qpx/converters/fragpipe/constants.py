@@ -4,15 +4,35 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
-from typing import Optional
 
 from qpx.converters.ptm import build_proforma, from_proforma, mass_to_unimod
+
+# ---------------------------------------------------------------------------
+# Decoy detection
+# ---------------------------------------------------------------------------
+# FragPipe/Philosopher tag decoy accessions with one of these prefixes. Keep the
+# set identical across the psm/feature/pg adapters so a decoy is labelled the
+# same everywhere. Detection must run on the RAW accession, before any
+# ``sp|ACC|NAME`` parsing strips the prefix.
+DECOY_PREFIXES = ("rev_", "REV_", "DECOY_", "decoy_")
+
+
+def is_decoy_accession(protein_field: str) -> bool:
+    """True if any accession in a (possibly comma-joined) protein field is a decoy.
+
+    Operates on the raw string so ``rev_sp|P123|NAME`` is still recognised as a
+    decoy (``parse_uniprot_id`` would otherwise drop the ``rev_`` prefix).
+    """
+    if not protein_field:
+        return False
+    return any(part.strip().startswith(DECOY_PREFIXES) for part in str(protein_field).split(","))
+
 
 # ---------------------------------------------------------------------------
 # PTM parsing: FragPipe "Assigned Modifications" -> ProForma
 # ---------------------------------------------------------------------------
 
-_FP_MOD_TOKEN_RE = re.compile(r"(?:(\d+)([A-Z])|(N-term))\(([^)]+)\)")
+_FP_MOD_TOKEN_RE = re.compile(r"(?:(\d+)([A-Z])|([NC]-term))\(([^)]+)\)")
 
 
 @lru_cache(maxsize=8192)
@@ -32,8 +52,7 @@ def to_proforma(assigned_mods: str, sequence: str) -> str:
     if not assigned_mods or not assigned_mods.strip():
         return sequence
 
-    pos_mods: dict[int, str] = {}
-    nterm_tag: Optional[str] = None
+    mods: list[tuple[int, str]] = []
 
     for token in assigned_mods.split(","):
         token = token.strip()
@@ -44,7 +63,7 @@ def to_proforma(assigned_mods: str, sequence: str) -> str:
         if not m:
             continue
 
-        pos_str, _aa, nterm, mass_str = m.groups()
+        pos_str, _aa, terminus, mass_str = m.groups()
         try:
             mass = float(mass_str)
         except ValueError:
@@ -56,16 +75,15 @@ def to_proforma(assigned_mods: str, sequence: str) -> str:
         else:
             tag = f"+{mass}" if mass >= 0 else str(mass)
 
-        if nterm:
-            nterm_tag = tag
+        if terminus == "N-term":
+            position = 0
+        elif terminus == "C-term":
+            position = len(sequence) + 1
         elif pos_str is not None:
-            pos_mods[int(pos_str)] = tag
-
-    mods: list[tuple[int, str]] = []
-    if nterm_tag:
-        mods.append((0, nterm_tag))
-    for pos, tag in pos_mods.items():
-        mods.append((pos, tag))
+            position = int(pos_str)
+        else:
+            continue
+        mods.append((position, tag))
 
     return build_proforma(sequence, mods)
 

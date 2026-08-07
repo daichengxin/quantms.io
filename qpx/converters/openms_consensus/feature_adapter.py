@@ -169,10 +169,13 @@ def to_modifications(aa_sequence, site_scores: dict[int, list[dict]] | None = No
 
     nterm = aa_sequence.getNTerminalModification() if hasattr(aa_sequence, "getNTerminalModification") else None
     if nterm:
-        _add_mod(nterm.getId() or "", _acc(nterm.getUniModAccession()), 1, None, None)
+        # N-terminal position is always 0 (amino_acid null); see the QPX
+        # modifications spec.
+        _add_mod(nterm.getId() or "", _acc(nterm.getUniModAccession()), 0, None, None)
     cterm = aa_sequence.getCTerminalModification() if hasattr(aa_sequence, "getCTerminalModification") else None
     if cterm:
-        _add_mod(cterm.getId() or "", _acc(cterm.getUniModAccession()), aa_sequence.size(), None, None)
+        # C-terminal position is always length + 1 (amino_acid null).
+        _add_mod(cterm.getId() or "", _acc(cterm.getUniModAccession()), aa_sequence.size() + 1, None, None)
     return mods or None
 
 
@@ -231,11 +234,19 @@ def load_consensus_map(consensusxml_path: str):
 
 
 def _pid_scans(pid) -> list[int]:
-    """Scan numbers parsed from one identification's spectrum reference."""
+    """Scan numbers parsed from one identification's spectrum reference.
+
+    Uses the shared parser in :mod:`psm_adapter` (imported lazily to avoid a
+    circular import — psm_adapter imports this module) so feature.scan and
+    psm.scan are produced by the same logic, including Sciex ``cycle=`` ordinals
+    and the deterministic surrogate fallback.
+    """
     ref = pid.getSpectrumReference() if hasattr(pid, "getSpectrumReference") else ""
     if not ref and pid.metaValueExists("spectrum_reference"):
         ref = pid.getMetaValue("spectrum_reference")
-    return [int(m) for m in re.findall(r"(?:scan|index|spectrum)=(\d+)", str(ref or ""), re.IGNORECASE)]
+    from qpx.converters.openms_consensus.psm_adapter import _scan_of
+
+    return _scan_of(ref)
 
 
 def _scan_by_run(pids, map_info: dict[int, tuple[str, str]], cf_runs: Optional[set[str]] = None) -> dict[str, list[int]]:
@@ -288,20 +299,22 @@ def _group_subfeatures_by_run(cf, map_info: dict[int, tuple[str, str]]) -> dict[
     return by_run
 
 
-def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, anchor_map=None) -> list[dict]:
+def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, group_map=None) -> list[dict]:
     """Return QPX feature record dicts extracted from a consensusXML.
 
     Pass either ``consensusxml_path`` (loaded here) or an already-loaded ``cm``.
-    ``anchor_map`` (accession -> protein-group leader, from
-    ``pg_adapter.accession_to_anchor``) makes each feature's ``anchor_protein``
-    the same group leader the pg view uses, so the feature->pg join is reliable;
-    without it the anchor falls back to the peptide's first protein evidence.
+    ``group_map`` (accession -> full protein-group membership, from
+    ``pg_adapter.accession_to_group``) makes each feature stamp BOTH the same
+    group leader the pg view uses as ``anchor_protein`` AND the full
+    ``pg_accessions`` membership, so the feature->pg join is unambiguous even
+    when two distinct groups share a leader; without it the anchor falls back to
+    the peptide's first protein evidence and ``pg_accessions`` is null.
     """
     cm = cm if cm is not None else load_consensus_map(consensusxml_path)
     map_info = feature_map_info(cm)
     records: list[dict] = []
     for cf in cm:
-        records.extend(feature_records_for_cf(cf, map_info, anchor_map))
+        records.extend(feature_records_for_cf(cf, map_info, group_map))
     return records
 
 
@@ -315,8 +328,13 @@ def feature_map_info(cm) -> dict[int, tuple[str, str]]:
     return {idx: (_run_stem(headers[idx].filename), _map_label(headers[idx].label)) for idx in headers}
 
 
-def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=None) -> list[dict]:
-    """Feature records for one consensus feature (one per run, channels as intensities)."""
+def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], group_map=None) -> list[dict]:
+    """Feature records for one consensus feature (one per run, channels as intensities).
+
+    ``pg_accessions`` carries the full protein-group membership; the feature->pg
+    association is computed on read via the ``Dataset`` softlink (bigbio/qpx#269),
+    so ``pg_ids`` is left unset here.
+    """
     pids = cf.getPeptideIdentifications()
     if not pids or not pids[0].getHits():
         return []
@@ -338,13 +356,17 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
     consensus_rt = float(cf.getRT() if streamed_consensus_rt is None else streamed_consensus_rt)
     calculated_mz = float(seq_obj.getMZ(charge)) if charge else observed_mz
     evidences = hit.getPeptideEvidences()
-    anchor_protein = evidences[0].getProteinAccession() if evidences else None
-    if isinstance(anchor_protein, bytes):
-        anchor_protein = anchor_protein.decode()
-    # Resolve to the protein-group leader so feature.anchor_protein matches the
-    # pg view (peptide evidence order alone does not identify the leader).
-    if anchor_map and anchor_protein is not None:
-        anchor_protein = anchor_map.get(anchor_protein, anchor_protein)
+    orig = evidences[0].getProteinAccession() if evidences else None
+    if isinstance(orig, bytes):
+        orig = orig.decode()
+    # Resolve to the full protein-group membership so feature.anchor_protein AND
+    # feature.pg_accessions match the pg view (peptide evidence order alone does
+    # not identify the leader, nor the group when leaders are shared). Keep the
+    # group in the order _merge_protein_ids/_build_groups produced so pg_accessions
+    # lines up row-for-row with the pg view's pg_accessions for that group.
+    group = group_map.get(orig) if (group_map and orig is not None) else None
+    anchor_protein = group[0] if group else orig
+    pg_accessions = [{"accession": a, "start": None, "end": None, "pre": None, "post": None} for a in group] if group else None
 
     records: list[dict] = []
     for run, entry in _group_subfeatures_by_run(cf, map_info).items():
@@ -364,6 +386,7 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
                 "observed_mz": observed_mz,
                 "consensus_rt": consensus_rt,
                 "anchor_protein": anchor_protein,
+                "pg_accessions": pg_accessions,
                 "additional_scores": additional_scores,
             }
         )

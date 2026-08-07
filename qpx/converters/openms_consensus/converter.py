@@ -21,10 +21,13 @@ from qpx.converters.openms_consensus.feature_adapter import (
     check_channels_vs_sdrf,
     load_consensus_map,
 )
-from qpx.converters.openms_consensus.pg_adapter import accession_to_anchor, consensus_protein_groups_to_records
+from qpx.converters.openms_consensus.pg_adapter import (
+    accession_to_group,
+    consensus_protein_groups_to_records,
+)
 from qpx.converters.orchestrator import BaseOrchestrator
 from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
-from qpx.core.data import FeatureSchema, PsmSchema
+from qpx.core.data import FeatureSchema
 from qpx.core.data.identity import derive_id
 from qpx.writers.feature import FeatureWriter
 from qpx.writers.pg import PgWriter
@@ -47,8 +50,8 @@ _FEATURE_IDENTITY_COMPOSITE = (
     "observed_mz",
     "consensus_rt",
 )
-# The psm view's schema identity_composite (psm.yaml) — used to derive the
-# psm_id we cross-reference from feature.psm_ids / psm.feature_id.
+# The psm view's schema identity_composite (psm.yaml) — passed to the PsmWriter
+# so the derived psm_id hashes exactly these columns.
 _PSM_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "scan")
 
 
@@ -58,34 +61,30 @@ def _derive_persisted_record_id(record: dict, composite: tuple[str, ...], schema
     return derive_id(values)
 
 
-def _link_feature_psm(feature_records: list[dict], psm_records: list[dict]) -> None:
-    """Populate feature.psm_ids and psm.feature_id in place for one consensus feature.
+def _link_psm_feature(feature_records: list[dict], psm_records: list[dict]) -> None:
+    """Stamp ``psm.feature_id`` in place for one consensus feature.
 
-    Ids are derived with the SAME composites the writers use, so these converter
-    -populated cross-refs match the writer-derived primary keys byte-for-byte
-    (``derive_id`` is deterministic). A consensus feature yields one feature
-    record per run; each PSM links to the feature record of its own run. PSMs
-    whose run has no feature record keep ``feature_id`` null (resolves #182).
+    ``psm.feature_id`` is the authoritative producer assignment — which consensus
+    feature a PSM belongs to. The id is derived with the SAME composite the
+    FeatureWriter uses, so this converter-populated foreign key matches the
+    writer-derived ``feature_id`` byte-for-byte (``derive_id`` is deterministic).
+    A consensus feature yields one feature record per run; each PSM links to the
+    feature record of its own run. PSMs whose run has no feature record keep
+    ``feature_id`` null (resolves #182).
+
+    The inverse ``feature.psm_ids`` is NOT materialized here: it is the pure
+    inverse of ``psm.feature_id`` (group PSMs by their ``feature_id``) and is
+    computed on read via :meth:`qpx.dataset.Dataset.link_feature_psm`.
     """
     feature_schema = FeatureSchema.get_arrow_schema()
-    psm_schema = PsmSchema.get_arrow_schema()
-    feat_by_run: dict[str, tuple[int, list[int]]] = {}
-    for rec in feature_records:
-        feat_id = _derive_persisted_record_id(rec, _FEATURE_IDENTITY_COMPOSITE, feature_schema)
-        feat_by_run[rec["run_file_name"]] = (feat_id, [])
+    feat_id_by_run: dict[str, int] = {
+        rec["run_file_name"]: _derive_persisted_record_id(rec, _FEATURE_IDENTITY_COMPOSITE, feature_schema)
+        for rec in feature_records
+    }
     for prec in psm_records:
-        entry = feat_by_run.get(prec.get("run_file_name"))
-        if entry is None:
-            continue
-        feat_id, psm_ids = entry
-        prec["feature_id"] = feat_id
-        psm_id = _derive_persisted_record_id(prec, _PSM_IDENTITY_COMPOSITE, psm_schema)
-        if psm_id not in psm_ids:
-            psm_ids.append(psm_id)
-    for rec in feature_records:
-        _, psm_ids = feat_by_run[rec["run_file_name"]]
-        if psm_ids:
-            rec["psm_ids"] = psm_ids
+        feat_id = feat_id_by_run.get(prec.get("run_file_name"))
+        if feat_id is not None:
+            prec["feature_id"] = feat_id
 
 
 # Above this consensusXML size, auto-select the streaming reader: the pyopenms
@@ -101,14 +100,14 @@ def _should_stream(path: str) -> bool:
         return False
 
 
-def _cf_feature_psm_records(cf, map_info, anchor_map, resolve_run, seen, *, want_feature, want_psm):
+def _cf_feature_psm_records(cf, map_info, group_map, resolve_run, seen, *, want_feature, want_psm):
     """Feature + PSM records for one consensus feature, cross-linked when both views
     are emitted. Shared by the streaming and in-memory paths so their output matches.
     """
     from qpx.converters.openms_consensus.feature_adapter import feature_records_for_cf
     from qpx.converters.openms_consensus.psm_adapter import _cf_element_runs, psm_records_for_pid
 
-    cf_feats = feature_records_for_cf(cf, map_info, anchor_map) if want_feature else []
+    cf_feats = feature_records_for_cf(cf, map_info, group_map) if want_feature else []
     cf_psms: list[dict] = []
     if want_psm:
         # Multi-run isobaric PIDs carry a local id_merge_index; the feature's
@@ -116,9 +115,10 @@ def _cf_feature_psm_records(cf, map_info, anchor_map, resolve_run, seen, *, want
         cf_runs = _cf_element_runs(cf, map_info)
         for pid in cf.getPeptideIdentifications():
             cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
-    # Cross-reference the feature<->psm ids only when both views are emitted.
+    # Stamp psm.feature_id only when both views are emitted (the FK references a
+    # feature row written in this dataset). feature.psm_ids is the computed inverse.
     if want_feature and want_psm:
-        _link_feature_psm(cf_feats, cf_psms)
+        _link_psm_feature(cf_feats, cf_psms)
     return cf_feats, cf_psms
 
 
@@ -133,7 +133,7 @@ def _write_view(writer_cls, path, records, *, creator, compression, identity_com
     return path
 
 
-def _stream_feature_psm(cm, fw, pw, *, map_info, anchor_map, resolve_run, maps, pep_intensity, map_run, seen, batch):
+def _stream_feature_psm(cm, fw, pw, *, map_info, group_map, resolve_run, maps, pep_intensity, map_run, seen, batch):
     """One ordered element/unassigned pass: write feature/psm in batches and
     accumulate the pg maps in place (the streaming path's inner loop)."""
     from qpx.converters.openms_consensus.pg_adapter import (
@@ -148,7 +148,7 @@ def _stream_feature_psm(cm, fw, pw, *, map_info, anchor_map, resolve_run, maps, 
     for kind, obj in cm.iter_all():
         if kind == "element":
             cf_feats, cf_psms = _cf_feature_psm_records(
-                obj, map_info, anchor_map, resolve_run, seen, want_feature=fw is not None, want_psm=pw is not None
+                obj, map_info, group_map, resolve_run, seen, want_feature=fw is not None, want_psm=pw is not None
             )
             feat_buf.extend(cf_feats)
             psm_buf.extend(cf_psms)
@@ -185,7 +185,11 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     from contextlib import ExitStack
 
     from qpx.converters.openms_consensus.feature_adapter import _run_stem, feature_map_info
-    from qpx.converters.openms_consensus.pg_adapter import _ProteinMaps, accession_to_anchor, build_pg_records
+    from qpx.converters.openms_consensus.pg_adapter import (
+        _ProteinMaps,
+        accession_to_group,
+        build_pg_records,
+    )
     from qpx.converters.openms_consensus.psm_adapter import _run_resolver
     from qpx.converters.openms_consensus.streaming import StreamingConsensusMap
 
@@ -198,7 +202,7 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
     headers = cm.getColumnHeaders()
     map_run = {i: _run_stem(headers[i].filename) for i in headers}
     want_feature, want_psm, want_pg = ("feature" in structures, "psm" in structures, "pg" in structures)
-    anchor_map = accession_to_anchor(cm) if want_feature else None
+    group_map = accession_to_group(cm) if want_feature else None
     resolve_run = _run_resolver(cm) if want_psm or want_pg else None
     maps = _ProteinMaps() if want_pg else None
     pep_intensity: dict = defaultdict(float) if want_pg else {}
@@ -230,7 +234,7 @@ def _convert_streaming(consensusxml_path, out, output_prefix, structures, sdrf_p
             fw,
             pw,
             map_info=map_info,
-            anchor_map=anchor_map,
+            group_map=group_map,
             resolve_run=resolve_run,
             maps=maps,
             pep_intensity=pep_intensity,
@@ -491,15 +495,16 @@ class OpenMSConsensusConverter(BaseOrchestrator):  # pylint: disable=too-few-pub
             # path's element loop) so their cross-refs can be linked identically:
             # assigned PSMs first (cf order), then the unassigned PSMs.
             map_info = feature_map_info(cm)
-            # Share the protein-group leader map so feature.anchor_protein matches pg.
-            anchor_map = accession_to_anchor(cm) if want_feature else None
+            # Share the full protein-group membership so feature.anchor_protein and
+            # feature.pg_accessions match pg (unambiguous even for shared leaders).
+            group_map = accession_to_group(cm) if want_feature else None
             resolve_run = _run_resolver(cm) if want_psm else None
             seen: set = set()
             feat_recs: list[dict] = []
             psm_recs: list[dict] = []
             for cf in cm:
                 cf_feats, cf_psms = _cf_feature_psm_records(
-                    cf, map_info, anchor_map, resolve_run, seen, want_feature=want_feature, want_psm=want_psm
+                    cf, map_info, group_map, resolve_run, seen, want_feature=want_feature, want_psm=want_psm
                 )
                 feat_recs.extend(cf_feats)
                 psm_recs.extend(cf_psms)

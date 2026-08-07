@@ -19,22 +19,30 @@ from qpx.core.data.identity import derive_id
 from tests.conftest import _valid_arrays
 
 
-def _pg_table(anchor, grouped_runs, label=None):
+def _pg_table(anchor, grouped_runs, label=None, pg_accessions=None):
     """Build a minimal valid PG table, overriding only the identity columns.
 
     The primary key is the derived ``pg_id``; it is stamped here the same way
-    the writer would, from the (anchor_protein, grouped_runs, label) composite.
+    the writer would, from the ``(pg_accessions, grouped_runs, label)`` composite
+    (both list fields hashed order-independently). ``anchor_protein`` is the group
+    leader (descriptive); ``pg_accessions`` defaults to the single-member group
+    ``[anchor]`` but may be passed explicitly to model multi-protein groups (e.g.
+    two distinct groups that share a leading protein).
     """
     schema = PgSchema.get_arrow_schema()
     n = len(anchor)
     labels = label if label is not None else [None] * n
-    pg_ids = [derive_id([anchor[i], grouped_runs[i], labels[i]], unordered_list_indices=(1,)) for i in range(n)]
+    if pg_accessions is None:
+        pg_accessions = [None if a is None else [a] for a in anchor]
+    pg_ids = [derive_id([pg_accessions[i], grouped_runs[i], labels[i]], unordered_list_indices=(0, 1)) for i in range(n)]
     arrays = {}
     for f in schema:
         if f.name == "pg_id":
             arrays[f.name] = pa.array(pg_ids, type=f.type)
         elif f.name == "anchor_protein":
             arrays[f.name] = pa.array(anchor, type=f.type)
+        elif f.name == "pg_accessions":
+            arrays[f.name] = pa.array(pg_accessions, type=f.type)
         elif f.name == "grouped_runs":
             arrays[f.name] = pa.array(grouped_runs, type=f.type)
         elif f.name == "label":
@@ -109,6 +117,36 @@ def test_duplicate_run_within_one_group_is_not_reported_as_cross_row_double_coun
 
     assert any(issue.check == "duplicate_grouped_run" for issue in result.issues)
     assert not any(issue.check == "run_double_count" for issue in result.issues)
+
+
+def test_distinct_groups_sharing_leader_are_not_a_run_double_count():
+    """Two DIFFERENT groups that share a leading protein (same anchor) but have
+    different membership are distinct pg rows; overlapping grouped_runs must NOT
+    be flagged as a double-count — the check keys on full pg_accessions."""
+    table = _pg_table(
+        anchor=["P1", "P1"],
+        pg_accessions=[["P1", "P2"], ["P1", "P3"]],
+        grouped_runs=[["r1"], ["r1"]],
+        label=["LFQ", "LFQ"],
+    )
+    # Distinct membership -> distinct pg_id, so no duplicate PK either.
+    assert len(set(table.column("pg_id").to_pylist())) == 2
+    result = PgSchema.validate_full(table, strict=True)
+    assert not any(issue.check == "run_double_count" for issue in result.issues)
+    assert not any(issue.check == "duplicate_pk" for issue in result.issues)
+
+
+def test_same_group_overlapping_runs_is_a_run_double_count():
+    """The SAME group (same pg_accessions + label) measured over overlapping
+    run sets double-counts its intensity and must be flagged."""
+    table = _pg_table(
+        anchor=["P1", "P1"],
+        pg_accessions=[["P1", "P2"], ["P1", "P2"]],
+        grouped_runs=[["r1", "r2"], ["r2", "r3"]],
+        label=["LFQ", "LFQ"],
+    )
+    result = PgSchema.validate_full(table, strict=True)
+    assert any(issue.check == "run_double_count" for issue in result.issues)
 
 
 def test_validation_result_dataclass():
@@ -273,3 +311,51 @@ def test_cli_validate(dataset_dir, feature_parquet):
 
     result = runner.invoke(qpx_main, ["validate"])
     assert result.exit_code != 0
+
+
+def _feature_anchor_table(rows):
+    """Minimal valid feature table with anchor_protein / pg_accessions overridden.
+
+    ``rows`` is a list of ``(anchor, [accession, ...] | None)``.
+    """
+    schema = FeatureSchema.get_arrow_schema()
+    arrays = _valid_arrays(schema, len(rows))
+    pg_type = schema.field("pg_accessions").type
+
+    def member(accs):
+        if accs is None:
+            return None
+        return [{"accession": a, "start": None, "end": None, "pre": None, "post": None} for a in accs]
+
+    arrays["anchor_protein"] = pa.array([r[0] for r in rows], type=pa.string())
+    arrays["pg_accessions"] = pa.array([member(r[1]) for r in rows], type=pg_type)
+    return pa.table(arrays, schema=schema)
+
+
+def test_anchor_without_pg_accessions_is_flagged():
+    # anchor set + membership present -> ok; anchor set + no membership -> violation;
+    # no anchor + no membership -> ok (an unmapped feature).
+    table = _feature_anchor_table([("P1", ["P1", "P2"]), ("P2", None), (None, None)])
+
+    lenient = FeatureSchema.validate_full(table)
+    warns = [i for i in lenient.issues if i.check == "anchor_without_membership"]
+    assert len(warns) == 1 and warns[0].severity == "warning"
+
+    strict = FeatureSchema.validate_full(table, strict=True)
+    errs = [i for i in strict.issues if i.check == "anchor_without_membership"]
+    assert len(errs) == 1 and errs[0].severity == "error"
+
+
+def test_anchor_with_pg_accessions_ok():
+    table = _feature_anchor_table([("P1", ["P1"]), (None, None)])
+    issues = [i for i in FeatureSchema.validate_full(table).issues if i.check == "anchor_without_membership"]
+    assert issues == []
+
+
+def test_anchor_membership_skips_non_list_pg_accessions():
+    # A malformed pg_accessions (string, not list) is a type mismatch reported elsewhere;
+    # the membership check must skip it gracefully rather than raise on list_value_length.
+    from qpx.core.data.schema import _anchor_membership_issues
+
+    table = pa.table({"anchor_protein": pa.array(["P1"]), "pg_accessions": pa.array(["P1;P2"])})
+    assert _anchor_membership_issues(table, "feature", "warning") == []

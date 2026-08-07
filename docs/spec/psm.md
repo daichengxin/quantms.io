@@ -36,7 +36,7 @@ step in `provenance.parquet`.
 | `charge` | Charge state of the precursor ion | int16 | yes |
 | `posterior_error_probability` | Posterior error probability (PEP) for the peptide-spectrum match — the probability that the PSM is incorrect. **Lower values indicate higher confidence** (lower is better). Ranges from 0.0 (confident) to 1.0 (likely incorrect) | float64, null | no |
 | `is_decoy` | Whether the PSM is a decoy match (`true`) or a target match (`false`); use `false` when no target-decoy search was used | bool | yes |
-| `calculated_mz` | Theoretical peptide mass-to-charge ratio based on identified sequence and modifications | float32 | yes |
+| `calculated_mz` | Theoretical peptide mass-to-charge ratio based on identified sequence and modifications; null when it cannot be calculated | float32, null | yes |
 | `observed_mz` | Experimental observed peptide mass-to-charge ratio | float32 | yes |
 | `mass_error_ppm` | Mass error in ppm: 1e6 × (observed_mz − calculated_mz) / calculated_mz | float32, null | no |
 | `missed_cleavages` | Number of missed enzymatic cleavages | int16, null | no |
@@ -61,7 +61,7 @@ These fields are optional and may not exist in the file at all. They are include
 | `charge_array` | Array of fragment ion charge values                                                                                                                     | array[int32], null | no |
 | `ion_type_array` | Array of fragment ion type annotations (e.g., b1, y2, a2)                                                                                               | array[string], null | no |
 | `ion_mobility_array` | Array of fragment ion mobility values                                                                                                                   | array[float32], null | no |
-| `feature_id` | Reference to the linked Feature row through `feature.feature_id`; null when unlinked | int64, null | no |
+| `feature_id` | **Authoritative** (optional) foreign key to the linked Feature row through `feature.feature_id`; the producer's assignment of this PSM to a consensus feature (null when unlinked). It is NOT recomputable from shared identification fields, so it is materialized. Its inverse, `feature.psm_ids`, is a **computed softlink** — `Dataset.link_feature_psm()` groups `(feature_id, psm_id)` by `feature_id`; qpx does not materialize it ([bigbio/qpx#267](https://github.com/bigbio/qpx/issues/267)). | int64, null | no |
 
 !!! note "Nullable vs Optional"
     Core fields marked as "not required" are **nullable** -- the column always exists in the file but individual values may be null. Optional fields (protein accessions, spectral data) may be **absent from the file entirely**, depending on conversion settings. Protein mappings can be recovered by joining with the feature and protein group views.

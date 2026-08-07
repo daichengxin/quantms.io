@@ -27,10 +27,10 @@ Define these once; the rest of the spec uses them consistently.
 | **label** | The **canonical name of a channel** (`LFQ`, `TMT126`, `iTRAQ114`, …). This is the string that ties a quantity to a sample. For LFQ there is exactly one label, `"LFQ"`. For TMT/iTRAQ/plexDIA each channel is a distinct label mapping to a distinct sample. | `run.samples[].label`, `feature.intensities[].label`, `pg.label` |
 | **fraction** | A fractionated portion of one sample. Fractions of one sample share the same (source, biological replicate, technical replicate) and differ **only** in `run.fraction`. Each fraction is a separate run/raw file. | `run.fraction` |
 | **grouped_runs** | The **set of raw files aggregated into one quantification unit** — the fractions of one sample+channel context, aggregated together. `list<string>` of `run_file_name`. Single-element for unfractionated or DIA data. | `pg.grouped_runs` |
-| **quantification unit** | The thing a protein quantity is measured *over*: one `grouped_runs` set. A protein abundance exists per quantification unit, **not** per single raw file, because a protein quantity only emerges after aggregating its peptides across the sample's fractions. | `pg` (one row per `(anchor_protein, grouped_runs, label)`) |
+| **quantification unit** | The thing a protein quantity is measured *over*: one `grouped_runs` set. A protein abundance exists per quantification unit, **not** per single raw file, because a protein quantity only emerges after aggregating its peptides across the sample's fractions. | `pg` (one row per `(pg_accessions, grouped_runs, label)`) |
 | **peptidoform** | Peptide sequence + modifications in ProForma notation. The identity thread linking PSM ↔ feature ↔ pepmap. | `psm`, `feature`, `pepmap` |
 | **entity ID** | Mandatory opaque primary key for a PSM, Feature, or protein-group row: `psm_id`, `feature_id`, or `pg_id`. It may be supplied by the producer or derived by QPX from the file's footer-declared `identity_composite`. | `psm`, `feature`, `pg` |
-| **anchor_protein** | The representative (leading) protein of a protein group. On `feature` it is an annotation used for semantic protein mapping; an explicit Feature-to-PG link uses `feature.pg_ids[]` → `pg.pg_id`. On `pg` it participates in the default identity composite. | `feature`, `pg` |
+| **anchor_protein** | The representative (leading) protein of a protein group. On `feature` it is an annotation used for semantic protein mapping; the Feature-to-PG association is a **computed softlink** (`Dataset.link_feature_pg()`), not a persisted column. On `pg` it is descriptive; full `pg_accessions` membership participates in the default identity composite. | `feature`, `pg` |
 | **intensities** | Primary/raw abundance measurements. On **feature** a `list<{label, intensity}>` (one element per channel). On **pg** it is **flattened** to a scalar `label` + `intensity`, one row per label. | `feature.intensities`, `pg.label`/`pg.intensity` |
 | **additional_intensities** | Tool-computed derived values (normalized, LFQ, iBAQ, MaxLFQ) read from upstream output — never computed by QPX. | `feature`, `pg` |
 
@@ -67,7 +67,7 @@ graph LR
   override for their producer's Feature entity. Covers DDA **and** DIA.
 - **pg** — a protein group quantified over one **quantification unit**
   (`grouped_runs`) for one **label**. PK `pg_id`; schema-default identity
-  composite `[anchor_protein, grouped_runs, label]`. There is **one row per
+  composite `[pg_accessions, grouped_runs, label]`. There is **one row per
   label** (flattened since QPX 1.1).
 
 !!! note "Granularity shifts at each step"
@@ -90,10 +90,10 @@ erDiagram
     RUN ||--o{ FEATURE : "run_file_name"
     RUN ||--o{ MZ : "run_file_name"
     PG }o--|{ RUN : "grouped_runs[] contains run_file_name"
-    FEATURE }o--o{ PG : "pg_ids[] → pg_id"
+    FEATURE }o--o{ PG : "softlink: canonical(pg_accessions)+run+label"
     PEPMAP ||--o{ PSM : "peptidoform"
     PEPMAP ||--o{ FEATURE : "peptidoform"
-    PSM }o--o| FEATURE : "feature_id / psm_ids[]"
+    PSM }o--o| FEATURE : "psm.feature_id FK (psm_ids = computed inverse)"
     MZ }o--o{ PSM : "run_file_name+scan"
 
     SAMPLE {
@@ -123,8 +123,8 @@ erDiagram
     }
     FEATURE {
         int64 feature_id PK
-        list psm_ids FK
-        list pg_ids FK
+        list psm_ids "optional producer hardlink"
+        list pg_ids "optional producer hardlink"
         string peptidoform
         int charge
         string run_file_name
@@ -134,6 +134,7 @@ erDiagram
     }
     PG {
         int64 pg_id PK
+        list pg_accessions
         string anchor_protein
         list grouped_runs
         string label
@@ -155,10 +156,10 @@ The join keys, spelled out:
 
 | From | To | Join predicate |
 |------|----|----------------|
-| `feature` | `pg` | When populated, `unnest(feature.pg_ids) = pg.pg_id`. Without explicit IDs, the semantic association is `feature.anchor_protein = pg.anchor_protein` **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** `unnest(feature.intensities).label = pg.label`. |
+| `feature` | `pg` | A **computed softlink** (`Dataset.link_feature_pg()`, bigbio/qpx#269), not a persisted column: `canonical(feature.pg_accessions) = canonical(pg.pg_accessions)` (order-independent set) **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** a label in `feature.intensities` `IS NOT DISTINCT FROM pg.label` (label-aware, so no over-linking to a channel the feature lacks). `pg_id` is read from the matched pg row. No match = identified but not quantified in that channel/fraction. `feature.pg_ids` is an optional producer hardlink (`unnest(feature.pg_ids) = pg.pg_id` when a producer supplies it); qpx converters do not materialize it. Do **not** fall back to `anchor_protein`, which is not unique across groups that share a leading protein (see pg.md → *Protein group semantics*). |
 | `feature` / `pg` | `run` | `run_file_name = run.run_file_name` (for pg: any file in `grouped_runs`) |
 | `(file, label)` | `sample` | unnest `run.samples[]`, match `label`, take `sample_accession`; then `sample.sample_accession` |
-| `psm` ↔ `feature` | — | `psm.feature_id = feature.feature_id` or `psm.psm_id ∈ feature.psm_ids`; when explicit references are absent, shared identification fields can be used for semantic matching but are not a guaranteed row-level link. |
+| `psm` ↔ `feature` | — | `psm.feature_id` is the **authoritative** (optional) foreign key: `psm.feature_id = feature.feature_id` (null when a producer does not assign one). Its inverse, `feature.psm_ids`, is a **computed softlink** (`Dataset.link_feature_psm()`, bigbio/qpx#267) — the `(feature_id, psm_id)` pairs from `psm` where `feature_id IS NOT NULL`, grouped by `feature_id`; qpx does not materialize it. `feature.psm_ids` is an optional producer hardlink (`psm.psm_id ∈ feature.psm_ids` when a producer supplies it). When explicit references are absent, shared identification fields can be used for semantic matching but are not a guaranteed row-level link. |
 | `psm` / `feature` | `pepmap` | shared `peptidoform` |
 | `mz` ↔ `psm`/`feature` | — | `run_file_name + scan` |
 
@@ -213,7 +214,7 @@ graph TD
 
 !!! note "Fractionated TMT combines both"
     Fractionated TMT has `grouped_runs` with several files **and** N labels: one
-    pg row per `(anchor_protein, grouped_runs, label)` — the fractions collapse
+    pg row per `(pg_accessions, grouped_runs, label)` — the fractions collapse
     into the set, the channels stay as separate rows.
 
 ## Label / channel → sample resolution
@@ -272,7 +273,8 @@ returned once per sample and label.
 | Peptide identity | `peptidoform` (plus `charge` for PSM and feature) | psm, feature, pepmap |
 | Protein representative | `anchor_protein` | feature, pg |
 | Row identity | `psm_id` / `feature_id` / `pg_id` | psm / feature / pg |
-| Explicit cross-reference | `psm.feature_id`, `feature.psm_ids`, `feature.pg_ids` | psm ↔ feature → pg |
+| Explicit cross-reference | `psm.feature_id` (authoritative, persisted); `feature.psm_ids`, `feature.pg_ids` (optional producer hardlinks) | psm ↔ feature |
+| Computed cross-reference | `Dataset.link_feature_psm()`, `Dataset.link_feature_pg()` softlinks | psm ↔ feature, feature → pg |
 
 ## Related pages
 
