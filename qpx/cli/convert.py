@@ -219,15 +219,9 @@ def convert_diann_cmd(
         compression=compression,
         diann_log=str(diann_log) if diann_log else None,
     )
-    converter.convert_features(
-        mzml_info_folder=mzml_info_folder,
-        qvalue_threshold=qvalue_threshold,
-        output_folder=output_folder,
-        output_prefix=output_prefix,
-        protein_file=protein_file,
-        partitions=partitions,
-        batch_size=batch_size,
-    )
+    # Convert the pg view first when a matrix is provided: it builds the
+    # feature->pg lookup that convert_features consumes to stamp feature.pg_ids
+    # (bigbio/qpx#266). Without a pg matrix, features get null pg_ids.
     if pg_matrix_path:
         converter.convert_pg(
             pg_matrix_path=pg_matrix_path,
@@ -237,6 +231,15 @@ def convert_diann_cmd(
             standardized_intensities=standardized_intensities,
             qvalue_threshold=qvalue_threshold,
         )
+    converter.convert_features(
+        mzml_info_folder=mzml_info_folder,
+        qvalue_threshold=qvalue_threshold,
+        output_folder=output_folder,
+        output_prefix=output_prefix,
+        protein_file=protein_file,
+        partitions=partitions,
+        batch_size=batch_size,
+    )
 
     converter.convert_sdrf(output_folder=output_folder, prefix=prefix)
     converter.write_ontology(output_folder, prefix=prefix)

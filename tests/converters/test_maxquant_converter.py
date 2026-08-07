@@ -541,3 +541,95 @@ class TestMaxQuantOntologyConversion:
         errors = OntologySchema.validate(table)
         if errors:
             raise AssertionError(f"Schema validation errors: {errors}")
+
+
+# ---------------------------------------------------------------------------
+# feature.pg_ids cross-reference round-trip (bigbio/qpx#266)
+# ---------------------------------------------------------------------------
+
+from tests.converters.pg_ids_roundtrip import assert_pg_ids_join_valid, read_feature_pg  # noqa: E402
+
+
+def _write_pg_link_inputs(tmp_path):
+    """Minimal LFQ MaxQuant inputs exercising shared-leader + a null pg_ids case.
+
+    PEPTIDEA -> group P1;P2, PEPTIDEB -> P1;P3 (distinct groups, shared leader P1),
+    PEPTIDEC -> P9 which is absent from proteinGroups (so its feature has no pg row).
+    All three features share Experiment exp1 / Raw file run1.
+    """
+    evidence = tmp_path / "evidence.txt"
+    header = (
+        "Sequence\tModified sequence\tCharge\tRaw file\tExperiment\tType\tMS/MS scan number\tm/z\t"
+        "Calibrated retention time\tCalibrated retention time start\tCalibrated retention time finish\t"
+        "PEP\tLeading razor protein\tLeading proteins\tGene names\tIntensity\tMass\tid\n"
+    )
+    rows = (
+        "PEPTIDEA\t_PEPTIDEA_\t2\trun1\texp1\tMULTI-MSMS\t100\t450.25\t30.0\t29.5\t30.5\t0.01\tP1\tP1;P2\t\t1000\t500\t1\n"
+        "PEPTIDEB\t_PEPTIDEB_\t2\trun1\texp1\tMULTI-MSMS\t200\t460.25\t31.0\t30.5\t31.5\t0.02\tP1\tP1;P3\t\t2000\t520\t2\n"
+        "PEPTIDEC\t_PEPTIDEC_\t2\trun1\texp1\tMULTI-MSMS\t300\t470.25\t32.0\t31.5\t32.5\t0.03\tP9\tP9\t\t3000\t540\t3\n"
+    )
+    evidence.write_text(header + rows)
+
+    protein_groups = tmp_path / "proteinGroups.txt"
+    protein_groups.write_text(
+        "Protein IDs\tMajority protein IDs\tQ-value\tGene names\tIntensity exp1\n"
+        "P1;P2\tP1;P2\t0.001\tGENEA\t1000\n"
+        "P1;P3\tP1;P3\t0.002\tGENEB\t2000\n"
+    )
+    return evidence, protein_groups
+
+
+def test_feature_pg_ids_roundtrip_shared_leader_and_null(tmp_path):
+    """Full pg+feature conversion: every populated feature.pg_ids joins to a real
+    pg row with matching membership + run; shared-leader groups stay distinct; a
+    feature whose group has no pg row gets null pg_ids."""
+    from qpx.converters.maxquant.converter import MaxQuantConverter
+    from qpx.core.constants import FEATURE, PG
+
+    evidence, protein_groups = _write_pg_link_inputs(tmp_path)
+    out = tmp_path / "out"
+    MaxQuantConverter().convert(
+        output_folder=str(out),
+        evidence_file=str(evidence),
+        protein_groups_file=str(protein_groups),
+        output_prefix="mq",
+        structures=[FEATURE, PG],
+    )
+
+    feat, pg = read_feature_pg(out / "mq.feature.parquet", out / "mq.pg.parquet")
+    assert_pg_ids_join_valid(feat, pg)
+
+    pg_id_by_membership = {tuple(sorted(accs)): pg_id for pg_id, accs, *_ in pg}
+    ids_by_seq = {seq: list(pg_ids) if pg_ids else [] for seq, _run, _accs, pg_ids in feat}
+    assert ids_by_seq["PEPTIDEA"] == [pg_id_by_membership[("P1", "P2")]]
+    assert ids_by_seq["PEPTIDEB"] == [pg_id_by_membership[("P1", "P3")]]
+    assert set(ids_by_seq["PEPTIDEA"]).isdisjoint(ids_by_seq["PEPTIDEB"])
+    assert ids_by_seq["PEPTIDEC"] == []  # group P9 absent from pg -> null pg_ids
+
+
+@pytest.mark.integration
+def test_feature_pg_ids_roundtrip_real_full_dataset(tmp_path_factory):
+    """Real MaxQuant example (maxquant_full): every populated feature.pg_ids joins
+    to a real pg row with matching membership + run (bigbio/qpx#266)."""
+    from qpx.converters.maxquant.converter import MaxQuantConverter
+    from qpx.core.constants import FEATURE, PG
+
+    full = Path(__file__).resolve().parent.parent / "examples" / "maxquant" / "maxquant_full"
+    evidence = full / "evidence.txt.gz"
+    protein_groups = full / "proteinGroups.txt"
+    if not evidence.exists() or not protein_groups.exists():
+        pytest.skip("maxquant_full fixture not found")
+
+    out = tmp_path_factory.mktemp("mq_pg_ids")
+    MaxQuantConverter().convert(
+        output_folder=str(out),
+        evidence_file=str(evidence),
+        protein_groups_file=str(protein_groups),
+        sdrf_file=str(full / "PXD001819.sdrf.tsv"),
+        output_prefix="mq",
+        structures=[FEATURE, PG],
+    )
+
+    feat, pg = read_feature_pg(out / "mq.feature.parquet", out / "mq.pg.parquet")
+    assert_pg_ids_join_valid(feat, pg)
+    assert any(pg_ids for *_, pg_ids in feat), "expected at least some populated feature.pg_ids"

@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from tests.conftest import assert_pg_table_wellformed
+from tests.converters.pg_ids_roundtrip import assert_pg_ids_join_valid, read_feature_pg
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples" / "diann" / "small"
 
@@ -1069,3 +1070,165 @@ class TestDiannReportLoading:
 
             assert self._relation_type(engine.connection) == "VIEW"
             assert not any(statement.startswith("SELECT COUNT(*)") for statement in statements)
+
+
+# ---------------------------------------------------------------------------
+# feature.pg_ids cross-reference round-trip (bigbio/qpx#266)
+# ---------------------------------------------------------------------------
+
+
+def _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, sdrf_path=None, pg_qvalue=None, feature_qvalue=None):
+    """Run pg-then-feature so feature.pg_ids is stamped from the pg lookup."""
+    from qpx.converters.diann.converter import DiaNNConverter
+
+    out = tmp_path / "roundtrip"
+    out.mkdir(exist_ok=True)
+    conv = DiaNNConverter(report_path=str(report_path), sdrf_path=str(sdrf_path) if sdrf_path else None)
+    conv.convert_pg(pg_matrix_path=str(matrix_path), output_folder=str(out), output_prefix="d", qvalue_threshold=pg_qvalue)
+    conv.convert_features(output_folder=str(out), output_prefix="d", qvalue_threshold=feature_qvalue)
+    return read_feature_pg(out / "d.feature.parquet", out / "d.pg.parquet")
+
+
+def test_feature_pg_ids_roundtrip_plexdia_multilabel(tmp_path):
+    """Every populated feature.pg_ids is a real pg.pg_id with the matching membership +
+    run; the one plexDIA feature references one pg_id per channel/label."""
+    report_path, matrix_path, sdrf_path = _write_plexdia_inputs(tmp_path)
+    feat, pg = _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, sdrf_path, feature_qvalue=0.01)
+
+    assert_pg_ids_join_valid(feat, pg)
+    assert len(feat) == 1  # channels folded into one feature
+    _seq, _run, _accs, pg_ids = feat[0]
+    assert pg_ids is not None and len(pg_ids) == 2  # one pg row per channel
+    assert set(pg_ids) == {row[0] for row in pg}
+    assert {row[3] for row in pg} == {"L", "H"}  # both channel labels
+
+
+def test_feature_pg_ids_roundtrip_shared_leader_distinct(tmp_path):
+    """Two distinct groups sharing leader P1 -> each feature references the CORRECT
+    distinct pg row, not the other's."""
+    common = {
+        "Run": "run_A",
+        "PG.Quantity": 1000.0,
+        "Precursor.Charge": 2,
+        "Q.Value": 0.002,
+        "PG.Q.Value": 0.002,
+        "Global.PG.Q.Value": 0.003,
+        "Proteotypic": 1,
+        "Precursor.Quantity": 100.0,
+    }
+    report_path = tmp_path / "sl_report.tsv"
+    pd.DataFrame(
+        [
+            {
+                **common,
+                "Protein.Group": "P1;P2",
+                "Protein.Names": "N1;N2",
+                "Genes": "G1;G2",
+                "Stripped.Sequence": "PEPTIDEK",
+                "Modified.Sequence": "PEPTIDEK",
+                "Precursor.Id": "PEPTIDEK2",
+            },
+            {
+                **common,
+                "Protein.Group": "P1;P3",
+                "Protein.Names": "N1;N3",
+                "Genes": "G1;G3",
+                "Stripped.Sequence": "PEPTIDER",
+                "Modified.Sequence": "PEPTIDER",
+                "Precursor.Id": "PEPTIDER2",
+            },
+        ]
+    ).to_csv(report_path, sep="\t", index=False)
+    matrix_path = tmp_path / "sl_matrix.tsv"
+    pd.DataFrame(
+        [
+            {"Protein.Group": "P1;P2", "Protein.Names": "N1;N2", "Genes": "G1;G2", "run_A": 900.0},
+            {"Protein.Group": "P1;P3", "Protein.Names": "N1;N3", "Genes": "G1;G3", "run_A": 800.0},
+        ]
+    ).to_csv(matrix_path, sep="\t", index=False)
+
+    feat, pg = _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path)
+    assert_pg_ids_join_valid(feat, pg)
+
+    pg_id_by_membership = {tuple(sorted(accs)): pg_id for pg_id, accs, *_ in pg}
+    ids_by_seq = {seq: list(pg_ids) for seq, _run, _accs, pg_ids in feat}
+    assert ids_by_seq["PEPTIDEK"] == [pg_id_by_membership[("P1", "P2")]]
+    assert ids_by_seq["PEPTIDER"] == [pg_id_by_membership[("P1", "P3")]]
+    # the two features do not reference each other's pg row
+    assert set(ids_by_seq["PEPTIDEK"]).isdisjoint(ids_by_seq["PEPTIDER"])
+
+
+def test_feature_pg_ids_null_when_group_has_no_pg_row(tmp_path):
+    """A feature whose group was filtered out of the pg view gets null pg_ids
+    (ids are never fabricated)."""
+    common = {
+        "Run": "run_A",
+        "PG.Quantity": 1000.0,
+        "Precursor.Charge": 2,
+        "Q.Value": 0.002,
+        "PG.Q.Value": 0.002,
+        "Proteotypic": 1,
+        "Precursor.Quantity": 100.0,
+    }
+    report_path = tmp_path / "null_report.tsv"
+    pd.DataFrame(
+        [
+            {
+                **common,
+                "Protein.Group": "P1",
+                "Protein.Names": "N1",
+                "Genes": "G1",
+                "Stripped.Sequence": "PEPTIDEK",
+                "Modified.Sequence": "PEPTIDEK",
+                "Precursor.Id": "PEPTIDEK2",
+                "Global.PG.Q.Value": 0.001,
+            },
+            {
+                **common,
+                "Protein.Group": "P2",
+                "Protein.Names": "N2",
+                "Genes": "G2",
+                "Stripped.Sequence": "PEPTIDER",
+                "Modified.Sequence": "PEPTIDER",
+                "Precursor.Id": "PEPTIDER2",
+                "Global.PG.Q.Value": 0.5,
+            },
+        ]
+    ).to_csv(report_path, sep="\t", index=False)
+    matrix_path = tmp_path / "null_matrix.tsv"
+    pd.DataFrame(
+        [
+            {"Protein.Group": "P1", "Protein.Names": "N1", "Genes": "G1", "run_A": 900.0},
+            {"Protein.Group": "P2", "Protein.Names": "N2", "Genes": "G2", "run_A": 800.0},
+        ]
+    ).to_csv(matrix_path, sep="\t", index=False)
+
+    # pg q-value filter drops P2 from the pg view; feature view keeps both.
+    feat, pg = _convert_diann_feature_and_pg(tmp_path, report_path, matrix_path, pg_qvalue=0.01, feature_qvalue=None)
+    assert_pg_ids_join_valid(feat, pg)
+
+    ids_by_seq = {seq: pg_ids for seq, _run, _accs, pg_ids in feat}
+    assert ids_by_seq["PEPTIDEK"]  # P1 kept in pg -> populated
+    assert not ids_by_seq["PEPTIDER"]  # P2 filtered from pg -> null/empty
+
+
+@pytest.mark.integration
+def test_feature_pg_ids_roundtrip_real_small_dataset(tmp_path_factory):
+    """Real DIA-NN example: every populated feature.pg_ids joins to a real pg row
+    with matching membership + run (bigbio/qpx#266)."""
+    from qpx.converters.diann.converter import DiaNNConverter
+
+    if not _REPORT.exists():
+        pytest.skip(f"Test data not found: {_REPORT}")
+
+    out = tmp_path_factory.mktemp("diann_pg_ids")
+    mz = tmp_path_factory.mktemp("diann_pg_ids_msinfo")
+    _prepare_ms_info_parquet(_MZML_TSV_DIR, mz)
+
+    conv = DiaNNConverter(report_path=str(_REPORT), sdrf_path=str(_SDRF))
+    conv.convert_pg(pg_matrix_path=str(_PG_MATRIX), output_folder=str(out), output_prefix="d")
+    conv.convert_features(mzml_info_folder=str(mz), output_folder=str(out), output_prefix="d")
+
+    feat, pg = read_feature_pg(out / "d.feature.parquet", out / "d.pg.parquet")
+    assert_pg_ids_join_valid(feat, pg)
+    assert any(pg_ids for *_, pg_ids in feat), "expected at least some populated feature.pg_ids"

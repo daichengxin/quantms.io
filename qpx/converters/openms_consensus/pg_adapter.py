@@ -30,19 +30,9 @@ from qpx.converters.openms_consensus.feature_adapter import (
     to_proforma,
 )
 from qpx.converters.openms_consensus.psm_adapter import _run_resolver
-from qpx.core.data import PgSchema
-from qpx.core.data.identity import derive_id
+from qpx.converters.pg_linking import derive_pg_id
 
 _GENE_RE = re.compile(r"GN=([^\s]+)")
-
-# The pg view's identity composite (pg.yaml: [pg_accessions, grouped_runs, label])
-# and the subset of it hashed order-independently. Mirrors the rule the PgWriter
-# applies in qpx/writers/base.py so a pg_id derived here for feature.pg_ids is
-# byte-identical to the id the writer stamps on the pg row (bigbio/qpx#266).
-_PG_IDENTITY_COMPOSITE = tuple(PgSchema.identity_composite)
-_PG_UNORDERED_INDICES = tuple(
-    index for index, field in enumerate(_PG_IDENTITY_COMPOSITE) if field in ("grouped_runs", "pg_accessions")
-)
 
 
 class _ProteinMaps:
@@ -340,12 +330,8 @@ def build_feature_pg_linker(map_info, sdrf_path):
         unit = run_to_unit.get(run)
         if unit is None:
             return None
-        ids: list[int] = []
-        for label in labels:
-            composite = {"pg_accessions": list(group), "grouped_runs": unit, "label": label}
-            values = [composite[field] for field in _PG_IDENTITY_COMPOSITE]
-            ids.append(derive_id(values, unordered_list_indices=_PG_UNORDERED_INDICES))
-        return ids
+        # One pg_id per label (the shared linker's byte-identical derivation).
+        return [derive_pg_id(group, unit, label) for label in labels]
 
     return pg_ids_for
 

@@ -24,6 +24,7 @@ from qpx.converters.channel_labels import experiment_runs_from_sdrf
 from qpx.converters.mappings import get_field_mappings
 from qpx.converters.maxquant.base_adapter import MaxQuantBaseAdapter
 from qpx.converters.maxquant.constants import TMT_LABEL_TO_MQ_COL
+from qpx.converters.pg_linking import update_pg_id_lookup
 from qpx.converters.utils import mq_flag_to_bool, safe_float
 from qpx.writers.pg import PgWriter
 
@@ -79,6 +80,11 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
             chunksize: Rows per batch.
             creator: Creator tag in Parquet metadata.
         """
+        # feature->pg lookup accumulated as pg records are built (bigbio/qpx#266):
+        # (canonical membership, run) -> [pg_id]. Byte-identical to the written
+        # pg_ids; consumed by the feature adapter to stamp feature.pg_ids.
+        self.pg_id_lookup: dict[tuple[tuple[str, ...], str], list[int]] = {}
+
         # Step 0: Build Experiment -> [run_file_name] mapping from evidence.txt,
         # with the SDRF source-name grouping as a fallback source.
         self._experiment_to_runs = self._build_experiment_to_runs(evidence_path)
@@ -124,6 +130,7 @@ class MaxQuantPgAdapter(MaxQuantBaseAdapter):
                 records = self._transform_batch(df, intensity_cols, tmt_channels)
                 if records:
                     self._track_scores(records)
+                    update_pg_id_lookup(self.pg_id_lookup, records)
                     writer.write_batch(records)
 
         self.logger.info("MaxQuant PG conversion complete -> %s", output_path)

@@ -40,6 +40,10 @@ class DiaNNConverter(BaseOrchestrator):
         self._diann_version = self._parse_diann_version(diann_log)
         self._ontology_entries: list[dict] = []
         self._resolved_mappings_by_view: dict[str, dict] = {}
+        # feature->pg lookup built during convert_pg and consumed by
+        # convert_features to stamp feature.pg_ids (bigbio/qpx#266). Stays None
+        # when no pg view is produced, so features then get null pg_ids.
+        self._pg_id_lookup: dict | None = None
 
     def convert_features(
         self,
@@ -64,6 +68,7 @@ class DiaNNConverter(BaseOrchestrator):
                 mzml_info_folder=str(mzml_info_folder) if mzml_info_folder else None,
                 sdrf_path=self.sdrf_path,
                 qvalue_threshold=qvalue_threshold,
+                pg_id_lookup=self._pg_id_lookup,
             )
             self._ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=FEATURE))
             cols = adapter.get_table_columns("report")
@@ -93,6 +98,9 @@ class DiaNNConverter(BaseOrchestrator):
                 output_path=str(output_folder / f"{prefix}.pg.parquet"),
                 qvalue_threshold=qvalue_threshold,
             )
+            # Capture the feature->pg lookup so a later convert_features stamps
+            # feature.pg_ids from the same byte-identical pg_ids (bigbio/qpx#266).
+            self._pg_id_lookup = adapter.pg_id_lookup
             self._ontology_entries.extend(score_ontology_entries(adapter.get_discovered_scores(), view=PG))
             cols = adapter.get_table_columns("report")
             self._resolved_mappings_by_view[PG] = resolve_columns(get_field_mappings("diann", "pg"), cols)

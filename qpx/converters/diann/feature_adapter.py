@@ -21,6 +21,7 @@ from qpx.converters.base import resolve_columns
 from qpx.converters.diann.base_adapter import DiaNNBaseAdapter
 from qpx.converters.diann.constants import to_modifications, to_proforma
 from qpx.converters.mappings import get_field_mappings
+from qpx.converters.pg_linking import pg_ids_for_feature
 from qpx.converters.ptm import compute_precursor_mz
 from qpx.core.cleavage import count_missed_cleavages
 from qpx.core.sql import sql_build, validate_identifier
@@ -106,6 +107,7 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         qvalue_threshold: Optional[float] = None,
         file_num: int = 100,  # VIEW-based lazy IO reduces per-batch memory
         creator: str = "diann",
+        pg_id_lookup: Optional[dict] = None,
     ) -> None:
         """Run the DIA-NN report -> feature.parquet conversion.
 
@@ -116,6 +118,11 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         are carried through unconditionally for downstream filtering. When a
         threshold is provided, the precursor ``Q.Value`` filter is applied.
         """
+        # feature->pg lookup (bigbio/qpx#266): (canonical membership, run) ->
+        # [pg_id], built by the pg adapter. None when no pg view is produced —
+        # feature.pg_ids then stays null (ids are never fabricated).
+        self._pg_id_lookup = pg_id_lookup
+
         # 1. Create VIEW over report (lazy — no data loaded into memory)
         self._load_diann_report(diann_report)
 
@@ -786,6 +793,17 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         ]
         pg_array = pa.array(pg_list, type=pg_acc_type)
 
+        # --- Build pg_ids column (feature->pg cross-reference, bigbio/qpx#266) ---
+        # Each feature maps to the pg row(s) whose membership equals its group and
+        # whose run contains its run_file_name; null when no pg view was produced
+        # or the group has no pg row. Keyed by (canonical membership, run) so the
+        # ids are byte-identical to the written pg_ids.
+        pg_ids_array = None
+        if self._pg_id_lookup is not None:
+            runs = table.column("run_file_name").to_pylist()
+            pg_ids_list = [pg_ids_for_feature(self._pg_id_lookup, pg, run) for pg, run in zip(pg_list, runs)]
+            pg_ids_array = pa.array(pg_ids_list, type=target_schema.field("pg_ids").type)
+
         # --- Drop helper columns ---
         table = table.drop("_modified_sequence")
         table = table.drop("_pg_group")
@@ -797,6 +815,8 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
                 columns[field.name] = mods_array
             elif field.name == "pg_accessions":
                 columns[field.name] = pg_array
+            elif field.name == "pg_ids" and pg_ids_array is not None:
+                columns[field.name] = pg_ids_array
             elif field.name in table.schema.names:
                 col = table.column(field.name)
                 # Cast to target type if needed (e.g. large_string → string)
