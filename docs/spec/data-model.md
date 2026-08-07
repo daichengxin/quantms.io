@@ -156,7 +156,7 @@ The join keys, spelled out:
 
 | From | To | Join predicate |
 |------|----|----------------|
-| `feature` | `pg` | When populated, `unnest(feature.pg_ids) = pg.pg_id`. Without explicit IDs, the semantic association is `feature.anchor_protein = pg.anchor_protein` **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** `unnest(feature.intensities).label = pg.label`. |
+| `feature` | `pg` | When populated, `unnest(feature.pg_ids) = pg.pg_id`. Without explicit IDs, the semantic association is on full group membership — `canonical(feature.pg_accessions) = canonical(pg.pg_accessions)` (order-independent set) **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** `unnest(feature.intensities).label = pg.label`. Do **not** fall back to `anchor_protein`, which is not unique across groups that share a leading protein (see pg.md → *Protein group semantics*). |
 | `feature` / `pg` | `run` | `run_file_name = run.run_file_name` (for pg: any file in `grouped_runs`) |
 | `(file, label)` | `sample` | unnest `run.samples[]`, match `label`, take `sample_accession`; then `sample.sample_accession` |
 | `psm` ↔ `feature` | — | `psm.feature_id = feature.feature_id` or `psm.psm_id ∈ feature.psm_ids`; when explicit references are absent, shared identification fields can be used for semantic matching but are not a guaranteed row-level link. |

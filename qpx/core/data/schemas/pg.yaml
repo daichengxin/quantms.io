@@ -33,7 +33,7 @@ fields:
   anchor_protein:
     type: string
     required: true
-    doc: "Anchor/leading protein of the group (the representative used for feature->pg joins). Descriptive only — NOT part of the pg_id identity, which keys on the full pg_accessions membership."
+    doc: "Anchor/leading protein of the group — a descriptive representative for display only. NOT part of the pg_id identity (which keys on the full pg_accessions membership), and MUST NOT be used for feature->pg joins or per-protein statistics: it is not unique across groups that share a leading protein. Join feature->pg via feature.pg_ids/pg_id or full pg_accessions. See docs/spec/pg.md -> Protein group semantics."
 
   # Quantification-unit context
   grouped_runs:
