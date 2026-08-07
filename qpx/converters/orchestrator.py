@@ -16,6 +16,25 @@ import duckdb
 logger = logging.getLogger(__name__)
 
 
+def _dedupe_ontology_entries(entries: list[dict]) -> list[dict]:
+    """Collapse ontology entries to one row per ``(field_name, view)`` primary key.
+
+    Order-preserving, first-wins: the first entry seen for a key is kept and later
+    duplicates are dropped. This honours the ontology view's primary key when the
+    same field is accumulated from more than one path (e.g. a q-value emitted both
+    as a discovered score and as a mapped field).
+    """
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for entry in entries:
+        key = (entry.get("field_name"), entry.get("view"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
 def build_dataset_record(
     *,
     project_accession: str | None = None,
@@ -72,10 +91,18 @@ class BaseOrchestrator:
             return None
         from qpx.writers.ontology import OntologyWriter
 
+        # The ontology view is keyed on (field_name, view). A field can surface from
+        # more than one accumulation path -- e.g. a q-value that is both a discovered
+        # score and a mapped field -- so collapse to the first entry per key to honour
+        # the primary key rather than emitting a duplicate row.
+        entries = _dedupe_ontology_entries(ontology_entries)
+        dropped = len(ontology_entries) - len(entries)
         onto_path = output_folder / f"{prefix}.ontology.parquet"
         with OntologyWriter(onto_path, creator="qpx", compression=self._compression) as writer:
-            writer.write_batch(ontology_entries)
-        logger.info("Wrote %d ontology entries to %s", len(ontology_entries), onto_path)
+            writer.write_batch(entries)
+        if dropped:
+            logger.info("Collapsed %d duplicate (field_name, view) ontology entries", dropped)
+        logger.info("Wrote %d ontology entries to %s", len(entries), onto_path)
         return onto_path
 
     def _write_provenance(
