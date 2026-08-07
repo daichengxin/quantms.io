@@ -169,10 +169,13 @@ def to_modifications(aa_sequence, site_scores: dict[int, list[dict]] | None = No
 
     nterm = aa_sequence.getNTerminalModification() if hasattr(aa_sequence, "getNTerminalModification") else None
     if nterm:
-        _add_mod(nterm.getId() or "", _acc(nterm.getUniModAccession()), 1, None, None)
+        # N-terminal position is always 0 (amino_acid null); see the QPX
+        # modifications spec.
+        _add_mod(nterm.getId() or "", _acc(nterm.getUniModAccession()), 0, None, None)
     cterm = aa_sequence.getCTerminalModification() if hasattr(aa_sequence, "getCTerminalModification") else None
     if cterm:
-        _add_mod(cterm.getId() or "", _acc(cterm.getUniModAccession()), aa_sequence.size(), None, None)
+        # C-terminal position is always length + 1 (amino_acid null).
+        _add_mod(cterm.getId() or "", _acc(cterm.getUniModAccession()), aa_sequence.size() + 1, None, None)
     return mods or None
 
 
