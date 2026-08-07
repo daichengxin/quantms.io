@@ -159,9 +159,20 @@ fields:
     type: "list<int64>"
     optional: true
     nullable: true
-    doc: "Optional references to the psm rows this feature maps to (list of psm_id)."
+    doc: >-
+      Optional producer-supplied hardlink to the psm rows this feature maps to
+      (list of psm_id). NOT materialized by qpx's own converters — when absent
+      (null), use the computed inverse softlink: Dataset.link_feature_psm(), the
+      inverse of the authoritative psm.feature_id foreign key (group by feature_id
+      to recover this list, bigbio/qpx#267). See docs/spec/psm.md -> feature_id.
   pg_ids:
     type: "list<int64>"
     optional: true
     nullable: true
-    doc: "Optional references to the pg rows this feature maps to (list of pg_id)."
+    doc: >-
+      Optional producer-supplied hardlink to the pg rows this feature maps to
+      (list of pg_id). NOT materialized by qpx's own converters — when absent
+      (null), use the computed softlink: Dataset.link_feature_pg(), a label-aware
+      read-side join of feature and pg on canonical(pg_accessions) +
+      run_file_name in pg.grouped_runs + label in feature.intensities
+      (bigbio/qpx#269). See docs/spec/pg.md -> Protein group semantics.

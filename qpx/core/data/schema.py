@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 # ---------------------------------------------------------------------------
 # Validation result types
@@ -248,6 +249,49 @@ def pg_referential_issues_from_parquet(
         con.close()
 
 
+def _anchor_membership_issues(table: pa.Table, structure: str, severity: str) -> list[ValidationIssue]:
+    """Flag rows that carry an ``anchor_protein`` but no ``pg_accessions`` membership.
+
+    The protein group (``pg_accessions``) is the analyte and the feature->pg join
+    key (see docs/spec/pg.md -> Protein group semantics); ``anchor_protein`` is only
+    a descriptive representative. A row that has been protein-mapped (non-null
+    ``anchor_protein``) MUST therefore carry its full group membership, otherwise it
+    cannot be attributed to a group. Applies to any view exposing both columns
+    (``feature``, where both are nullable; ``pg`` already requires both).
+    """
+    names = table.schema.names
+    if "anchor_protein" not in names or "pg_accessions" not in names or len(table) == 0:
+        return []
+    anchor = table.column("anchor_protein")
+    pg = table.column("pg_accessions")
+    # A non-list pg_accessions is a type mismatch already reported by the type check
+    # above; skip here rather than let list_value_length raise on malformed input.
+    if not (pa.types.is_list(pg.type) or pa.types.is_large_list(pg.type)):
+        return []
+    # list_value_length is null where pg_accessions is null; fill_null(0) folds a
+    # null membership into "empty" so the boolean logic never propagates nulls.
+    pg_len = pc.fill_null(pc.list_value_length(pg), 0)
+    pg_missing = pc.equal(pg_len, 0)
+    violation = pc.and_(pc.is_valid(anchor), pg_missing)
+    bad = pc.sum(pc.cast(violation, pa.int64())).as_py() or 0
+    if not bad:
+        return []
+    return [
+        ValidationIssue(
+            structure=structure,
+            check="anchor_without_membership",
+            severity=severity,
+            column="pg_accessions",
+            message=(
+                f"{bad} row(s) have anchor_protein set but no pg_accessions "
+                "(protein-group membership). The group is the analyte and the "
+                "feature->pg join key, so a row with a leading protein must carry "
+                "its full pg_accessions membership."
+            ),
+        )
+    ]
+
+
 def _primary_key_issues(
     table: pa.Table,
     primary_key: tuple[str, ...],
@@ -448,6 +492,8 @@ class ViewSchema:
 
         if self._view_name == "pg":
             result.issues.extend(_pg_referential_issues(table, self._view_name, gated_severity))
+
+        result.issues.extend(_anchor_membership_issues(table, self._view_name, gated_severity))
 
         return result
 

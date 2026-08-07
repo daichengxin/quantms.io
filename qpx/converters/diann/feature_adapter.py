@@ -786,6 +786,9 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         ]
         pg_array = pa.array(pg_list, type=pg_acc_type)
 
+        # feature.pg_ids is left null: the feature->pg association is computed on
+        # read via the Dataset softlink (bigbio/qpx#269), not materialized here.
+
         # --- Drop helper columns ---
         table = table.drop("_modified_sequence")
         table = table.drop("_pg_group")

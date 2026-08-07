@@ -27,6 +27,17 @@ from qpx.converters.openms import OpenMSConverter
 logger = logging.getLogger("qpx.cli.convert")
 
 
+def _log_summary(output_folder) -> None:
+    """Log a conversion summary for a just-written output folder.
+
+    Shared by every convert subcommand. Guarded so a summary failure NEVER fails
+    an otherwise-successful conversion (a warning is logged instead).
+    """
+    from qpx.converters.summary import log_conversion_summary
+
+    log_conversion_summary(output_folder, logger=logger)
+
+
 def _maybe_enrich_pride(output_folder, project_accession: str | None, enrich: bool) -> None:
     """Optionally enrich a converted dataset with PRIDE metadata."""
     if not enrich:
@@ -245,6 +256,7 @@ def convert_diann_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"DIA-NN conversion complete. Output: {output_folder}")
 
 
@@ -429,6 +441,7 @@ def convert_maxquant_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"MaxQuant conversion complete. Output: {output_folder}")
 
 
@@ -568,6 +581,7 @@ def convert_fragpipe_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"FragPipe conversion complete. Output: {output_folder}")
 
 
@@ -684,6 +698,7 @@ def convert_mzidentml_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"mzIdentML conversion complete. Output: {output_folder}")
 
 
@@ -901,6 +916,7 @@ def convert_openms_consensus_cmd(
         project_accession=project_accession,
         compression=compression,
     )
+    _log_summary(output_folder)
     click.echo(f"consensusXML conversion complete. Wrote: {sorted(written)}")
 
 
@@ -1215,6 +1231,7 @@ def convert_cdap_cmd(
         project_accession=project_accession,
     )
 
+    _log_summary(output_folder)
     click.echo(f"CDAP conversion complete. Output: {output_folder}")
 
 

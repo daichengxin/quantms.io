@@ -37,6 +37,21 @@ identification-only protein groups that carry no quantity. Fields marked with
 | `anchor_protein` | Representative protein of the group (leading protein); descriptive and not part of the default identity composite | `string` | Yes |
 | `grouped_runs` | The group of raw files aggregated into one quantification unit (fractions aggregated together; single-element for unfractionated/DIA). The sample is resolved downstream via `(any file in grouped_runs, label) -> run.samples[].sample_accession`; part of the default identity composite | `array[string]` | Yes |
 
+### Protein group semantics
+
+A `pg` row is an **analyte**: the quantified unit is the protein group *as a whole*, identified by `pg_id` (a function of the full `pg_accessions` membership together with `grouped_runs` and `label`). The group — not any single protein — is the object of downstream analysis. This follows the guidance of DIA-NN's author ([vdemichev/DiaNN#1149](https://github.com/vdemichev/DiaNN/issues/1149)) and the QPX design discussion ([bigbio/qpx#266](https://github.com/bigbio/qpx/issues/266)).
+
+- **The group is the unit of analysis, not any single protein.** `anchor_protein` is a descriptive representative only (e.g. for display). Do **not** run per-protein statistics on `anchor_protein` as if it were the analyte — for groups that share protein IDs this misattributes and can double-count shared signal.
+- **Groups are NOT guaranteed disjoint, and leaders are NOT guaranteed unique.** Depending on the producing tool's inference settings, two distinct groups may share protein accessions — including the leading one. For example, DIA-NN with heuristic protein inference disabled (`--no-prot-inf`), or its pre‑1.8.1 grouping, reports a group as the estimated **joint contribution** of the listed proteins, so the same protein can lead more than one group (e.g. `P0AC33` *fumA* and `P0AC33;P14407` *fumA;fumB*, carrying **distinct** quantities). QPX therefore keys `pg_id` on the full `pg_accessions` membership, so every group is a distinct, joinable analyte regardless of the producer or its inference mode. Consumers **MUST NOT** assume a protein appears in at most one group.
+- **Be fail-safe when parsing group members.** In the most general case a producer's group label may be an opaque string; QPX parses it into `pg_accessions` where possible, but a consumer that cannot resolve protein IDs from a group (e.g. for biological annotation) should continue without error rather than fail.
+- **For gene- or pathway-level analysis**, aggregate on `gg_accessions` (gene groups) / unique gene entries — do not pick a single protein out of a group.
+- **feature → pg is a computed *softlink*, not a persisted column.** By default the association is derived on read (`Dataset.link_feature_pg()`, [bigbio/qpx#269](https://github.com/bigbio/qpx/issues/269)) by a **label-aware** join of the `feature` and `pg` views:
+  - `canonical(feature.pg_accessions) = canonical(pg.pg_accessions)` — the same order-independent membership set that keys `pg_id`; **AND**
+  - `feature.run_file_name ∈ pg.grouped_runs`; **AND**
+  - a label in `feature.intensities` `IS NOT DISTINCT FROM pg.label`, so a feature links **only** to pg rows for the channels/labels it actually carries (LFQ: one `LFQ` row; TMT/plexDIA: one row per channel the feature has, never the missing ones).
+  `pg_id` is read straight from the matched pg row (never re-derived); never join on `anchor_protein` alone. **No match = identified but not quantified** in that channel/fraction — the feature simply produces no link (not an error). `feature.pg_ids` remains an **optional producer hardlink** (a slot a producer MAY populate); qpx's own converters do **not** materialize it, and when it is absent consumers use the computed softlink above.
+- **Integrity check:** a row with a non-null `anchor_protein` MUST also carry `pg_accessions` (its full group membership). Since the group is the analyte and the join key, a protein-mapped feature that lacked membership would be an orphan. QPX validates this (a warning on the write/convert path, an error under `qpxc validate --strict`).
+
 ### Counts
 
 | Field | Description | Type | Required |
