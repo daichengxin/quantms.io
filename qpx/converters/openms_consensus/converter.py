@@ -27,7 +27,7 @@ from qpx.converters.openms_consensus.pg_adapter import (
 )
 from qpx.converters.orchestrator import BaseOrchestrator
 from qpx.core.constants import FEATURE, ONTOLOGY, PG, PSM, RUN, SAMPLE
-from qpx.core.data import FeatureSchema, PsmSchema
+from qpx.core.data import FeatureSchema
 from qpx.core.data.identity import derive_id
 from qpx.writers.feature import FeatureWriter
 from qpx.writers.pg import PgWriter
@@ -50,8 +50,8 @@ _FEATURE_IDENTITY_COMPOSITE = (
     "observed_mz",
     "consensus_rt",
 )
-# The psm view's schema identity_composite (psm.yaml) — used to derive the
-# psm_id we cross-reference from feature.psm_ids / psm.feature_id.
+# The psm view's schema identity_composite (psm.yaml) — passed to the PsmWriter
+# so the derived psm_id hashes exactly these columns.
 _PSM_IDENTITY_COMPOSITE = ("peptidoform", "charge", "run_file_name", "scan")
 
 
@@ -61,34 +61,30 @@ def _derive_persisted_record_id(record: dict, composite: tuple[str, ...], schema
     return derive_id(values)
 
 
-def _link_feature_psm(feature_records: list[dict], psm_records: list[dict]) -> None:
-    """Populate feature.psm_ids and psm.feature_id in place for one consensus feature.
+def _link_psm_feature(feature_records: list[dict], psm_records: list[dict]) -> None:
+    """Stamp ``psm.feature_id`` in place for one consensus feature.
 
-    Ids are derived with the SAME composites the writers use, so these converter
-    -populated cross-refs match the writer-derived primary keys byte-for-byte
-    (``derive_id`` is deterministic). A consensus feature yields one feature
-    record per run; each PSM links to the feature record of its own run. PSMs
-    whose run has no feature record keep ``feature_id`` null (resolves #182).
+    ``psm.feature_id`` is the authoritative producer assignment — which consensus
+    feature a PSM belongs to. The id is derived with the SAME composite the
+    FeatureWriter uses, so this converter-populated foreign key matches the
+    writer-derived ``feature_id`` byte-for-byte (``derive_id`` is deterministic).
+    A consensus feature yields one feature record per run; each PSM links to the
+    feature record of its own run. PSMs whose run has no feature record keep
+    ``feature_id`` null (resolves #182).
+
+    The inverse ``feature.psm_ids`` is NOT materialized here: it is the pure
+    inverse of ``psm.feature_id`` (group PSMs by their ``feature_id``) and is
+    computed on read via :meth:`qpx.dataset.Dataset.link_feature_psm`.
     """
     feature_schema = FeatureSchema.get_arrow_schema()
-    psm_schema = PsmSchema.get_arrow_schema()
-    feat_by_run: dict[str, tuple[int, list[int]]] = {}
-    for rec in feature_records:
-        feat_id = _derive_persisted_record_id(rec, _FEATURE_IDENTITY_COMPOSITE, feature_schema)
-        feat_by_run[rec["run_file_name"]] = (feat_id, [])
+    feat_id_by_run: dict[str, int] = {
+        rec["run_file_name"]: _derive_persisted_record_id(rec, _FEATURE_IDENTITY_COMPOSITE, feature_schema)
+        for rec in feature_records
+    }
     for prec in psm_records:
-        entry = feat_by_run.get(prec.get("run_file_name"))
-        if entry is None:
-            continue
-        feat_id, psm_ids = entry
-        prec["feature_id"] = feat_id
-        psm_id = _derive_persisted_record_id(prec, _PSM_IDENTITY_COMPOSITE, psm_schema)
-        if psm_id not in psm_ids:
-            psm_ids.append(psm_id)
-    for rec in feature_records:
-        _, psm_ids = feat_by_run[rec["run_file_name"]]
-        if psm_ids:
-            rec["psm_ids"] = psm_ids
+        feat_id = feat_id_by_run.get(prec.get("run_file_name"))
+        if feat_id is not None:
+            prec["feature_id"] = feat_id
 
 
 # Above this consensusXML size, auto-select the streaming reader: the pyopenms
@@ -119,9 +115,10 @@ def _cf_feature_psm_records(cf, map_info, group_map, resolve_run, seen, *, want_
         cf_runs = _cf_element_runs(cf, map_info)
         for pid in cf.getPeptideIdentifications():
             cf_psms.extend(psm_records_for_pid(pid, resolve_run, seen, cf_runs=cf_runs))
-    # Cross-reference the feature<->psm ids only when both views are emitted.
+    # Stamp psm.feature_id only when both views are emitted (the FK references a
+    # feature row written in this dataset). feature.psm_ids is the computed inverse.
     if want_feature and want_psm:
-        _link_feature_psm(cf_feats, cf_psms)
+        _link_psm_feature(cf_feats, cf_psms)
     return cf_feats, cf_psms
 
 

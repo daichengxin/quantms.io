@@ -114,7 +114,7 @@ Each entry in `pg_positions` contains:
 
 | Field | Description | Type | Required |
 |-------|-------------|------|----------|
-| `psm_ids` | References to PSM rows through `psm.psm_id`; null when no explicit links are available | array[int64], null | no |
+| `psm_ids` | The PSM rows this feature maps to (through `psm.psm_id`). A **computed inverse softlink**, not materialized by qpx: the authoritative direction is `psm.feature_id`, and `Dataset.link_feature_psm()` recovers this list by grouping `(feature_id, psm_id)` on `feature_id` ([bigbio/qpx#267](https://github.com/bigbio/qpx/issues/267)). Remains an optional producer hardlink a producer MAY populate; null otherwise. | array[int64], null | no |
 | `pg_ids` | References to protein-group rows through `pg.pg_id`; null when no explicit links are available | array[int64], null | no |
 
 ## Shared Fields

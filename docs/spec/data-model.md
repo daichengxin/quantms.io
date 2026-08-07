@@ -93,7 +93,7 @@ erDiagram
     FEATURE }o--o{ PG : "softlink: canonical(pg_accessions)+run+label"
     PEPMAP ||--o{ PSM : "peptidoform"
     PEPMAP ||--o{ FEATURE : "peptidoform"
-    PSM }o--o| FEATURE : "feature_id / psm_ids[]"
+    PSM }o--o| FEATURE : "psm.feature_id FK (psm_ids = computed inverse)"
     MZ }o--o{ PSM : "run_file_name+scan"
 
     SAMPLE {
@@ -123,7 +123,7 @@ erDiagram
     }
     FEATURE {
         int64 feature_id PK
-        list psm_ids FK
+        list psm_ids "optional producer hardlink"
         list pg_ids "optional producer hardlink"
         string peptidoform
         int charge
@@ -159,7 +159,7 @@ The join keys, spelled out:
 | `feature` | `pg` | A **computed softlink** (`Dataset.link_feature_pg()`, bigbio/qpx#269), not a persisted column: `canonical(feature.pg_accessions) = canonical(pg.pg_accessions)` (order-independent set) **AND** `feature.run_file_name ∈ pg.grouped_runs` **AND** a label in `feature.intensities` `IS NOT DISTINCT FROM pg.label` (label-aware, so no over-linking to a channel the feature lacks). `pg_id` is read from the matched pg row. No match = identified but not quantified in that channel/fraction. `feature.pg_ids` is an optional producer hardlink (`unnest(feature.pg_ids) = pg.pg_id` when a producer supplies it); qpx converters do not materialize it. Do **not** fall back to `anchor_protein`, which is not unique across groups that share a leading protein (see pg.md → *Protein group semantics*). |
 | `feature` / `pg` | `run` | `run_file_name = run.run_file_name` (for pg: any file in `grouped_runs`) |
 | `(file, label)` | `sample` | unnest `run.samples[]`, match `label`, take `sample_accession`; then `sample.sample_accession` |
-| `psm` ↔ `feature` | — | `psm.feature_id = feature.feature_id` or `psm.psm_id ∈ feature.psm_ids`; when explicit references are absent, shared identification fields can be used for semantic matching but are not a guaranteed row-level link. |
+| `psm` ↔ `feature` | — | `psm.feature_id` is the **authoritative** (optional) foreign key: `psm.feature_id = feature.feature_id` (null when a producer does not assign one). Its inverse, `feature.psm_ids`, is a **computed softlink** (`Dataset.link_feature_psm()`, bigbio/qpx#267) — the `(feature_id, psm_id)` pairs from `psm` where `feature_id IS NOT NULL`, grouped by `feature_id`; qpx does not materialize it. `feature.psm_ids` is an optional producer hardlink (`psm.psm_id ∈ feature.psm_ids` when a producer supplies it). When explicit references are absent, shared identification fields can be used for semantic matching but are not a guaranteed row-level link. |
 | `psm` / `feature` | `pepmap` | shared `peptidoform` |
 | `mz` ↔ `psm`/`feature` | — | `run_file_name + scan` |
 
@@ -273,8 +273,8 @@ returned once per sample and label.
 | Peptide identity | `peptidoform` (plus `charge` for PSM and feature) | psm, feature, pepmap |
 | Protein representative | `anchor_protein` | feature, pg |
 | Row identity | `psm_id` / `feature_id` / `pg_id` | psm / feature / pg |
-| Explicit cross-reference | `psm.feature_id`, `feature.psm_ids` (persisted); `feature.pg_ids` (optional producer hardlink) | psm ↔ feature |
-| Computed cross-reference | `Dataset.link_feature_pg()` softlink | feature → pg |
+| Explicit cross-reference | `psm.feature_id` (authoritative, persisted); `feature.psm_ids`, `feature.pg_ids` (optional producer hardlinks) | psm ↔ feature |
+| Computed cross-reference | `Dataset.link_feature_psm()`, `Dataset.link_feature_pg()` softlinks | psm ↔ feature, feature → pg |
 
 ## Related pages
 

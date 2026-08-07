@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("pyopenms")
 import pyopenms as oms  # noqa: E402
 
+import qpx  # noqa: E402
 from qpx.converters.openms_consensus.converter import OpenMSConsensusConverter  # noqa: E402
 from qpx.converters.openms_consensus.feature_adapter import to_proforma  # noqa: E402
 
@@ -893,9 +894,10 @@ def test_label_free_consensusxml_uses_lfq_labels(tmp_path):
 
 @pytest.mark.parametrize("streaming", [False, True])
 def test_openms_consensus_cross_refs_resolve(tmp_path, streaming):
-    """Every psm.feature_id and every feature.psm_ids element resolves to a real
-    sibling id — the converter-populated FK matches the writer-derived PK (both
-    the in-memory and streaming paths)."""
+    """psm.feature_id is the authoritative FK: it is materialized and every value
+    resolves to a real feature.feature_id (both the in-memory and streaming paths).
+    feature.psm_ids is NOT materialized — the feature->psms mapping is recovered on
+    read via Dataset.link_feature_psm() (bigbio/qpx#267)."""
     cx = tmp_path / "test.consensusXML"
     _write_tmt_consensusxml(cx)
     out = tmp_path / ("stream" if streaming else "mem")
@@ -905,24 +907,31 @@ def test_openms_consensus_cross_refs_resolve(tmp_path, streaming):
     con = duckdb.connect()
 
     feature_ids = {r[0] for r in con.execute(f"SELECT feature_id FROM read_parquet('{written['feature']}')").fetchall()}
-    psm_ids = {r[0] for r in con.execute(f"SELECT psm_id FROM read_parquet('{written['psm']}')").fetchall()}
 
-    # At least one link was actually populated (guards against a silently null FK).
-    linked_feature_ids = [
-        r[0] for r in con.execute(f"SELECT feature_id FROM read_parquet('{written['psm']}')").fetchall() if r[0] is not None
-    ]
-    assert linked_feature_ids, "expected at least one psm.feature_id to be populated"
-    for fid in linked_feature_ids:
+    # psm.feature_id is the authoritative producer assignment: materialized, and
+    # every non-null value resolves to a real feature (guards a silently null FK).
+    linked = con.execute(
+        f"SELECT psm_id, feature_id FROM read_parquet('{written['psm']}') WHERE feature_id IS NOT NULL"
+    ).fetchall()
+    assert linked, "expected at least one psm.feature_id to be populated"
+    for _pid, fid in linked:
         assert fid in feature_ids, f"psm.feature_id {fid} does not resolve to a feature.feature_id"
 
-    referenced_psm_ids = [
-        pid
-        for (ids,) in con.execute(f"SELECT psm_ids FROM read_parquet('{written['feature']}')").fetchall()
-        for pid in (ids or [])
-    ]
-    assert referenced_psm_ids, "expected at least one feature.psm_ids element to be populated"
-    for pid in referenced_psm_ids:
-        assert pid in psm_ids, f"feature.psm_ids element {pid} does not resolve to a psm.psm_id"
+    # feature.psm_ids is the computed inverse — qpx does NOT materialize it.
+    psm_ids_col = con.execute(f"SELECT psm_ids FROM read_parquet('{written['feature']}')").fetchall()
+    assert all(ids is None for (ids,) in psm_ids_col), "feature.psm_ids must not be materialized (computed on read)"
+    con.close()
+
+    # Dataset.link_feature_psm() is the inverse of psm.feature_id; grouping it by
+    # feature_id recovers the feature->psms mapping we no longer persist.
+    expected: dict[int, set[int]] = {}
+    for pid, fid in linked:
+        expected.setdefault(fid, set()).add(pid)
+    with qpx.Dataset(str(out), file_prefix="t", structures=["feature", "psm"]) as ds:
+        recovered: dict[int, set[int]] = {}
+        for fid, pid in ds.link_feature_psm().fetchall():
+            recovered.setdefault(fid, set()).add(pid)
+    assert recovered == expected
 
 
 @pytest.mark.parametrize("streaming", [False, True])

@@ -59,9 +59,11 @@ def conversion_summary(dataset: Dataset | str | Path) -> dict:
     dict
         Keys (any may be ``None`` when the backing view/column is absent):
         ``accession``, ``n_psms``, ``n_features``, ``n_protein_groups``,
-        ``n_peptidoforms``, ``n_proteins``, ``n_genes`` and — only when BOTH the
+        ``n_peptidoforms``, ``n_proteins``, ``n_genes``; only when BOTH the
         ``feature`` and ``pg`` views exist — ``n_feature_pg_links``,
-        ``n_features_linked`` and ``n_features_without_pg``.
+        ``n_features_linked`` and ``n_features_without_pg``; and only when BOTH
+        the ``feature`` and ``psm`` views exist — ``n_features_with_psm`` and
+        ``n_psms_without_feature``.
     """
     ds, opened = _as_dataset(dataset)
     try:
@@ -92,6 +94,8 @@ def _collect(ds: Dataset) -> dict:
         "n_feature_pg_links": None,
         "n_features_linked": None,
         "n_features_without_pg": None,
+        "n_features_with_psm": None,
+        "n_psms_without_feature": None,
     }
 
     if ds.dataset_meta is not None:
@@ -131,7 +135,19 @@ def _collect(ds: Dataset) -> dict:
     if ds.feature is not None and ds.pg is not None:
         _collect_link_diagnostics(ds, summary)
 
+    # psm<->feature diagnostics — the inverse of the authoritative psm.feature_id
+    # (bigbio/qpx#267): features carrying >=1 assigned psm, and psms with no feature.
+    if ds.feature is not None and ds.psm is not None:
+        _collect_psm_feature_diagnostics(ds, summary)
+
     return summary
+
+
+def _collect_psm_feature_diagnostics(ds: Dataset, summary: dict) -> None:
+    """Populate psm<->feature diagnostics via the computed inverse softlink."""
+    link_sql = ds._LINK_FEATURE_PSM_SQL
+    summary["n_features_with_psm"] = _scalar(ds, f"SELECT COUNT(DISTINCT feature_id) FROM ({link_sql}) AS link")
+    summary["n_psms_without_feature"] = _scalar(ds, "SELECT COUNT(*) FROM psm WHERE feature_id IS NULL")
 
 
 def _collect_link_diagnostics(ds: Dataset, summary: dict) -> None:
@@ -181,6 +197,12 @@ def format_conversion_summary(summary: dict) -> str:
             detail.append(f"{_fmt(without)} identified-but-not-quantified")
         suffix = f" ({'; '.join(detail)})" if detail else ""
         lines.append(f"  {'feature->pg links':<{label_width}}: {_fmt(n_links)}{suffix}")
+
+    with_psm = summary.get("n_features_with_psm")
+    if with_psm is not None:
+        without_feature = summary.get("n_psms_without_feature")
+        suffix = f" ({_fmt(without_feature)} psms without a feature)" if without_feature is not None else ""
+        lines.append(f"  {'feature<-psm':<{label_width}}: {_fmt(with_psm)} features with >=1 psm{suffix}")
 
     return "\n".join(lines)
 

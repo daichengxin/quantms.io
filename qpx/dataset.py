@@ -386,6 +386,60 @@ class Dataset:
                 f"{operation}() requires both the 'feature' and 'pg' structures; available: {self.available_structures}"
             )
 
+    # --- PSM <-> Feature softlink (bigbio/qpx#267) ---
+    #
+    # The association is *asymmetric*. ``psm.feature_id`` is the authoritative,
+    # producer-supplied optional foreign key: which consensus feature a PSM
+    # belongs to (openms_consensus stamps it; null when a producer does not
+    # supply it). It is NOT recomputable from shared identification fields
+    # ((peptidoform, charge, run) is many-to-one and ambiguous), so it stays
+    # materialized. Its inverse, ``feature.psm_ids``, is redundant and is NOT
+    # materialized by qpx — it is computed on read here by grouping the persisted
+    # ``psm.feature_id`` by feature: the (feature_id, psm_id) pairs below ARE the
+    # feature<->psm association, and grouping by feature_id gives feature.psm_ids.
+    _LINK_FEATURE_PSM_SQL = """
+        SELECT feature_id, psm_id
+        FROM psm
+        WHERE feature_id IS NOT NULL
+        ORDER BY feature_id, psm_id
+    """
+
+    def link_feature_psm(self) -> QueryResult:
+        """Compute the feature<->psm softlink as ``(feature_id, psm_id)`` rows.
+
+        The inverse of the authoritative ``psm.feature_id`` foreign key
+        (bigbio/qpx#267), read from the persisted psm view: every PSM with a
+        non-null ``feature_id`` yields one ``(feature_id, psm_id)`` pair. Grouping
+        the result by ``feature_id`` recovers each feature's ``psm_ids`` (which
+        qpx no longer materializes). Works the same on the local and S3 read paths
+        (it is a DuckDB query over the psm view).
+
+        Returns
+        -------
+        QueryResult
+            Lazy result of ``(feature_id, psm_id)`` — one row per assigned PSM.
+            PSMs with no feature assignment (null ``feature_id``) produce no rows.
+        """
+        self._require_feature_psm("link_feature_psm")
+        return QueryResult(self._engine.execute(self._LINK_FEATURE_PSM_SQL))
+
+    def psms_without_feature(self) -> QueryResult:
+        """Return ``psm_id`` for PSMs not assigned to any feature.
+
+        Convenience for the complement of :meth:`link_feature_psm`: the PSMs whose
+        authoritative ``psm.feature_id`` is null — identified but not tied to a
+        quantified consensus feature.
+        """
+        self._require_feature_psm("psms_without_feature")
+        return QueryResult(self._engine.execute("SELECT psm_id FROM psm WHERE feature_id IS NULL ORDER BY psm_id"))
+
+    def _require_feature_psm(self, operation: str) -> None:
+        """Raise if the feature or psm view is not available for the softlink."""
+        if self.feature is None or self.psm is None:
+            raise ValueError(
+                f"{operation}() requires both the 'feature' and 'psm' structures; available: {self.available_structures}"
+            )
+
     @property
     def available_structures(self) -> list[str]:
         return list(self._structures.keys())
@@ -668,14 +722,20 @@ class Dataset:
     ) -> None:
         """Flag feature<->psm cross-references that do not resolve.
 
-        Appends an issue to *psm_result* for each non-null
-        ``psm.feature_id`` that is not a ``feature.feature_id``, and to
-        *feature_result* for each ``feature.psm_ids`` element that is not a
-        ``psm.psm_id``. It also flags **reciprocal desync** — an edge that exists
-        in one direction but is contradicted by the other — but only where the
-        opposite direction is actually populated, so an unpopulated cross-ref
-        column (the common case) is never a false positive. A query failure (e.g.
-        the optional cross-ref columns are absent on older files) is surfaced as
+        ``psm.feature_id`` is the single source of truth for the feature<->psm
+        association (bigbio/qpx#267); qpx does not materialize its inverse,
+        ``feature.psm_ids`` (computed on read via
+        :meth:`~qpx.dataset.Dataset.link_feature_psm`). This check therefore always
+        validates the authoritative direction — appending an issue to *psm_result*
+        for each non-null ``psm.feature_id`` that is not a ``feature.feature_id``.
+        The ``feature.psm_ids`` checks (dangling ``psm_ids`` elements and
+        **reciprocal desync**) run ONLY when a producer actually supplies a
+        populated ``feature.psm_ids`` (an optional producer hardlink); when the
+        column is absent or all-null they are skipped — there is nothing to desync,
+        since the inverse is computed, not stored. Reciprocal desync is also only
+        flagged where the opposite direction is populated, so an unpopulated
+        cross-ref is never a false positive. A query failure (e.g. the optional
+        cross-ref columns are absent on older files) is surfaced as
         ``referential_check_skipped`` rather than masking schema validation.
         Issues are warnings normally and errors under strict validation.
         """
@@ -683,8 +743,17 @@ class Dataset:
         try:
             feature_columns = {row[0] for row in self._engine.execute('DESCRIBE "feature"').fetchall()}
             psm_columns = {row[0] for row in self._engine.execute('DESCRIBE "psm"').fetchall()}
-            has_feature_psm_ids = "psm_ids" in feature_columns
             has_psm_feature_id = "feature_id" in psm_columns
+            # feature.psm_ids is an OPTIONAL producer hardlink (qpx computes the
+            # inverse on read instead). Only run its referential/desync checks when
+            # a producer actually populated it — an absent/all-null column cannot
+            # desync from the authoritative psm.feature_id.
+            has_feature_psm_ids = "psm_ids" in feature_columns
+            feature_psm_ids_populated = False
+            if has_feature_psm_ids:
+                (feature_psm_ids_populated,) = self._engine.execute(
+                    "SELECT EXISTS (SELECT 1 FROM feature WHERE psm_ids IS NOT NULL AND len(psm_ids) > 0)"
+                ).fetchone()
 
             dangling_feature_ids = []
             if has_psm_feature_id:
@@ -699,7 +768,7 @@ class Dataset:
                 ).fetchall()
 
             dangling_psm_ids = []
-            if has_feature_psm_ids:
+            if feature_psm_ids_populated:
                 dangling_psm_ids = self._engine.execute(
                     """
                     SELECT DISTINCT pid AS psm_id
@@ -714,7 +783,7 @@ class Dataset:
             # does not list it back — i.e. the two directions describe different edges.
             desync = []
             inverse_desync = []
-            if has_feature_psm_ids and has_psm_feature_id:
+            if feature_psm_ids_populated and has_psm_feature_id:
                 desync = self._engine.execute(
                     """
                     SELECT DISTINCT p.psm_id AS psm_id, p.feature_id AS feature_id
