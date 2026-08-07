@@ -816,6 +816,7 @@ def _assert_pg_ids_join_valid(feat, pg):
     equals the feature's pg_accessions and whose grouped_runs contains the feature's run.
     """
     pg_by_id = {pg_id: (list(accs), list(grouped_runs)) for pg_id, accs, grouped_runs, _ in pg}
+    assert len(pg_by_id) == len(pg), "pg_id values are not unique across pg rows"
     for _seq, run, accs, pg_ids in feat:
         if not pg_ids:
             continue

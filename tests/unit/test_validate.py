@@ -350,3 +350,12 @@ def test_anchor_with_pg_accessions_ok():
     table = _feature_anchor_table([("P1", ["P1"]), (None, None)])
     issues = [i for i in FeatureSchema.validate_full(table).issues if i.check == "anchor_without_membership"]
     assert issues == []
+
+
+def test_anchor_membership_skips_non_list_pg_accessions():
+    # A malformed pg_accessions (string, not list) is a type mismatch reported elsewhere;
+    # the membership check must skip it gracefully rather than raise on list_value_length.
+    from qpx.core.data.schema import _anchor_membership_issues
+
+    table = pa.table({"anchor_protein": pa.array(["P1"]), "pg_accessions": pa.array(["P1;P2"])})
+    assert _anchor_membership_issues(table, "feature", "warning") == []

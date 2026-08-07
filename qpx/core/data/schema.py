@@ -264,6 +264,10 @@ def _anchor_membership_issues(table: pa.Table, structure: str, severity: str) ->
         return []
     anchor = table.column("anchor_protein")
     pg = table.column("pg_accessions")
+    # A non-list pg_accessions is a type mismatch already reported by the type check
+    # above; skip here rather than let list_value_length raise on malformed input.
+    if not (pa.types.is_list(pg.type) or pa.types.is_large_list(pg.type)):
+        return []
     # list_value_length is null where pg_accessions is null; fill_null(0) folds a
     # null membership into "empty" so the boolean logic never propagates nulls.
     pg_len = pc.fill_null(pc.list_value_length(pg), 0)
