@@ -369,3 +369,12 @@ def test_anchor_membership_skips_non_list_pg_accessions():
 
     table = pa.table({"anchor_protein": pa.array(["P1"]), "pg_accessions": pa.array(["P1;P2"])})
     assert _anchor_membership_issues(table, "feature", "warning") == []
+
+
+def test_anchor_membership_skips_non_string_anchor():
+    # A malformed anchor_protein (non-string) is a type mismatch reported elsewhere;
+    # the membership check must skip it rather than raise on the UTF-8 kernels.
+    from qpx.core.data.schema import _anchor_membership_issues
+
+    table = pa.table({"anchor_protein": pa.array([1, 2]), "pg_accessions": pa.array([[], []], type=pa.list_(pa.string()))})
+    assert _anchor_membership_issues(table, "feature", "warning") == []
