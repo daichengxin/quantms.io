@@ -422,9 +422,7 @@ class DiannFeatureAdapter(DiaNNBaseAdapter):
         parts.extend(
             [
                 "CAST(lk.missed_cleavages AS SMALLINT) AS missed_cleavages",
-                # An unmapped feature (DIA-NN 2.2.0 emits an empty Protein.Group for
-                # some rows) has no leading protein: normalise the blank split-part to
-                # NULL rather than "" so anchor_protein stays a real accession or null.
+                # Blank/whitespace Protein.Group → NULL (e.g. DIA-NN unmapped rows).
                 f"NULLIF(TRIM(SPLIT_PART(r.\"{pg_col}\", ';', 1)), '') AS anchor_protein",
             ]
         )

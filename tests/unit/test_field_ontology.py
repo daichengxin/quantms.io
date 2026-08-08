@@ -42,12 +42,8 @@ def test_field_ontology_entries():
 
 
 def test_dedupe_ontology_entries_keeps_first_per_key():
-    """_dedupe_ontology_entries: collapse duplicate (field_name, view) to first-wins.
-
-    A q-value can surface both as a discovered score and as a mapped field, which
-    would otherwise emit two rows for the same ontology primary key.
-    """
-    from qpx.converters.orchestrator import _dedupe_ontology_entries
+    """dedupe_ontology_entries keeps the first row per (field_name, view)."""
+    from qpx.converters.ontology_util import dedupe_ontology_entries
 
     entries = [
         {"field_name": "qvalue", "view": "feature", "source_column_name": "Q.Value"},
@@ -55,10 +51,9 @@ def test_dedupe_ontology_entries_keeps_first_per_key():
         {"field_name": "qvalue", "view": "pg", "source_column_name": "PG.Q.Value"},
         {"field_name": "rt", "view": "feature", "source_column_name": "RT"},
     ]
-    deduped = _dedupe_ontology_entries(entries)
+    deduped = dedupe_ontology_entries(entries)
 
     keys = [(e["field_name"], e["view"]) for e in deduped]
     assert keys == [("qvalue", "feature"), ("qvalue", "pg"), ("rt", "feature")]
-    # first-wins: the (qvalue, feature) row keeps the first source column
     qv_feature = next(e for e in deduped if e["field_name"] == "qvalue" and e["view"] == "feature")
     assert qv_feature["source_column_name"] == "Q.Value"

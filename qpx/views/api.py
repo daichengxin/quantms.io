@@ -313,7 +313,7 @@ class AbsoluteExpressionView:
         try:
             import anndata as ad
         except ImportError:
-            raise ImportError("anndata is required for AbsoluteExpressionView. Install with: pip install anndata")
+            raise ImportError("anndata is required for AbsoluteExpressionView; reinstall qpx (anndata is a core dependency)")
 
         ds_path = Path(self._dataset.path)
         # Look for <prefix>.ae.h5ad or any .ae.h5ad
