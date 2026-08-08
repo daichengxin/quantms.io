@@ -51,7 +51,7 @@ channel as a separate `run|label` observation.
 pip install qpx                # includes MuData export (mudata, anndata, scipy)
 
 # Optional extras
-pip install "qpx[quantify]"    # protein quantification (mokume + DirectLFQ)
+pip install "qpx[quantify]"    # protein quantification via mokume[directlfq]
 pip install "qpx[transforms]"  # gene mapping / BioPython helpers
 pip install "qpx[plotting]"    # plotting dependencies
 pip install "qpx[mzidentml]"   # mzIdentML conversion (lxml)
