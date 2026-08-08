@@ -14,7 +14,7 @@ dependencies:
   - pyyaml>=6.0
   # Core MuData stack (also declared in pyproject.toml)
   - anndata
-  - mudata
+  - mudata>=0.3.1
   - scipy
   # Dev / test
   - scikit-learn
