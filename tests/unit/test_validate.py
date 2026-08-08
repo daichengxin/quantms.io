@@ -352,6 +352,16 @@ def test_anchor_with_pg_accessions_ok():
     assert issues == []
 
 
+def test_blank_anchor_without_membership_not_flagged():
+    # DIA-NN 2.2.0 emits an empty-string anchor_protein (not null) for features it
+    # leaves protein-group-blank. A blank/whitespace anchor is not a leading protein,
+    # so an unmapped feature carrying "" + no membership must NOT be a violation.
+    table = _feature_anchor_table([("", None), ("   ", None), ("P1", ["P1"])])
+    strict = FeatureSchema.validate_full(table, strict=True)
+    errs = [i for i in strict.issues if i.check == "anchor_without_membership"]
+    assert errs == []
+
+
 def test_anchor_membership_skips_non_list_pg_accessions():
     # A malformed pg_accessions (string, not list) is a type mismatch reported elsewhere;
     # the membership check must skip it gracefully rather than raise on list_value_length.

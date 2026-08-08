@@ -217,6 +217,12 @@ class BaseConverter(ABC):
         if not entries:
             return None
 
+        # Honour the ontology primary key (field_name, view): a field can surface
+        # both as a discovered score and as a mapped field, so collapse duplicates.
+        from qpx.converters.orchestrator import _dedupe_ontology_entries
+
+        entries = _dedupe_ontology_entries(entries)
+
         from qpx.writers.ontology import OntologyWriter
 
         output_path = Path(output_path)
@@ -270,6 +276,12 @@ class BaseConverter(ABC):
             entries.extend(extra_entries)
         if not entries:
             return None
+
+        # Honour the ontology primary key (field_name, view): a field can surface
+        # both as a discovered score and as a mapped field, so collapse duplicates.
+        from qpx.converters.orchestrator import _dedupe_ontology_entries
+
+        entries = _dedupe_ontology_entries(entries)
 
         from qpx.writers.ontology import OntologyWriter
 

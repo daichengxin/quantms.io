@@ -272,7 +272,11 @@ def _anchor_membership_issues(table: pa.Table, structure: str, severity: str) ->
     # null membership into "empty" so the boolean logic never propagates nulls.
     pg_len = pc.fill_null(pc.list_value_length(pg), 0)
     pg_missing = pc.equal(pg_len, 0)
-    violation = pc.and_(pc.is_valid(anchor), pg_missing)
+    # An anchor is "set" only when it names a real protein. A blank/whitespace
+    # string (e.g. DIA-NN 2.2.0 emits "" for unmapped features instead of null)
+    # is not a leading protein, so it must not count as a membership violation.
+    anchor_set = pc.greater(pc.utf8_length(pc.utf8_trim_whitespace(pc.fill_null(anchor, ""))), 0)
+    violation = pc.and_(anchor_set, pg_missing)
     bad = pc.sum(pc.cast(violation, pa.int64())).as_py() or 0
     if not bad:
         return []
