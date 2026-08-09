@@ -14,6 +14,7 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | **OpenMS consensusXML** | Yes | Yes | Yes | No | If SDRF | If SDRF | No | No | No | No |
 | **CDAP** | Yes | Yes | Yes | No | If PDC | If PDC | Yes | Yes | Yes | No |
 | **mzIdentML** | Yes | No | No | Yes | If SDRF | If SDRF | Yes | Yes | Yes | No |
+| **QuantMS MSstats** | No | Yes | No | No | Yes | Yes | Yes | Yes | Yes | No |
 | **SDRF** | No | No | No | No | Yes | Yes | No | Optional | No | No |
 
 - **Yes** — the converter produces this view.
@@ -35,6 +36,7 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | OpenMS consensusXML | `qpxc convert openms-consensus` |
 | CDAP | `qpxc convert cdap` |
 | mzIdentML | `qpxc convert mzidentml` |
+| QuantMS MSstats | `qpxc convert quantms-msstats` |
 | SDRF only | `qpxc convert sdrf` |
 
 ## Input files (summary)
@@ -49,6 +51,7 @@ This page lists which QPX data views each converter produces. Use it to see at a
 | OpenMS consensusXML | consensusXML; optional SDRF |
 | CDAP | CPTAC CDAP `.psm` files in one study directory |
 | mzIdentML | .mzid / .mzid.gz; optional MGF or mzML (file/folder) for spectra; optional SDRF |
+| QuantMS MSstats | QuantMS-generated `*_msstats_in.csv`; required SDRF |
 | SDRF | Single SDRF TSV file |
 
 For field-level mappings from each tool’s columns to QPX, see [Tool Field Mappings](tool-mappings.md).
