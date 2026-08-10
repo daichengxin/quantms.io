@@ -115,6 +115,37 @@ def test_lfq_conversion_writes_only_supported_views(tmp_path):
     assert config["protein_aggregation"] == "not performed"
 
 
+def test_quoted_comma_after_csv_sniff_sample_is_parsed(tmp_path):
+    """A late quoted comma must not change the inferred CSV dialect."""
+    sdrf = tmp_path / "lfq.sdrf.tsv"
+    msstats = tmp_path / "lfq_msstats_in.csv"
+    output = tmp_path / "output"
+    _write_sdrf(sdrf, {"run1.mzML": ["label free sample"]})
+
+    common = {
+        "ProteinName": "P1",
+        "PeptideSequence": "PEPTIDEK",
+        "Charge": 2,
+        "Run": "run1",
+        "Intensity": 100.0,
+    }
+    rows = [common] * 20_481
+    rows.append(
+        {
+            **common,
+            "ProteinName": "Interleukin-8,",
+            "PeptideSequence": "QUOTEDK",
+            "Intensity": 200.0,
+        }
+    )
+    pd.DataFrame(rows).to_csv(msstats, index=False)
+
+    table = pq.read_table(_convert(msstats, sdrf, output))
+
+    assert table.num_rows == 2
+    assert "Interleukin-8," in table.column("anchor_protein").to_pylist()
+
+
 def test_tmt_channels_collapse_without_merging_locations(tmp_path):
     """TMT channel rows collapse per scan/RT while distinct Features remain separate."""
     sdrf = tmp_path / "tmt.sdrf.tsv"

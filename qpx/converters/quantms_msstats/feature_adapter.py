@@ -140,7 +140,14 @@ class QuantmsMsstatsFeatureAdapter(BaseConverter):
             sql_build(
                 """
                 CREATE OR REPLACE VIEW _msstats_input AS
-                SELECT * FROM read_csv_auto('$path', header=true, all_varchar=true)
+                SELECT * FROM read_csv_auto(
+                    '$path',
+                    header=true,
+                    all_varchar=true,
+                    delim=',',
+                    quote='"',
+                    escape='"'
+                )
                 """,
                 path=safe_path,
             )
