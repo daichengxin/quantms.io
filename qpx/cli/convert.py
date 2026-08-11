@@ -12,6 +12,7 @@ Subcommands:
     qpxc convert spectronaut — Spectronaut report to QPX
     qpxc convert cdap       — CPTAC CDAP .psm files to QPX
     qpxc convert sdrf       — SDRF to sample.parquet + run.parquet
+    qpxc convert quantms-msstats — QuantMS MSstats + SDRF to QPX
 """
 
 from __future__ import annotations
@@ -25,6 +26,17 @@ import click
 from qpx.converters.openms import OpenMSConverter
 
 logger = logging.getLogger("qpx.cli.convert")
+
+
+def _log_summary(output_folder) -> None:
+    """Log a conversion summary for a just-written output folder.
+
+    Shared by every convert subcommand. Guarded so a summary failure NEVER fails
+    an otherwise-successful conversion (a warning is logged instead).
+    """
+    from qpx.converters.summary import log_conversion_summary
+
+    log_conversion_summary(output_folder, logger=logger)
 
 
 def _maybe_enrich_pride(output_folder, project_accession: str | None, enrich: bool) -> None:
@@ -84,8 +96,14 @@ def convert():
 )
 @click.option(
     "--qvalue-threshold",
-    help="Q-value threshold for filtering",
-    default=0.05,
+    help=(
+        "Optional q-value threshold. Unset (the default) converts the DIA-NN "
+        "report as reported — no filtering — since DIA-NN already FDR-filters its "
+        "main report and every per-row q-value column is carried through for "
+        "downstream filtering. When given, the feature view filters on precursor "
+        "Q.Value and the pg view on PG-level q-value at their own levels."
+    ),
+    default=None,
     type=float,
 )
 @click.option(
@@ -157,7 +175,7 @@ def convert_diann_cmd(
     report_path: Path,
     sdrf_file: Path,
     mzml_info_folder: Path,
-    qvalue_threshold: float,
+    qvalue_threshold: Optional[float],
     output_folder: Path,
     output_prefix: Optional[str],
     pg_matrix_path: Optional[Path],
@@ -229,6 +247,7 @@ def convert_diann_cmd(
             output_prefix=output_prefix,
             batch_size=batch_size,
             standardized_intensities=standardized_intensities,
+            qvalue_threshold=qvalue_threshold,
         )
 
     converter.convert_sdrf(output_folder=output_folder, prefix=prefix)
@@ -238,6 +257,7 @@ def convert_diann_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"DIA-NN conversion complete. Output: {output_folder}")
 
 
@@ -422,6 +442,7 @@ def convert_maxquant_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"MaxQuant conversion complete. Output: {output_folder}")
 
 
@@ -453,7 +474,7 @@ def convert_maxquant_cmd(
 )
 @click.option(
     "--experiment-annotation-file",
-    help=("FragPipe experiment_annotation.tsv mapping protein-group experiments to member raw files"),
+    help=("FragPipe experiment_annotation.tsv mapping experiments to member raw files"),
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 @click.option(
@@ -561,6 +582,7 @@ def convert_fragpipe_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"FragPipe conversion complete. Output: {output_folder}")
 
 
@@ -677,6 +699,7 @@ def convert_mzidentml_cmd(
 
     _maybe_enrich_pride(output_folder, project_accession, enrich_pride)
 
+    _log_summary(output_folder)
     click.echo(f"mzIdentML conversion complete. Output: {output_folder}")
 
 
@@ -685,7 +708,7 @@ def convert_mzidentml_cmd(
 # ---------------------------------------------------------------------------
 
 
-@convert.command("openms")
+@convert.command("openms", deprecated=True)
 @click.option(
     "--qpx-dir",
     help="Directory containing OpenMS -out_qpx parquet files (*.psm.parquet, *.feature.parquet, *.pg.parquet)",
@@ -737,7 +760,13 @@ def convert_mzidentml_cmd(
 )
 @click.option("--verbose", help="Enable verbose logging", is_flag=True)
 def convert_openms_cmd(**kwargs):
-    r"""Enrich OpenMS ProteomicsLFQ -out_qpx output into a full QPX dataset.
+    r"""[DEPRECATED] Enrich OpenMS ProteomicsLFQ -out_qpx output into a full QPX dataset.
+
+    DEPRECATED: OpenMS -out_qpx mis-assigns every PSM's run_file_name to the first
+    run (OpenMS#9872) and emits duplicate PSMs (OpenMS#9871). Use
+    ``qpxc convert openms-consensus`` — it reads the consensusXML directly and
+    resolves the correct run per PSM. This command is kept for now and will be
+    reconsidered once OpenMS ships an -out_qpx with the correct per-PSM run.
 
     Validates the existing psm/feature/pg parquet files, copies them to the
     output folder, and generates the missing metadata tables (run, sample,
@@ -841,8 +870,28 @@ def convert_openms_cmd(**kwargs):
     ),
 )
 @click.option("--verbose", is_flag=True, help="Enable verbose logging.")
+@click.option(
+    "--project-accession",
+    help="PRIDE / ProteomeXchange accession (e.g. PXD001819)",
+)
+@click.option(
+    "--compression",
+    type=click.Choice(["zstd", "snappy", "gzip", "none"], case_sensitive=False),
+    default="zstd",
+    show_default=True,
+    help="Parquet compression codec.",
+)
 def convert_openms_consensus_cmd(
-    consensusxml_path, sdrf_path, output_folder, output_prefix, structures, pg_top, streaming, verbose
+    consensusxml_path,
+    sdrf_path,
+    output_folder,
+    output_prefix,
+    structures,
+    pg_top,
+    streaming,
+    verbose,
+    project_accession,
+    compression,
 ):
     """Convert an OpenMS consensusXML (+ SDRF) to QPX.
 
@@ -865,7 +914,10 @@ def convert_openms_consensus_cmd(
         structures=structs,
         pg_top=pg_top,
         streaming=streaming,
+        project_accession=project_accession,
+        compression=compression,
     )
+    _log_summary(output_folder)
     click.echo(f"consensusXML conversion complete. Wrote: {sorted(written)}")
 
 
@@ -936,6 +988,110 @@ def convert_sdrf_cmd(
 
 
 # ---------------------------------------------------------------------------
+# QuantMS MSstats
+# ---------------------------------------------------------------------------
+
+
+@convert.command("quantms-msstats")
+@click.option(
+    "--msstats-file",
+    help="QuantMS-generated *_msstats_in.csv file path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--sdrf-file",
+    help="SDRF metadata file path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--output-folder",
+    help="Output directory for generated QPX files",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option("--output-prefix", help="Prefix for output file names")
+@click.option(
+    "--project-accession",
+    help="PRIDE / ProteomeXchange accession (e.g. PXD007683)",
+)
+@click.option(
+    "--max-memory",
+    help="Maximum DuckDB memory limit",
+    default="16GB",
+    show_default=True,
+)
+@click.option(
+    "--max-cpus",
+    help="Maximum number of DuckDB threads",
+    default=4,
+    show_default=True,
+    type=int,
+)
+@click.option(
+    "--batch-size",
+    help="Number of Feature records written per batch",
+    default=50_000,
+    show_default=True,
+    type=click.IntRange(min=1),
+)
+@click.option(
+    "--compression",
+    type=click.Choice(["zstd", "snappy", "gzip", "none"], case_sensitive=False),
+    default="zstd",
+    show_default=True,
+    help="Parquet compression codec.",
+)
+@click.option("--verbose", help="Enable verbose logging", is_flag=True)
+def convert_quantms_msstats_cmd(
+    msstats_file: Path,
+    sdrf_file: Path,
+    output_folder: Path,
+    output_prefix: Optional[str],
+    project_accession: Optional[str],
+    max_memory: str,
+    max_cpus: int,
+    batch_size: int,
+    compression: str,
+    verbose: bool,
+):
+    """Convert QuantMS MSstats and SDRF inputs to QPX.
+
+    Produces Feature, Sample, Run, Dataset, Provenance, and Ontology Parquet
+    files. MSstats does not contain the evidence required to produce PSM or
+    protein-group views, so those views are intentionally not generated.
+
+    \b
+    Example:
+        qpxc convert quantms-msstats \
+            --msstats-file PXD007683.sdrf_openms_design_msstats_in.csv \
+            --sdrf-file PXD007683.sdrf.tsv \
+            --output-folder ./qpx_output
+    """
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    from qpx.converters.quantms_msstats import QuantmsMsstatsConverter
+
+    converter = QuantmsMsstatsConverter(
+        max_memory=max_memory,
+        max_cpus=max_cpus,
+        compression=compression,
+    )
+    prefix = converter.convert(
+        msstats_file=msstats_file,
+        sdrf_file=sdrf_file,
+        output_folder=output_folder,
+        output_prefix=output_prefix,
+        project_accession=project_accession,
+        batch_size=batch_size,
+    )
+    _log_summary(output_folder)
+    click.echo(f"QuantMS MSstats conversion complete. Output prefix: {prefix}")
+
+
+# ---------------------------------------------------------------------------
 # Spectronaut
 # ---------------------------------------------------------------------------
 
@@ -954,8 +1110,12 @@ def convert_sdrf_cmd(
 )
 @click.option(
     "--qvalue-threshold",
-    help="Q-value threshold for filtering",
-    default=0.05,
+    help=(
+        "Optional q-value threshold. Unset (the default) converts the report as "
+        "reported — no filtering. When given, the feature view filters on the "
+        "precursor q-value."
+    ),
+    default=None,
     type=float,
 )
 @click.option(
@@ -995,7 +1155,7 @@ def convert_sdrf_cmd(
 def convert_spectronaut_cmd(
     report_path: Path,
     sdrf_file: Optional[Path],
-    qvalue_threshold: float,
+    qvalue_threshold: Optional[float],
     output_folder: Path,
     output_prefix: Optional[str],
     max_memory: Optional[str],
@@ -1176,6 +1336,7 @@ def convert_cdap_cmd(
         project_accession=project_accession,
     )
 
+    _log_summary(output_folder)
     click.echo(f"CDAP conversion complete. Output: {output_folder}")
 
 

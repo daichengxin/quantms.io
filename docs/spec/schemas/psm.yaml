@@ -38,7 +38,8 @@ fields:
   calculated_mz:
     type: float32
     required: true
-    doc: "Theoretical m/z"
+    nullable: true
+    doc: "Theoretical m/z; null when it cannot be calculated from the reported peptidoform"
   observed_mz:
     type: float32
     required: true

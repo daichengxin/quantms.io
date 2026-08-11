@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **MuData stack is core**: `mudata`, `anndata`, and `scipy` are required dependencies (no longer an optional extra). Use bare `pip install qpx`.
+- **`quantify` extra**: now `mokume[directlfq]>=0.1.0` (DirectLFQ via mokume's optional extra).
+
+### Removed
+
+- **`[mudata]` optional extra** — MuData export is included in the default install.
+
+### Fixed
+
+- **Ontology PK uniqueness**: ontology writes collapse to one row per `(field_name, view)` (first-wins) when a field is both a discovered score and a mapped field.
+- **DIA-NN blank `anchor_protein`**: empty/whitespace first accession from `Protein.Group` is written as NULL; validators treat blank anchors as unset.
+
 ### Added
 
+- **QuantMS MSstats converter**: `qpxc convert quantms-msstats` converts a QuantMS-generated `*_msstats_in.csv` plus its authoritative SDRF into QPX Feature, Sample, Run, Dataset, Ontology, and Provenance views. LFQ/TMT/iTRAQ labels are canonicalized, channel rows are collapsed per measured Feature, and unsupported PSM/PG views are not fabricated.
 - **Spectronaut converter**: `qpxc convert spectronaut` — full support for Spectronaut report TSV files, producing feature.parquet and pg.parquet with DuckDB-accelerated batch processing
 - **CPTAC CDAP converter**: `qpxc convert cdap` — convert CPTAC CDAP `.psm` study directories to QPX psm/feature/pg/dataset/ontology/provenance views
 - **Full-spectra mz converter**: `qpxc convert mz` — convert a directory of mzML / `.mzML.gz` files to a single `mz.parquet`; each spectrum carries `run_file_name` + `scan` for linking back to PSM/feature
@@ -18,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **openms-consensus channel/SDRF consistency check**: when an SDRF is provided, the converter compares the isobaric channels read from the consensusXML maps against the SDRF `comment[label]` set and logs a warning for any channel present in one but not the other (e.g. a mis-declared plex or the wrong SDRF)
 - **Mandatory identity ids**: the `feature`, `psm` and `pg` views each carry a single required `int64` identity column — `feature_id` / `psm_id` / `pg_id` — that is the primary key of the view. The id is derived by the writer as an opaque hash of a footer-declared `identity_composite` of existing columns (feature `[peptidoform, charge, run_file_name, rt]`, psm `[peptidoform, charge, run_file_name, scan]`, pg `[anchor_protein, grouped_runs, label]`), or accepted under the view's producer-ID rule. Each file self-describes its `primary_key` + `identity_composite` in the footer, and primary-key uniqueness validation catches any hash collision. See bigbio/qpx#229.
 - **Cross-view reference columns (optional)**: `feature.psm_ids` (`list<int64>`), `feature.pg_ids` (`list<int64>`) and `psm.feature_id` (`int64`, nullable) let the views reference each other by id (feature ↔ PSM ↔ protein group); populated where a converter can resolve the mapping, null otherwise
-- **Writer identity enforcement**: `FeatureWriter` re-derives identified Feature ids by default, stashing an overridden producer id as a `provided_feature_id` cv_param. Unidentified Features require a producer id, which is namespaced by run; existing-file transformations can preserve the stored id and its footer-declared composite. Identity-bearing writers validate the complete output file on close and raise on null or duplicate primary keys, including collisions split across write batches. Standalone non-strict schema validation continues to report clashes as warnings.
+- **Writer identity enforcement**: `FeatureWriter` re-derives identified Feature ids by default, stashing an overridden producer id as a `provided_feature_id` cv_param. Unidentified Features without a producer id may derive one from the declared composite only when the resulting full-file primary key is unique; successful fallback is reported as a warning. Producer ids are namespaced by run. Existing-file transformations can preserve the stored id and its footer-declared composite. Identity-bearing writers validate the complete output file on close and raise on null or duplicate primary keys.
 - **MuData (`.h5mu`) export**: OpenMS (`-out_qpx`), `openms-consensus`, and DIA-NN conversions now also emit a `<prefix>.h5mu` MuData container (`qpx/mudata.py` + `orchestrator._write_mudata`), giving parity with quantmsdiann. It bundles up to four modalities — `precursors` (peptidoform×charge feature intensities), `proteins` (protein-group intensities), `expression` (Absolute Expression), `differential` (Differential Expression) — plus a `varp["feature_mapping"]` precursor↔protein adjacency. See the MuData section of the serialization spec
 - **De-novo / no-database-search support**: features and PSMs from de-novo or search-free workflows (no protein mapping, no target-decoy) are now accepted
 
@@ -45,10 +60,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **BREAKING — QuantMS/mzTab converter**: removed `qpxc convert quantms`, `QuantMSConverter`, its adapters, and the mzTab+MSstats loader. Use `qpxc convert openms` for native OpenMS `-out_qpx` output or `qpxc convert openms-consensus` for `consensusXML`.
+- **BREAKING — QuantMS/mzTab converter**: removed `qpxc convert quantms`, `QuantMSConverter`, its adapters, and the mzTab+MSstats loader. Use `qpxc convert openms-consensus` (consensusXML) — see the deprecation of `qpxc convert openms` below.
+
+### Deprecated
+
+- **`qpxc convert openms` (the OpenMS `-out_qpx` parquet path)**: deprecated in favour of `qpxc convert openms-consensus`. OpenMS `-out_qpx` mis-assigns **every** PSM's `run_file_name` to the first run (the per-PSM `map_index` is dropped; OpenMS#9872) and emits duplicate PSMs (one feature-attached + one unassigned; OpenMS#9871) — so on any multi-run / multi-fraction / multi-replicate design ~half the PSMs carry the wrong run. `qpxc convert openms-consensus` reads the consensusXML directly and resolves the correct run per PSM (via `map_index`/`id_merge_index`/feature-element runs), so it does not have these defects. The `openms` command now emits a deprecation warning; it will be reconsidered once OpenMS ships an `-out_qpx` that carries the correct per-PSM run.
 
 ### Fixed
 
+- **DIA-NN q-value handling — feature/pg consistency, filtering is opt-in** (bigbio/qpx#241): the DIA-NN feature and pg views are now consistent and **neither filters by default**. `--qvalue-threshold` is opt-in (default unset): with no threshold the converter emits every feature and protein group the report contains, since DIA-NN already FDR-filters its main report and all per-row q-value columns (feature: `Q.Value`, `Global.Q.Value`, `PEP`, `Lib.Q.Value`, `Translated.Q.Value`; pg: `PG.Q.Value`, `Global.PG.Q.Value`, `Protein.Q.Value`, `Lib.PG.Q.Value`, `GG.Q.Value`) are carried through unconditionally for downstream filtering at any level. This resolves the earlier feature/pg inconsistency and count inflation by making both views as-reported rather than by forcing a pg filter. When `--qvalue-threshold` **is** given, each view filters at its own level — the feature view on precursor `Q.Value` and the pg view on `Global.PG.Q.Value` (falling back to `PG.Q.Value`). The Spectronaut converter's `--qvalue-threshold` is likewise opt-in.
+- **DIA-NN empty channel columns**: reports whose `Channel`/`Label` column is entirely empty are treated as label-free, while partially missing multiplex channel identifiers remain invalid.
+- **FragPipe Feature PSM enrichment**: `experiment_annotation.tsv`, explicit experiment mappings, or SDRF mappings now resolve each experiment to its exact raw run before attaching PSM metadata; multi-run experiments are left unenriched instead of borrowing one fraction's PSM.
+- **Deterministic DIA-NN merged-group PG quantity**: when annotation noise merges protein-group rows that disagree on `PG.Quantity` / `PG.MaxLFQ`, the pg view now emits the max of the finite values (order-independent) instead of a row-order-dependent "first", and warns when the values actually disagree.
+- **DIA-NN `observed_mz` NULL instead of 0.0 sentinel** (bigbio/qpx#244): a feature with no `Precursor.Mz` and no `ms_info` source now carries a truthful `NULL` observed m/z rather than a `0.0` that corrupts downstream mass-error / PPM math; report runs with no matching `*_ms_info.parquet` are warned about before being dropped.
+- **Controlled unidentified Feature identity fallback**: an unidentified Feature (null `peptidoform`) with no producer id derives a candidate `feature_id` from the declared composite. The fallback is accepted with a warning only after full-file primary-key uniqueness succeeds; a collision remains a hard error. A producer-supplied id remains namespaced by run and preserved as a `provided_feature_id` cv_param.
 - **openms-consensus isobaric detection**: real quantms `IsobaricWorkflow` output stamps TMT/iTRAQ consensusXML with `experiment_type="label-free"` while the maps still carry `tmt6plex_*`/`itraq*plex_*` labels. The converter now detects channels from the **map label** (not `experiment_type`), so real quantms TMT no longer collapses all reporter channels into a single `LFQ` label. Verified on real cluster output (PXD000001 TMT → TMT126–131; BSA/PXD002395 LFQ unchanged)
 - **RT unit conversion**: DIA-NN and MaxQuant converters now correctly convert retention time from minutes to seconds in feature and PSM parquet output
 - **Code quality**: Spectronaut converter refactored to reduce cyclomatic complexity, fix logging f-string interpolation, remove unused arguments, and eliminate duplicate code

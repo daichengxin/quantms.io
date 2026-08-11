@@ -37,7 +37,7 @@ mdata.write("PXD000000.h5mu")  # serialize to HDF5
 Use `build_mudata(ds, all_intensity_labels=True)` to represent every TMT/iTRAQ
 channel as a separate `run|label` observation.
 
-> Requires the optional `mudata` dependency: `pip install "qpx[mudata]"`
+> MuData support is included in the default QPX installation.
 
 ### Performance
 
@@ -48,11 +48,15 @@ channel as a separate `run|label` observation.
 ### Install from PyPI
 
 ```bash
-pip install qpx
+pip install qpx                # includes MuData export (mudata, anndata, scipy)
 
-# With optional extras
-pip install "qpx[quantify]"    # protein quantification (mokume + DirectLFQ)
-pip install "qpx[all]"         # all optional dependencies
+# Optional extras
+pip install "qpx[quantify]"    # protein quantification via mokume[directlfq]
+pip install "qpx[transforms]"  # gene mapping / BioPython helpers
+pip install "qpx[plotting]"    # plotting dependencies
+pip install "qpx[mzidentml]"   # mzIdentML conversion (lxml)
+pip install "qpx[pdc]"         # PDC/CPTAC download (pridepy)
+pip install "qpx[all]"         # all optional extras above
 ```
 
 ### Install from GitHub (latest dev)
@@ -82,8 +86,8 @@ pip install .
 # Install from GitHub
 uv pip install "qpx @ git+https://github.com/bigbio/qpx.git"
 
-# With optional extras (transforms, plotting)
-uv pip install "qpx[transforms,plotting] @ git+https://github.com/bigbio/qpx.git"
+# With optional extras
+uv pip install "qpx[quantify,transforms,plotting] @ git+https://github.com/bigbio/qpx.git"
 ```
 
 **From a local clone:**
@@ -244,7 +248,7 @@ qpx/
 ├── cli/                    # Click CLI (entry point: qpx.cli.main:main)
 │   ├── main.py             # Top-level CLI group
 │   ├── pdc2qpx.py          # pdc2qpx command (PDC download + convert)
-│   └── convert.py          # convert subcommands (openms, openms-consensus, maxquant, diann, spectronaut, fragpipe, mzidentml, cdap, mz, sdrf)
+│   └── convert.py          # convert subcommands (openms, openms-consensus, quantms-msstats, maxquant, diann, spectronaut, fragpipe, mzidentml, cdap, mz, sdrf)
 ├── pipeline/               # High-level orchestration (pdc2qpx: download + CDAP + mz)
 ├── converters/             # Tool-specific converters
 │   ├── openms/             # OpenMS native QPX enrichment
@@ -255,6 +259,7 @@ qpx/
 │   ├── spectronaut/        # Spectronaut converter
 │   ├── fragpipe/           # FragPipe converter
 │   ├── mzidentml/          # mzIdentML converter
+│   ├── quantms_msstats/    # QuantMS *_msstats_in.csv + SDRF converter
 │   └── sdrf.py             # Shared SDRF converter
 ├── core/                   # Core logic & formats
 │   ├── data/               # Schema definitions (YAML + Python)

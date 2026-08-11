@@ -1,11 +1,12 @@
 """PgWriter — writes pg.parquet files.
 
 Since QPX 1.1 the pg view is **flattened**: instead of one row per
-``(anchor_protein, grouped_runs)`` carrying an ``intensities: list<{label,
+``(pg_accessions, grouped_runs)`` carrying an ``intensities: list<{label,
 intensity}>`` column, there is **one row per label** with scalar ``label`` and
 ``intensity`` columns. Since the mandatory-identity change the primary key is the
 single derived ``pg_id`` (hashed from the ``identity_composite``
-``(anchor_protein, grouped_runs, label)``). Converters
+``(pg_accessions, grouped_runs, label)`` — the full group membership keys the id,
+not just the leader). Converters
 still build the natural ``intensities`` list per protein group; the writer is the
 single place that materializes the flat physical layout, so no converter needs to
 know about the on-disk shape. Identification-only groups (no intensity, e.g.
@@ -68,6 +69,21 @@ class PgWriter(BaseWriter):
     def write_batch(self, records: list[dict]):
         """Explode ``intensities`` into one row per label, then buffer/flush."""
         super().write_batch(_explode_pg_records(records))
+
+    def write_dataframe(self, df):
+        """Explode ``intensities`` before writing a flat pg DataFrame.
+
+        The base ``write_dataframe`` builds the table against the flat pg schema
+        (which has no ``intensities`` column), so a DataFrame that still carries
+        the natural ``intensities`` list would have its quant silently dropped
+        (bigbio/qpx#252). Route such frames through the same explode the
+        ``write_batch`` / ``write_table`` paths use; frames already flattened
+        (scalar ``label``/``intensity``) fall through unchanged.
+        """
+        if "intensities" in df.columns:
+            self.write_batch(df.to_dict("records"))
+            return
+        super().write_dataframe(df)
 
     def write_table(self, table: pa.Table):
         """Explode a pg table that still carries the ``intensities`` list column."""

@@ -36,7 +36,7 @@ class BaseStructure:
         """Open a standalone Parquet file (creates its own DuckDB engine)."""
         path = Path(path)
         engine = create_engine(**engine_kwargs)
-        table_name = cls._schema_class._view_name
+        table_name = cls._schema_class.view_name
         engine.register_parquet(table_name, path)
         return cls(engine=engine, table_name=table_name, file_path=path)
 

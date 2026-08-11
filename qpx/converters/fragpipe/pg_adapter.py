@@ -17,8 +17,10 @@ import pandas as pd
 
 from qpx.converters.base import BaseConverter, resolve_columns
 from qpx.converters.channel_labels import experiment_runs_from_sdrf
+from qpx.converters.fragpipe.constants import is_decoy_accession
 from qpx.converters.mappings import get_field_mappings
 from qpx.converters.utils import safe_float
+from qpx.core.files import run_file_stem
 from qpx.core.sql import escape_path, sql_build
 from qpx.writers.pg import PgWriter
 
@@ -26,7 +28,50 @@ logger = logging.getLogger(__name__)
 
 # Derive field map from central YAML mappings
 _PG_MAP = get_field_mappings("fragpipe", "pg")
-_RUN_EXTENSIONS = (".mzml", ".raw", ".d", ".wiff", ".htrms")
+
+
+def normalize_run_name(value: str) -> str:
+    """Return a QPX run name for a FragPipe raw-file value."""
+    name = run_file_stem(str(value))
+    return name[: -len(".htrms")] if name.casefold().endswith(".htrms") else name
+
+
+def normalize_experiment_mapping(mapping: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Normalize and validate a FragPipe experiment-to-runs mapping."""
+    normalized: dict[str, list[str]] = {}
+    for experiment, runs in mapping.items():
+        experiment_name = str(experiment).strip()
+        if not experiment_name:
+            raise ValueError("FragPipe experiment name cannot be empty")
+        if isinstance(runs, (str, bytes)):
+            raise ValueError(f"Runs for FragPipe experiment {experiment_name!r} must be a list")
+        run_names = sorted({normalize_run_name(str(run)) for run in runs if str(run).strip()})
+        if not run_names:
+            raise ValueError(f"FragPipe experiment {experiment_name!r} has no raw files")
+        normalized[experiment_name] = run_names
+    return normalized
+
+
+def load_experiment_annotation(path: str) -> dict[str, list[str]]:
+    """Read FragPipe ``experiment_annotation.tsv`` into grouped runs."""
+    annotation = pd.read_csv(path, sep="\t", dtype=str)
+    columns = {str(column).strip().casefold(): column for column in annotation.columns}
+    missing = {"file", "sample"} - columns.keys()
+    if missing:
+        raise ValueError("FragPipe experiment annotation is missing column(s): " + ", ".join(sorted(missing)))
+
+    mapping: dict[str, list[str]] = {}
+    file_col = columns["file"]
+    sample_col = columns["sample"]
+    for row_number, row in annotation.iterrows():
+        experiment = str(row[sample_col]).strip()
+        file_value = str(row[file_col]).strip()
+        if not experiment or not file_value or experiment == "nan" or file_value == "nan":
+            raise ValueError(f"FragPipe experiment annotation has an empty file/sample value on row {row_number + 2}")
+        mapping.setdefault(experiment, []).append(file_value)
+    if not mapping:
+        raise ValueError("FragPipe experiment annotation contains no file/sample rows")
+    return normalize_experiment_mapping(mapping)
 
 
 class FragPipePgAdapter(BaseConverter):
@@ -86,9 +131,9 @@ class FragPipePgAdapter(BaseConverter):
         if experiment_to_runs is not None and experiment_annotation_path is not None:
             raise ValueError("Provide either experiment_to_runs or experiment_annotation_path, not both")
         if experiment_annotation_path is not None:
-            self._experiment_to_runs = self._load_experiment_annotation(experiment_annotation_path)
+            self._experiment_to_runs = load_experiment_annotation(experiment_annotation_path)
         else:
-            self._experiment_to_runs = self._normalize_experiment_mapping(experiment_to_runs or {})
+            self._experiment_to_runs = normalize_experiment_mapping(experiment_to_runs or {})
         self._sdrf_experiment_to_runs = experiment_runs_from_sdrf(sdrf_path)
 
         # Step 1: Load protein file into DuckDB
@@ -160,60 +205,6 @@ class FragPipePgAdapter(BaseConverter):
                 "matches the experiment."
             )
         return runs
-
-    @staticmethod
-    def _normalize_run_name(value: str) -> str:
-        """Return a QPX run_file_name from a FragPipe annotation file value."""
-        name = str(value).strip().replace("\\", "/").rsplit("/", 1)[-1]
-        lower_name = name.casefold()
-        for extension in _RUN_EXTENSIONS:
-            if lower_name.endswith(extension):
-                return name[: -len(extension)]
-        return name
-
-    @classmethod
-    def _normalize_experiment_mapping(
-        cls,
-        mapping: dict[str, list[str]],
-    ) -> dict[str, list[str]]:
-        """Normalize and validate an explicit experiment-to-runs mapping."""
-        normalized: dict[str, list[str]] = {}
-        for experiment, runs in mapping.items():
-            experiment_name = str(experiment).strip()
-            if not experiment_name:
-                raise ValueError("FragPipe experiment name cannot be empty")
-            if isinstance(runs, (str, bytes)):
-                raise ValueError(f"Runs for FragPipe experiment {experiment_name!r} must be a list")
-            run_names = sorted({cls._normalize_run_name(run) for run in runs if str(run).strip()})
-            if not run_names:
-                raise ValueError(f"FragPipe experiment {experiment_name!r} has no raw files")
-            normalized[experiment_name] = run_names
-        return normalized
-
-    @classmethod
-    def _load_experiment_annotation(
-        cls,
-        path: str,
-    ) -> dict[str, list[str]]:
-        """Read FragPipe ``experiment_annotation.tsv`` into grouped runs."""
-        annotation = pd.read_csv(path, sep="\t", dtype=str)
-        columns = {str(column).strip().casefold(): column for column in annotation.columns}
-        missing = {"file", "sample"} - columns.keys()
-        if missing:
-            raise ValueError("FragPipe experiment annotation is missing column(s): " + ", ".join(sorted(missing)))
-
-        mapping: dict[str, list[str]] = {}
-        file_col = columns["file"]
-        sample_col = columns["sample"]
-        for row_number, row in annotation.iterrows():
-            experiment = str(row[sample_col]).strip()
-            file_value = str(row[file_col]).strip()
-            if not experiment or not file_value or experiment == "nan" or file_value == "nan":
-                raise ValueError(f"FragPipe experiment annotation has an empty file/sample value on row {row_number + 2}")
-            mapping.setdefault(experiment, []).append(file_value)
-        if not mapping:
-            raise ValueError("FragPipe experiment annotation contains no file/sample rows")
-        return cls._normalize_experiment_mapping(mapping)
 
     def _load_protein_file(self, path: str) -> None:
         """Load combined_protein.tsv into DuckDB."""
@@ -300,8 +291,8 @@ class FragPipePgAdapter(BaseConverter):
 
         anchor_protein = pg_accessions[0] if pg_accessions else ""
 
-        # Is decoy: detected from rev_/DECOY_/decoy_ prefix on any accession
-        is_decoy = any(acc.strip().startswith(("rev_", "DECOY_", "decoy_")) for acc in pg_accessions) if pg_accessions else False
+        # Is decoy: detected from a decoy prefix on any RAW accession
+        is_decoy = is_decoy_accession(protein_raw)
 
         # Combined counts
         total_peptides = int(row.get(r.get("peptide_count_total", "Combined Total Peptides"), 0) or 0)
@@ -315,8 +306,18 @@ class FragPipePgAdapter(BaseConverter):
         if mol_weight is not None:
             mol_weight = mol_weight / 1000.0  # Convert Da to kDa
 
-        # Protein group q-value (Protein Probability, Protein FDR, etc.)
-        pg_qvalue = safe_float(row.get(r.get("pg_qvalue", "Protein Probability")))
+        # Protein group q-value. Real FDR/Q-Value columns are preferred (see the
+        # ordered mapping in column_mappings.yaml). "Protein Probability" is a
+        # confidence score (~1.0 = best), so when it is the only column present it
+        # is converted to an FDR-like value as 1 - probability, never used raw.
+        pg_qvalue_col = r.get("pg_qvalue")
+        pg_qvalue_raw = safe_float(row.get(pg_qvalue_col)) if pg_qvalue_col else None
+        if pg_qvalue_raw is None:
+            pg_qvalue = None
+        elif pg_qvalue_col == "Protein Probability":
+            pg_qvalue = 1.0 - pg_qvalue_raw
+        else:
+            pg_qvalue = pg_qvalue_raw
 
         # Peptides per protein
         peptides = [{"protein_name": acc, "peptide_count": total_peptides} for acc in pg_accessions]
@@ -329,17 +330,24 @@ class FragPipePgAdapter(BaseConverter):
             unique_spec_col = f"{experiment} Unique Spectral Count"
 
             total_intensity = safe_float(row.get(total_int_col)) or 0.0
-            if total_intensity <= 0:
+            maxlfq_val = safe_float(row.get(maxlfq_col))
+            # MaxLFQ-only experiments (detected from a "<exp> MaxLFQ Intensity"
+            # column) have no Total Intensity; fall back to MaxLFQ as the primary
+            # intensity rather than dropping the protein group entirely.
+            if total_intensity > 0:
+                primary_intensity = total_intensity
+            elif maxlfq_val is not None and maxlfq_val > 0:
+                primary_intensity = maxlfq_val
+            else:
                 continue
 
             # Intensities (new schema: {label, intensity})
             label = "LFQ"
-            intensities = [{"label": label, "intensity": float(total_intensity)}]
+            intensities = [{"label": label, "intensity": float(primary_intensity)}]
 
             # Additional intensities pre-computed by FragPipe (MaxLFQ)
             additional_intensities = []
             extra_vals = []
-            maxlfq_val = safe_float(row.get(maxlfq_col))
             if maxlfq_val is not None:
                 extra_vals.append({"intensity_name": "maxlfq", "intensity_value": float(maxlfq_val)})
             if extra_vals:

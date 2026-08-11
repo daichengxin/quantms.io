@@ -35,16 +35,18 @@ def canonical(values: list, *, unordered_list_indices: tuple[int, ...] = ()) -> 
     alias to the same bytes even when list elements or fields contain the
     delimiters themselves (e.g. run names with commas/brackets): ``["a,b", "c"]``
     and ``["a", "b,c"]`` encode differently. ``None`` becomes JSON ``null``.
-    List order is preserved unless its top-level position is explicitly listed
-    in *unordered_list_indices*. QPX uses that exception for ``grouped_runs``,
-    which is a set; ordered identifiers such as a multi-component ``scan`` keep
-    their component order.
+    List order and duplicate elements are preserved unless its top-level
+    position is explicitly listed in *unordered_list_indices*. QPX uses that
+    exception for set-valued fields such as ``grouped_runs`` and
+    ``pg_accessions``; ordered identifiers such as a multi-component ``scan``
+    keep their component order.
     """
     normalized = [_normalize(value) for value in values]
     for index in unordered_list_indices:
         value = normalized[index]
         if isinstance(value, list):
-            normalized[index] = sorted(value, key=lambda item: json.dumps(item, sort_keys=True))
+            by_encoding = {json.dumps(item, separators=(",", ":"), sort_keys=True, ensure_ascii=True): item for item in value}
+            normalized[index] = [by_encoding[key] for key in sorted(by_encoding)]
     return json.dumps(normalized, separators=(",", ":"), sort_keys=True, ensure_ascii=True).encode("utf-8")
 
 

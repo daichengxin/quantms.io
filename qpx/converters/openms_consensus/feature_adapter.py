@@ -10,6 +10,7 @@ the QPX feature schema. Protein-level quantity is not produced here.
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Optional
 
@@ -95,6 +96,129 @@ def to_proforma(aa_sequence) -> str:
     return s
 
 
+def _parse_site_scores(raw) -> dict[int, float]:
+    """Parse a Luciphor ``Luciphor_site_scores`` UserParam into {position: score}.
+
+    The value is a stringified dict (e.g. ``{1: -31.36, 9: 31.36}``) keyed by
+    1-based amino-acid index. Positional ``None`` values are dropped so a site
+    without a localisation score contributes no score entry.
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = ast.literal_eval(str(raw))
+        if not isinstance(parsed, dict):
+            return {}
+        out = {}
+        for k, v in parsed.items():
+            try:
+                pos = int(k)
+            except (TypeError, ValueError):
+                continue
+            if v is not None:
+                try:
+                    out[pos] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        return out
+    except (ValueError, SyntaxError, TypeError):
+        # Malformed literal (ast.literal_eval) or a non-mapping value -> no scores.
+        return {}
+
+
+def to_modifications(aa_sequence, site_scores: dict[int, list[dict]] | None = None) -> list[dict]:
+    """Convert a pyopenms ``AASequence`` to the QPX ``modifications`` structure.
+
+    Each modification is ``{name, accession, positions: [{position, amino_acid,
+    scores}]}`` — the residue position (1-based) plus, when a site-localisation
+    score dict is supplied, the per-site localisation score(s) (as QPX ``score``
+    structs). N- and C-terminal modifications are reported at position 1 /
+    ``len(sequence)`` with an ``amino_acid`` of ``None`` (no single residue
+    carries them), mirroring ``to_proforma``'s ``[UNIMOD:N]-`` / ``-[UNIMOD:N]``
+    rendering.
+    """
+    mods: list[dict] = []
+    seen: dict[tuple[str, str | None], dict] = {}
+
+    def _add_mod(name: str, accession: str | None, position: int, amino_acid: str | None, scores: list[dict] | None) -> None:
+        key = (name, accession)
+        entry = seen.get(key)
+        if entry is None:
+            entry = {"name": name, "accession": accession, "positions": []}
+            seen[key] = entry
+            mods.append(entry)
+        entry["positions"].append({"position": position, "amino_acid": amino_acid, "scores": scores})
+
+    def _acc(accession) -> str | None:
+        # Normalise pyopenms "UniMod:N" to QPX's canonical "UNIMOD:N".
+        if not accession:
+            return None
+        return str(accession).replace("UniMod:", "UNIMOD:")
+
+    for i in range(aa_sequence.size()):
+        mod = aa_sequence[i].getModification()
+        if not mod:
+            continue
+        _add_mod(
+            mod.getId() or "",
+            _acc(mod.getUniModAccession()),
+            i + 1,
+            aa_sequence[i].getOneLetterCode(),
+            site_scores.get(i + 1) if site_scores else None,
+        )
+
+    nterm = aa_sequence.getNTerminalModification() if hasattr(aa_sequence, "getNTerminalModification") else None
+    if nterm:
+        # N-terminal position is always 0 (amino_acid null); see the QPX
+        # modifications spec.
+        _add_mod(nterm.getId() or "", _acc(nterm.getUniModAccession()), 0, None, None)
+    cterm = aa_sequence.getCTerminalModification() if hasattr(aa_sequence, "getCTerminalModification") else None
+    if cterm:
+        # C-terminal position is always length + 1 (amino_acid null).
+        _add_mod(cterm.getId() or "", _acc(cterm.getUniModAccession()), aa_sequence.size() + 1, None, None)
+    return mods or None
+
+
+# Site-localisation algorithms whose UserParams OpenMS may stamp onto peptide
+# hits: ``<name>_pep_score`` (peptide-level score) and ``<name>_site_scores``
+# (a ``{position: score}`` dict keyed by 1-based residue index). Multiple
+# algorithms may be present in one file (e.g. a run localised by Ascore and
+# another by PhosphoRS), so all matches are collected rather than a single one.
+_LOCALIZATION_ALGORITHMS = ("Luciphor", "Ascore", "PhosphoRS", "AScore")
+
+
+def localization_scores(hit) -> tuple[list[dict] | None, dict[int, list[dict]]]:
+    """Return ``(additional_scores, site_scores)`` from a hit's site-localisation UserParams.
+
+    For each known localisation algorithm present on the hit, ``<Algo>_pep_score``
+    and ``<Algo>_global_flr`` (when present) become ``additional_scores`` entries
+    (the QPX ``score`` struct); ``<Algo>_site_scores`` is parsed into
+    ``{position: [score, ...]}`` so :func:`to_modifications` can attach the
+    per-site localisation score(s) to the matching modification position.
+    """
+    additional: list[dict] = []
+    site_scores: dict[int, list[dict]] = {}
+    for algo in _LOCALIZATION_ALGORITHMS:
+        pep_key = f"{algo}_pep_score"
+        if hit.metaValueExists(pep_key):
+            additional.append(
+                {"score_name": pep_key.lower(), "score_value": float(hit.getMetaValue(pep_key)), "higher_better": None}
+            )
+        flr_key = f"{algo}_global_flr"
+        if hit.metaValueExists(flr_key):
+            additional.append(
+                {"score_name": flr_key.lower(), "score_value": float(hit.getMetaValue(flr_key)), "higher_better": None}
+            )
+        site_key = f"{algo}_site_scores"
+        if hit.metaValueExists(site_key):
+            parsed = _parse_site_scores(hit.getMetaValue(site_key))
+            for pos, score in parsed.items():
+                site_scores.setdefault(pos, []).append(
+                    {"score_name": f"{algo.lower()}_site_score", "score_value": score, "higher_better": None}
+                )
+    return (additional or None), site_scores
+
+
 def load_consensus_map(consensusxml_path: str):
     """Parse a consensusXML into a ``ConsensusMap`` — the single parse point.
 
@@ -110,11 +234,19 @@ def load_consensus_map(consensusxml_path: str):
 
 
 def _pid_scans(pid) -> list[int]:
-    """Scan numbers parsed from one identification's spectrum reference."""
+    """Scan numbers parsed from one identification's spectrum reference.
+
+    Uses the shared parser in :mod:`psm_adapter` (imported lazily to avoid a
+    circular import — psm_adapter imports this module) so feature.scan and
+    psm.scan are produced by the same logic, including Sciex ``cycle=`` ordinals
+    and the deterministic surrogate fallback.
+    """
     ref = pid.getSpectrumReference() if hasattr(pid, "getSpectrumReference") else ""
     if not ref and pid.metaValueExists("spectrum_reference"):
         ref = pid.getMetaValue("spectrum_reference")
-    return [int(m) for m in re.findall(r"(?:scan|index|spectrum)=(\d+)", str(ref or ""), re.IGNORECASE)]
+    from qpx.converters.openms_consensus.psm_adapter import _scan_of
+
+    return _scan_of(ref)
 
 
 def _scan_by_run(pids, map_info: dict[int, tuple[str, str]], cf_runs: Optional[set[str]] = None) -> dict[str, list[int]]:
@@ -167,20 +299,22 @@ def _group_subfeatures_by_run(cf, map_info: dict[int, tuple[str, str]]) -> dict[
     return by_run
 
 
-def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, anchor_map=None) -> list[dict]:
+def consensus_features_to_records(consensusxml_path: str | None = None, cm=None, group_map=None) -> list[dict]:
     """Return QPX feature record dicts extracted from a consensusXML.
 
     Pass either ``consensusxml_path`` (loaded here) or an already-loaded ``cm``.
-    ``anchor_map`` (accession -> protein-group leader, from
-    ``pg_adapter.accession_to_anchor``) makes each feature's ``anchor_protein``
-    the same group leader the pg view uses, so the feature->pg join is reliable;
-    without it the anchor falls back to the peptide's first protein evidence.
+    ``group_map`` (accession -> full protein-group membership, from
+    ``pg_adapter.accession_to_group``) makes each feature stamp BOTH the same
+    group leader the pg view uses as ``anchor_protein`` AND the full
+    ``pg_accessions`` membership, so the feature->pg join is unambiguous even
+    when two distinct groups share a leader; without it the anchor falls back to
+    the peptide's first protein evidence and ``pg_accessions`` is null.
     """
     cm = cm if cm is not None else load_consensus_map(consensusxml_path)
     map_info = feature_map_info(cm)
     records: list[dict] = []
     for cf in cm:
-        records.extend(feature_records_for_cf(cf, map_info, anchor_map))
+        records.extend(feature_records_for_cf(cf, map_info, group_map))
     return records
 
 
@@ -194,8 +328,13 @@ def feature_map_info(cm) -> dict[int, tuple[str, str]]:
     return {idx: (_run_stem(headers[idx].filename), _map_label(headers[idx].label)) for idx in headers}
 
 
-def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=None) -> list[dict]:
-    """Feature records for one consensus feature (one per run, channels as intensities)."""
+def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], group_map=None) -> list[dict]:
+    """Feature records for one consensus feature (one per run, channels as intensities).
+
+    ``pg_accessions`` carries the full protein-group membership; the feature->pg
+    association is computed on read via the ``Dataset`` softlink (bigbio/qpx#269),
+    so ``pg_ids`` is left unset here.
+    """
     pids = cf.getPeptideIdentifications()
     if not pids or not pids[0].getHits():
         return []
@@ -206,6 +345,8 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
     seq_obj = hit.getSequence()
     peptidoform = to_proforma(seq_obj)
     sequence = seq_obj.toUnmodifiedString()
+    additional_scores, site_scores = localization_scores(hit)
+    modifications = to_modifications(seq_obj, site_scores)
     charge = int(cf.getCharge() or hit.getCharge() or 0)
     is_decoy = False
     if hit.metaValueExists("target_decoy"):
@@ -215,13 +356,17 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
     consensus_rt = float(cf.getRT() if streamed_consensus_rt is None else streamed_consensus_rt)
     calculated_mz = float(seq_obj.getMZ(charge)) if charge else observed_mz
     evidences = hit.getPeptideEvidences()
-    anchor_protein = evidences[0].getProteinAccession() if evidences else None
-    if isinstance(anchor_protein, bytes):
-        anchor_protein = anchor_protein.decode()
-    # Resolve to the protein-group leader so feature.anchor_protein matches the
-    # pg view (peptide evidence order alone does not identify the leader).
-    if anchor_map and anchor_protein is not None:
-        anchor_protein = anchor_map.get(anchor_protein, anchor_protein)
+    orig = evidences[0].getProteinAccession() if evidences else None
+    if isinstance(orig, bytes):
+        orig = orig.decode()
+    # Resolve to the full protein-group membership so feature.anchor_protein AND
+    # feature.pg_accessions match the pg view (peptide evidence order alone does
+    # not identify the leader, nor the group when leaders are shared). Keep the
+    # group in the order _merge_protein_ids/_build_groups produced so pg_accessions
+    # lines up row-for-row with the pg view's pg_accessions for that group.
+    group = group_map.get(orig) if (group_map and orig is not None) else None
+    anchor_protein = group[0] if group else orig
+    pg_accessions = [{"accession": a, "start": None, "end": None, "pre": None, "post": None} for a in group] if group else None
 
     records: list[dict] = []
     for run, entry in _group_subfeatures_by_run(cf, map_info).items():
@@ -230,6 +375,7 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
             {
                 "sequence": sequence,
                 "peptidoform": peptidoform,
+                "modifications": modifications,
                 "charge": charge,
                 "run_file_name": run,
                 "scan": scan_by_run.get(run, []),
@@ -240,6 +386,8 @@ def feature_records_for_cf(cf, map_info: dict[int, tuple[str, str]], anchor_map=
                 "observed_mz": observed_mz,
                 "consensus_rt": consensus_rt,
                 "anchor_protein": anchor_protein,
+                "pg_accessions": pg_accessions,
+                "additional_scores": additional_scores,
             }
         )
     return records

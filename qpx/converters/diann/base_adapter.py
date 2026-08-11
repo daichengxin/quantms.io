@@ -57,6 +57,14 @@ def _parse_duckdb_size(value: str) -> int | None:
     return int(float(match.group(1)) * _SIZE_UNITS.get((match.group(2) or "B").upper(), 1))
 
 
+def _populated_channel_values(raw_channels: list[object], channel_col: str) -> list[object]:
+    """Return non-empty channel values, rejecting partially missing labels."""
+    populated = [channel for channel in raw_channels if channel is not None and str(channel).strip()]
+    if populated and len(populated) != len(raw_channels):
+        raise ValueError(f"DIA-NN {channel_col} contains an empty channel identifier")
+    return populated
+
+
 class DiaNNBaseAdapter(BaseConverter):
     """Base adapter with DIA-NN-specific loading utilities.
 
@@ -164,8 +172,10 @@ class DiaNNBaseAdapter(BaseConverter):
                 )
             ).fetchall()
         ]
-        if any(channel is None or not str(channel).strip() for channel in raw_channels):
-            raise ValueError(f"DIA-NN {channel_col} contains an empty channel identifier")
+        raw_channels = _populated_channel_values(raw_channels, channel_col)
+        if not raw_channels:
+            self.logger.info("DIA-NN %s is empty; treating the report as label-free", channel_col)
+            return None
 
         declared_labels = read_sdrf_labels(sdrf_path)
         declared_by_key = {normalize_label(label).casefold(): normalize_label(label) for label in declared_labels or ()}

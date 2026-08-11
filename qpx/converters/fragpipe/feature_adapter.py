@@ -12,7 +12,13 @@ from typing import Optional
 import pandas as pd
 
 from qpx.converters.base import BaseConverter, resolve_columns
-from qpx.converters.fragpipe.constants import to_modifications, to_proforma
+from qpx.converters.channel_labels import experiment_runs_from_sdrf
+from qpx.converters.fragpipe.constants import is_decoy_accession, to_modifications, to_proforma
+from qpx.converters.fragpipe.pg_adapter import (
+    load_experiment_annotation,
+    normalize_experiment_mapping,
+    normalize_run_name,
+)
 from qpx.converters.mappings import get_field_mappings
 from qpx.converters.utils import parse_uniprot_id, safe_float
 from qpx.core.sql import escape_path, sql_build
@@ -80,6 +86,8 @@ class FragPipeFeatureAdapter(BaseConverter):
         output_path: str,
         sdrf_path: Optional[str] = None,
         psm_path: Optional[str] = None,
+        experiment_to_runs: dict[str, list[str]] | None = None,
+        experiment_annotation_path: Optional[str] = None,
         chunksize: int = 500_000,
         creator: str = "fragpipe",
     ) -> None:
@@ -88,9 +96,13 @@ class FragPipeFeatureAdapter(BaseConverter):
         Args:
             feature_path: Path to FragPipe ``combined_ion.tsv``.
             output_path: Destination Parquet path.
-            sdrf_path: Optional SDRF file (not used in current impl).
+            sdrf_path: Optional SDRF fallback for mapping experiments to raw runs.
             psm_path: Optional path to FragPipe ``psm.tsv`` for PSM-level lookups
                 (mass error, PEP, scan, is_decoy).
+            experiment_to_runs: Optional explicit mapping from each experiment
+                intensity prefix to its member raw runs.
+            experiment_annotation_path: Optional FragPipe
+                ``experiment_annotation.tsv`` providing that mapping.
             chunksize: Rows per batch.
             creator: Creator tag in Parquet metadata.
         """
@@ -113,6 +125,13 @@ class FragPipeFeatureAdapter(BaseConverter):
 
         # Step 4: Build PSM lookup if psm.tsv provided
         psm_lookup = self._build_psm_lookup(psm_path) if psm_path else {}
+        experiment_psm_sources = self._resolve_experiment_psm_sources(
+            experiments,
+            experiment_to_runs,
+            experiment_annotation_path,
+            sdrf_path,
+            warn_on_ambiguous=bool(psm_lookup),
+        )
 
         # Step 5: Stream and transform
         with FeatureWriter(
@@ -123,7 +142,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         ) as writer:
             for batch in self._query_batched("SELECT * FROM fragpipe_features", chunksize):
                 df = batch.to_pandas()
-                records = self._transform_batch(df, experiments, psm_lookup)
+                records = self._transform_batch(df, experiments, psm_lookup, experiment_psm_sources)
                 if records:
                     self._track_scores(records)
                     writer.write_batch(records)
@@ -181,16 +200,57 @@ class FragPipeFeatureAdapter(BaseConverter):
 
         return sorted(experiments)
 
+    def _resolve_experiment_psm_sources(
+        self,
+        experiments: list[str],
+        experiment_to_runs: dict[str, list[str]] | None,
+        experiment_annotation_path: str | None,
+        sdrf_path: str | None,
+        *,
+        warn_on_ambiguous: bool,
+    ) -> dict[str, str]:
+        """Resolve experiments that can be enriched from exactly one raw run."""
+        if experiment_to_runs is not None and experiment_annotation_path is not None:
+            raise ValueError("Provide either experiment_to_runs or experiment_annotation_path, not both")
+        if experiment_annotation_path is not None:
+            experiment_runs = load_experiment_annotation(experiment_annotation_path)
+        else:
+            experiment_runs = normalize_experiment_mapping(experiment_to_runs or {})
+        if not experiment_runs:
+            experiment_runs = experiment_runs_from_sdrf(sdrf_path) or {}
+
+        sources: dict[str, str] = {}
+        ambiguous: list[str] = []
+        for experiment in experiments:
+            runs = experiment_runs.get(experiment)
+            if runs is None:
+                sources[experiment] = normalize_run_name(experiment)
+            elif len(runs) == 1:
+                sources[experiment] = normalize_run_name(runs[0])
+            else:
+                ambiguous.append(experiment)
+        if warn_on_ambiguous and ambiguous:
+            self.logger.warning(
+                "Skipping PSM enrichment for multi-run FragPipe experiment(s): %s",
+                ", ".join(ambiguous),
+            )
+        return sources
+
     # ------------------------------------------------------------------
     # PSM lookup
     # ------------------------------------------------------------------
 
     def _build_psm_lookup(self, psm_path: str) -> dict[tuple, dict]:
-        """Build a lookup from (run_file_name, peptidoform, charge) -> PSM info.
+        """Build a lookup for feature-level PSM enrichment.
 
-        Loads FragPipe ``psm.tsv`` into a temporary DuckDB table and extracts
-        the first-occurrence PSM per key, providing mass error, PEP, scan,
-        and decoy flag for feature-level enrichment.
+        Loads FragPipe ``psm.tsv`` into a temporary DuckDB table and extracts the
+        first-occurrence PSM providing mass error, PEP, scan, and decoy flag.
+
+        Each PSM is registered under its exact
+        ``(source_file, peptidoform, charge)`` key. The experiment-to-source
+        mapping is resolved separately from FragPipe metadata; no run-agnostic
+        precursor fallback is used because it can attach one run's PSM to every
+        experiment in a combined results table.
         """
         lookup: dict[tuple, dict] = {}
 
@@ -271,7 +331,7 @@ class FragPipeFeatureAdapter(BaseConverter):
             ) in rows:
                 # Parse source file and scan from Spectrum column
                 tokens = str(spectrum).split(".") if spectrum else []
-                source_file = tokens[0] if tokens else ""
+                source_file = normalize_run_name(tokens[0]) if tokens else ""
                 scan_number = 0
                 if len(tokens) >= 2:
                     try:
@@ -291,13 +351,9 @@ class FragPipeFeatureAdapter(BaseConverter):
                     if pp_prob is not None:
                         pep = 1.0 - pp_prob if pp_prob <= 1.0 else pp_prob
 
-                    is_decoy = (
-                        any(acc.strip().startswith(("rev_", "DECOY_", "decoy_", "REV_")) for acc in str(protein).split(","))
-                        if protein
-                        else False
-                    )
+                    is_decoy = is_decoy_accession(protein)
 
-                    lookup[key] = {
+                    info = {
                         "observed_mz": float(obs_mz) if obs_mz is not None else None,
                         "calculated_mz": (float(calc_mz) if calc_mz is not None else None),
                         "pep": pep,
@@ -306,6 +362,7 @@ class FragPipeFeatureAdapter(BaseConverter):
                         "ion_mobility": (float(ion_mobility) if ion_mobility is not None else None),
                         "missed_cleavages": (int(missed_cleavages_val) if missed_cleavages_val is not None else None),
                     }
+                    lookup[key] = info
 
             # Clean up temporary table
             self._conn.execute("DROP TABLE IF EXISTS _fp_psm_lookup")
@@ -329,6 +386,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         df: pd.DataFrame,
         experiments: list[str],
         psm_lookup: dict[tuple, dict] | None = None,
+        experiment_psm_sources: dict[str, str] | None = None,
     ) -> list[dict]:
         records: list[dict] = []
         skipped = 0
@@ -338,7 +396,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         for i in range(n_rows):
             try:
                 row = {col: vals[i] for col, vals in col_arrays.items()}
-                recs = self._transform_row(row, experiments, psm_lookup)
+                recs = self._transform_row(row, experiments, psm_lookup, experiment_psm_sources)
                 records.extend(recs)
             except Exception as e:
                 skipped += 1
@@ -358,6 +416,7 @@ class FragPipeFeatureAdapter(BaseConverter):
         row,
         experiments: list[str],
         psm_lookup: dict[tuple, dict] | None = None,
+        experiment_psm_sources: dict[str, str] | None = None,
     ) -> list[dict]:
         """Transform a single row into one or more feature records.
 
@@ -404,22 +463,22 @@ class FragPipeFeatureAdapter(BaseConverter):
 
             intensities = [{"label": "LFQ", "intensity": float(intensity_val)}]
 
-            # PSM lookup: enrich with mass error, PEP, scan, decoy flag
+            # PSM lookup: enrich only through the exact raw source resolved for
+            # this experiment. Multi-run experiments intentionally have no
+            # source here because one combined Feature cannot represent one
+            # arbitrarily selected fraction's PSM.
             psm_info = {}
-            if psm_lookup:
-                psm_key = (experiment, peptidoform, str(charge))
-                psm_info = psm_lookup.get(psm_key, {})
+            psm_source = (experiment_psm_sources or {}).get(experiment)
+            if psm_lookup and psm_source:
+                psm_info = psm_lookup.get((psm_source, peptidoform, str(charge)), {})
 
             _calc = psm_info.get("calculated_mz")
             _obs = psm_info.get("observed_mz")
             mass_error_ppm = 1e6 * (_obs - _calc) / _calc if _calc and _obs else None
 
-            # Is decoy: prefer PSM lookup; fall back to protein prefix
-            _is_decoy_fallback = (
-                any(p["accession"].startswith(("rev_", "DECOY_", "decoy_", "REV_")) for p in pg_accessions)
-                if pg_accessions
-                else False
-            )
+            # Is decoy: prefer PSM lookup; fall back to the decoy prefix on the RAW
+            # protein field (before parse_uniprot_id strips e.g. the "rev_" prefix).
+            _is_decoy_fallback = is_decoy_accession(protein_raw)
 
             rec = {
                 "sequence": sequence,

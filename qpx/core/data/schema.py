@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 # ---------------------------------------------------------------------------
 # Validation result types
@@ -136,25 +137,87 @@ def _canonicalize_primary_key_column(column: pa.ChunkedArray) -> pa.Array | pa.C
     return pa.array(values, type=pa.string())
 
 
-def _pg_referential_issues(
-    table: pa.Table,
+def _query_pg_referential_issues(
+    con,
     structure: str,
     severity: str,
 ) -> list[ValidationIssue]:
-    """Protein-group referential invariants, stated at the measurement level.
+    """Query protein-group referential invariants from ``pg_validate``.
 
     Both are intrinsic to the pg table — no run→sample resolution:
 
     * **duplicate_grouped_run** — ``grouped_runs`` is a set of distinct raw files;
       it must contain no duplicate element.
     * **run_double_count** (run-disjointness) — within one
-      ``(anchor_protein, label)``, the ``grouped_runs`` sets across rows must be
+      ``(pg_accessions, label)`` — the protein-group *membership* that keys the
+      pg_id, not merely the leader — the ``grouped_runs`` sets across rows must be
       disjoint, so every raw file contributes to at most one row and no
-      measurement is counted twice. This is the join-free form of the
-      double-count check.
+      measurement is counted twice. Keying on the full membership (canonicalized
+      order-independently) matches the pg_id identity, so two genuinely distinct
+      groups that share a leading protein are not conflated into a false
+      double-count. This is the join-free form of the double-count check.
     """
+    issues: list[ValidationIssue] = []
+    dup_lists = con.execute(
+        "SELECT COUNT(*) FROM pg_validate WHERE grouped_runs IS NOT NULL "
+        "AND length(grouped_runs) <> length(list_distinct(grouped_runs))"
+    ).fetchone()[0]
+    if dup_lists:
+        issues.append(
+            ValidationIssue(
+                structure=structure,
+                check="duplicate_grouped_run",
+                severity=severity,
+                column="grouped_runs",
+                message=f"{dup_lists} pg row(s) have duplicate raw files within grouped_runs (must be a set of distinct files)",
+            )
+        )
+    double = con.execute(
+        """
+        WITH exploded AS (
+            -- Deduplicate each row's own grouped_runs first (a within-row
+            -- duplicate is already reported by duplicate_grouped_run); this
+            -- way run_double_count measures only cross-row disjointness.
+            -- Key on the canonical (order-independent) group MEMBERSHIP, so
+            -- distinct groups sharing a leader are not conflated.
+            SELECT list_sort(list_distinct(pg_accessions)) AS members, label,
+                   UNNEST(list_distinct(grouped_runs)) AS run
+            FROM pg_validate
+        ),
+        repeated AS (
+            SELECT COUNT(*) AS c
+            FROM exploded
+            GROUP BY members, label, run
+            HAVING COUNT(*) > 1
+        )
+        SELECT COALESCE(SUM(c - 1), 0) FROM repeated
+        """
+    ).fetchone()[0]
+    if double:
+        issues.append(
+            ValidationIssue(
+                structure=structure,
+                check="run_double_count",
+                severity=severity,
+                column=None,
+                message=(
+                    f"{double} run occurrence(s) repeat across pg rows sharing the same "
+                    "(pg_accessions, label): grouped_runs sets must be disjoint or protein "
+                    "intensity is double-counted"
+                ),
+            )
+        )
+    return issues
+
+
+def _pg_referential_issues(
+    table: pa.Table,
+    structure: str,
+    severity: str,
+) -> list[ValidationIssue]:
+    """Validate PG referential invariants for an in-memory Arrow table."""
     names = set(table.schema.names)
-    if not {"anchor_protein", "grouped_runs", "label"} <= names or len(table) == 0:
+    if not {"pg_accessions", "grouped_runs", "label"} <= names or len(table) == 0:
         return []
 
     import duckdb
@@ -162,56 +225,76 @@ def _pg_referential_issues(
     con = duckdb.connect()
     try:
         con.register("pg_validate", table)
-        issues: list[ValidationIssue] = []
-        dup_lists = con.execute(
-            "SELECT COUNT(*) FROM pg_validate WHERE grouped_runs IS NOT NULL "
-            "AND length(grouped_runs) <> length(list_distinct(grouped_runs))"
-        ).fetchone()[0]
-        if dup_lists:
-            issues.append(
-                ValidationIssue(
-                    structure=structure,
-                    check="duplicate_grouped_run",
-                    severity=severity,
-                    column="grouped_runs",
-                    message=f"{dup_lists} pg row(s) have duplicate raw files within grouped_runs (must be a set of distinct files)",
-                )
-            )
-        double = con.execute(
-            """
-            WITH exploded AS (
-                -- Deduplicate each row's own grouped_runs first (a within-row
-                -- duplicate is already reported by duplicate_grouped_run); this
-                -- way run_double_count measures only cross-row disjointness.
-                SELECT anchor_protein, label, UNNEST(list_distinct(grouped_runs)) AS run
-                FROM pg_validate
-            ),
-            repeated AS (
-                SELECT COUNT(*) AS c
-                FROM exploded
-                GROUP BY anchor_protein, label, run
-                HAVING COUNT(*) > 1
-            )
-            SELECT COALESCE(SUM(c - 1), 0) FROM repeated
-            """
-        ).fetchone()[0]
-        if double:
-            issues.append(
-                ValidationIssue(
-                    structure=structure,
-                    check="run_double_count",
-                    severity=severity,
-                    column=None,
-                    message=(
-                        f"{double} run occurrence(s) repeat across pg rows sharing the same "
-                        "(anchor_protein, label): grouped_runs sets must be disjoint or protein "
-                        "intensity is double-counted"
-                    ),
-                )
-            )
-        return issues
+        return _query_pg_referential_issues(con, structure, severity)
     finally:
         con.close()
+
+
+def pg_referential_issues_from_parquet(
+    path: str,
+    structure: str,
+    severity: str,
+) -> list[ValidationIssue]:
+    """Validate PG referential invariants against a file-backed Parquet relation."""
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        relation = con.read_parquet(path)
+        if not {"pg_accessions", "grouped_runs", "label"} <= set(relation.columns):
+            return []
+        relation.create_view("pg_validate")
+        return _query_pg_referential_issues(con, structure, severity)
+    finally:
+        con.close()
+
+
+def _anchor_membership_issues(table: pa.Table, structure: str, severity: str) -> list[ValidationIssue]:
+    """Flag rows that carry an ``anchor_protein`` but no ``pg_accessions`` membership.
+
+    The protein group (``pg_accessions``) is the analyte and the feature->pg join
+    key (see docs/spec/pg.md -> Protein group semantics); ``anchor_protein`` is only
+    a descriptive representative. A row that has been protein-mapped (non-null
+    ``anchor_protein``) MUST therefore carry its full group membership, otherwise it
+    cannot be attributed to a group. Applies to any view exposing both columns
+    (``feature``, where both are nullable; ``pg`` already requires both).
+    """
+    names = table.schema.names
+    if "anchor_protein" not in names or "pg_accessions" not in names or len(table) == 0:
+        return []
+    anchor = table.column("anchor_protein")
+    pg = table.column("pg_accessions")
+    # A non-list pg_accessions is a type mismatch already reported by the type check
+    # above; skip here rather than let list_value_length raise on malformed input.
+    if not (pa.types.is_list(pg.type) or pa.types.is_large_list(pg.type)):
+        return []
+    # Non-string anchor_protein is a type mismatch reported elsewhere.
+    if not (pa.types.is_string(anchor.type) or pa.types.is_large_string(anchor.type)):
+        return []
+    # list_value_length is null where pg_accessions is null; fill_null(0) folds a
+    # null membership into "empty" so the boolean logic never propagates nulls.
+    pg_len = pc.fill_null(pc.list_value_length(pg), 0)
+    pg_missing = pc.equal(pg_len, 0)
+    # Blank/whitespace anchors are unset (not a membership violation).
+    anchor_set = pc.greater(pc.utf8_length(pc.utf8_trim_whitespace(pc.fill_null(anchor, ""))), 0)
+    violation = pc.and_(anchor_set, pg_missing)
+    bad = pc.sum(pc.cast(violation, pa.int64())).as_py() or 0
+    if not bad:
+        return []
+    return [
+        ValidationIssue(
+            structure=structure,
+            check="anchor_without_membership",
+            severity=severity,
+            column="pg_accessions",
+            message=(
+                f"{bad} row(s) have anchor_protein set but no pg_accessions "
+                "(protein-group membership). The group is the analyte and the "
+                "feature->pg join key, so a row with a leading protein must carry "
+                "its full pg_accessions membership."
+            ),
+        )
+    ]
 
 
 def _primary_key_issues(
@@ -273,6 +356,11 @@ class ViewSchema:
     def primary_key(self) -> tuple[str, ...]:
         """The view's primary-key column(s)."""
         return self._primary_key
+
+    @property
+    def view_name(self) -> str:
+        """The schema view name."""
+        return self._view_name
 
     @property
     def identity_composite(self) -> tuple[str, ...] | None:
@@ -409,6 +497,8 @@ class ViewSchema:
 
         if self._view_name == "pg":
             result.issues.extend(_pg_referential_issues(table, self._view_name, gated_severity))
+
+        result.issues.extend(_anchor_membership_issues(table, self._view_name, gated_severity))
 
         return result
 

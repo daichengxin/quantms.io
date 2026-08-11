@@ -104,6 +104,26 @@ class DuckDBEngine:
             )
         )
 
+    def register_parquet_files(self, name: str, file_paths) -> None:
+        """Register several Parquet shards as one unioned DuckDB view.
+
+        DuckDB reads the list of files positionally-unioned, matching the S3
+        glob path's behaviour so a multi-shard structure yields the same rows
+        locally and over S3 (bigbio/qpx#252).
+        """
+        paths = list(file_paths)
+        if len(paths) == 1:
+            self.register_parquet(name, paths[0])
+            return
+        path_list = ", ".join(f"'{escape_path(str(p))}'" for p in paths)
+        self._conn.execute(
+            sql_build(
+                "CREATE OR REPLACE VIEW $view AS SELECT * FROM read_parquet([$paths])",
+                view=validate_table(name),
+                paths=path_list,
+            )
+        )
+
     def register_partitioned_parquet(self, name: str, directory: str | Path) -> None:
         """Register a Hive-partitioned Parquet directory as a DuckDB view."""
         glob_pattern = str(Path(directory) / "**" / "*.parquet")
@@ -124,6 +144,18 @@ class DuckDBEngine:
                 path=escape_path(s3_path),
             )
         )
+
+    def register_view(self, name: str, sql: str) -> None:
+        """Register ``sql`` as a named DuckDB view, without string DDL.
+
+        The query is turned into a relation via :meth:`connection.sql` and bound
+        to ``name`` through the relation API (``create_view(name, replace=True)``);
+        no ``CREATE VIEW`` text is constructed from ``sql``, so a fixed constant
+        query passed here is not a formatted-SQL construction. ``name`` is
+        validated as a table identifier before use.
+        """
+        view = validate_table(name)
+        self._conn.sql(sql).create_view(view, replace=True)
 
     def execute(self, sql: str, params=None):
         if params:

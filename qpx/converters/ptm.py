@@ -115,25 +115,46 @@ def build_proforma(sequence: str, mods: list[tuple[int, str]]) -> str:
     Args:
         sequence: Stripped peptide sequence (no modification annotations).
         mods: List of (position, tag) where position is 0 for N-term,
-            1..N for residue positions (1-indexed). Tag is e.g. "UNIMOD:35"
-            or "CHEMMOD:+15.99".
+            1..N for residue positions (1-indexed), and ``len(sequence)+1``
+            for the C-term (the mzIdentML/FragPipe/CDAP convention). Tag is
+            e.g. "UNIMOD:35" or "CHEMMOD:+15.99". Multiple mods may share a
+            position; all are emitted (order preserved) rather than collapsed.
 
     Returns:
-        ProForma string, e.g. ``PEPTM[UNIMOD:35]IDEK`` or ``[UNIMOD:1]-PEPTIDEK``.
+        ProForma string, e.g. ``PEPTM[UNIMOD:35]IDEK``, ``[UNIMOD:1]-PEPTIDEK``
+        (N-term) or ``PEPTIDEK-[UNIMOD:2]`` (C-term).
     """
     if not sequence:
         return ""
 
-    pos_to_tag: dict[int, str] = dict(mods)
+    cterm_pos = len(sequence) + 1
+
+    # Preserve every mod, including two at the same position; do NOT collapse
+    # via ``dict(mods)`` (which would silently drop all but the last tag).
+    pos_to_tags: dict[int, list[str]] = {}
+    for position, tag in mods:
+        pos_to_tags.setdefault(position, []).append(tag)
+
     parts: list[str] = []
 
-    if 0 in pos_to_tag:
-        parts.append(f"[{pos_to_tag[0]}]-")
+    # N-terminus: ``[tag][tag]-`` before the first residue.
+    if 0 in pos_to_tags:
+        for tag in pos_to_tags[0]:
+            parts.append(f"[{tag}]")
+        parts.append("-")
 
     for i, aa in enumerate(sequence, start=1):
         parts.append(aa)
-        if i in pos_to_tag:
-            parts.append(f"[{pos_to_tag[i]}]")
+        for tag in pos_to_tags.get(i, []):
+            parts.append(f"[{tag}]")
+
+    # C-terminus: ``-[tag][tag]`` after the last residue. Any position beyond
+    # the last residue is treated as C-terminal.
+    cterm_tags = [tag for pos, tags in pos_to_tags.items() if pos >= cterm_pos for tag in tags]
+    if cterm_tags:
+        parts.append("-")
+        for tag in cterm_tags:
+            parts.append(f"[{tag}]")
 
     return "".join(parts)
 
@@ -224,6 +245,15 @@ def _normalize_peptidoform(peptidoform: str) -> str:
     return result
 
 
+def _modification_site(seq_pos: int, last_aa: str | None, cterm: bool, sequence_length: int) -> tuple[int, str | None]:
+    """Return the QPX position and residue for a ProForma modification."""
+    if seq_pos == 0:
+        return 0, None
+    if cterm:
+        return sequence_length + 1, None
+    return seq_pos, last_aa
+
+
 def _from_proforma_impl(
     peptidoform: str,
     sequence: str,
@@ -243,6 +273,7 @@ def _from_proforma_impl(
     seq_pos = 0
     n = len(peptidoform)
     last_aa = None
+    cterm = False
 
     i = 0
     while i < n:
@@ -253,14 +284,7 @@ def _from_proforma_impl(
                 return peptidoform, None  # Malformed ProForma
             mod_str = peptidoform[i + 1 : end]
 
-            if seq_pos == 0:
-                # N-term
-                position = 0
-                aa = None
-            else:
-                # 1-based position
-                position = seq_pos
-                aa = last_aa
+            position, aa = _modification_site(seq_pos, last_aa, cterm, len(sequence))
 
             name = mod_str
             accession = None
@@ -293,8 +317,10 @@ def _from_proforma_impl(
 
             i = end + 1
         elif peptidoform[i] == "-":
+            cterm = seq_pos > 0
             i += 1
         else:
+            cterm = False
             last_aa = peptidoform[i]
             seq_pos += 1
             i += 1
@@ -319,7 +345,7 @@ def from_proforma(
     """Parse modifications from a ProForma-style peptidoform string.
 
     Handles: ``M[UNIMOD:35]PEPTIDEK``, ``M[+15.9949]PEPTIDEK``,
-    ``[UNIMOD:1]-PEPTIDEK``
+    ``[UNIMOD:1]-PEPTIDEK``, ``PEPTIDEK-[UNIMOD:2]``
 
     Uses an LRU cache for the common case (no *meta*, no *site_scores*).
     Callers must **not** mutate the returned list or its nested dicts, as

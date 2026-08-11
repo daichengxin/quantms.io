@@ -213,7 +213,7 @@ class CdapBaseAdapter(BaseConverter):
             "charge": charge,
             "posterior_error_probability": None,
             "is_decoy": is_decoy,
-            "calculated_mz": float(calculated_mz) if calculated_mz else 0.0,
+            "calculated_mz": float(calculated_mz) if calculated_mz is not None else None,
             "observed_mz": observed_mz,
             "mass_error_ppm": mass_error_ppm,
             "additional_scores": additional_scores or None,

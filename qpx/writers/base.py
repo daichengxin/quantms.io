@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
@@ -13,11 +14,14 @@ import pyarrow.parquet as pq
 
 from qpx._version import __version__
 from qpx.core.data.identity import derive_id
+from qpx.core.data.schema import pg_referential_issues_from_parquet
 from qpx.core.sql import sql_build, validate_identifier
 from qpx.version import QPX_SPEC_VERSION
 
 if TYPE_CHECKING:
     import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 # High-entropy float leaves that compress poorly under the default
@@ -106,6 +110,20 @@ def _stamp_footer_metadata(
         }
     )
     return table.replace_schema_metadata(merged)
+
+
+def _validate_partitioned_table(schema_class, table: pa.Table) -> None:
+    """Reject structural errors and log non-strict partitioned-write findings."""
+    result = schema_class.validate_full(table, strict=False)
+    if result.errors:
+        raise ValueError("Schema validation failed:\n" + "\n".join(issue.message for issue in result.errors))
+    for issue in result.warnings:
+        logger.warning(
+            "%s partitioned-write validation '%s': %s",
+            schema_class.view_name,
+            issue.check,
+            issue.message,
+        )
 
 
 def _schema_leaf_paths(schema: pa.Schema) -> list[str]:
@@ -203,7 +221,7 @@ class BaseWriter:
             unknown_fields = [field for field in effective_composite if field not in available_fields]
             if unknown_fields:
                 raise ValueError(
-                    f"identity_composite contains fields outside the {self._schema_class._view_name} schema: {unknown_fields}"
+                    f"identity_composite contains fields outside the {self._schema_class.view_name} schema: {unknown_fields}"
                 )
 
         # Build Parquet footer metadata. Two distinct versions are stamped:
@@ -302,7 +320,14 @@ class BaseWriter:
     ) -> list[int]:
         """Preserve or derive row IDs, recording overridden producer IDs."""
         ids: list[int] = []
-        unordered_list_indices = tuple(index for index, field in enumerate(composite) if field == "grouped_runs")
+        # Identity list fields whose element order is not meaningful: grouped_runs
+        # is a set of raw files, and pg_accessions is a set of group members (the
+        # anchor/leader is carried separately). Hashing them order-independently
+        # keeps the derived id stable across producers that emit the same
+        # membership in a different order.
+        unordered_list_indices = tuple(
+            index for index, field in enumerate(composite) if field in ("grouped_runs", "pg_accessions")
+        )
         for index, provided in enumerate(existing):
             if provided is not None and not self._should_override_provided_id(index, composite_values):
                 ids.append(provided)
@@ -406,7 +431,7 @@ class BaseWriter:
         pass tables whose id column is absent or null.
         """
         table = self._fill_identity_table(table)
-        errors = self._schema_class.validate(table, strict=True)
+        errors = self._schema_class.validate(table, strict=False)
         if errors:
             raise ValueError("Schema validation failed:\n" + "\n".join(errors))
         self._ensure_writer()
@@ -447,6 +472,25 @@ class BaseWriter:
             self._writer = None
         if validate and wrote_file:
             self._validate_identity_uniqueness()
+            self._validate_referential()
+
+    def _validate_referential(self) -> None:
+        """Warn on pg referential / run-disjointness problems over the full file.
+
+        The streaming ``write_batch`` path validates each batch's schema but
+        cannot see cross-row invariants (run-disjointness and duplicate
+        ``grouped_runs`` span the whole table), so ``write_table``'s referential
+        checks were effectively off for every streamed pg converter
+        (bigbio/qpx#242). They are re-run here at ``close()`` over the complete
+        written file, so the record/batch and table paths converge. Per the
+        maintainer policy (1.1.2) these are **warnings** on the write/convert
+        path, never a raise; ``qpxc validate --strict`` stays the strict gate.
+        """
+        if getattr(self._schema_class, "view_name", None) != "pg":
+            return
+        issues = pg_referential_issues_from_parquet(str(self._path), self._schema_class.view_name, "warning")
+        for issue in issues:
+            logger.warning("pg referential check '%s': %s", issue.check, issue.message)
 
     def _validate_identity_uniqueness(self) -> None:
         """Reject duplicate or null identity ids across the complete output file."""
@@ -474,8 +518,14 @@ class BaseWriter:
             raise ValueError(f"Primary key ({id_field}) contains {null_count} null row(s) out of {total_count}")
         if unique_count != total_count:
             duplicate_count = total_count - unique_count
-            raise ValueError(
-                f"Primary key ({id_field}) has {duplicate_count} duplicate row(s) ({unique_count} unique out of {total_count})"
+            logger.warning(
+                "Primary key (%s) has %d duplicate row(s) (%d unique out of %d). "
+                "Duplicate ids are tolerated as a warning while the qpx format stabilises "
+                "and usually indicate a converter identity bug.",
+                id_field,
+                duplicate_count,
+                unique_count,
+                total_count,
             )
 
     def _write_arrow_batch(self, records: list[dict]):
@@ -513,8 +563,9 @@ class BaseWriter:
         """
         return parquet_write_options(self.arrow_schema, self._compression)
 
-    @staticmethod
+    @classmethod
     def write_partitioned(
+        cls,
         table: pa.Table,
         output_dir: str | Path,
         partition_cols: list[str] | None = None,
@@ -522,6 +573,15 @@ class BaseWriter:
         file_metadata: dict | None = None,
     ) -> Path:
         """Write Arrow table as Hive-partitioned Parquet.
+
+        Called on a concrete writer subclass (e.g. ``FeatureWriter``) the table
+        is routed through the **same id-derivation and schema validation** as
+        the single-file writers before it is written, so a partitioned dump no
+        longer bypasses those checks (bigbio/qpx#252): the derived id is stamped
+        when absent, structural validation errors are rejected, and non-strict
+        findings such as duplicate identities are logged as warnings. Called on
+        the un-bound ``BaseWriter`` (no schema is known) it stays a raw
+        partitioned dump, unchanged.
 
         Encoding parity with the single-file writers: the same
         :func:`parquet_write_options` path is used, so partitioned output gets
@@ -555,6 +615,18 @@ class BaseWriter:
 
         output_dir = Path(output_dir)
         cols = partition_cols or ["run_file_name"]
+
+        # When called on a concrete writer subclass, route through the same
+        # id-derivation + validation the single-file writers use so partitioned
+        # output is not a validation-bypass (bigbio/qpx#252). An instance is
+        # built only to reuse _fill_identity_table / the schema; no file is
+        # opened until write_dataset below. On the un-bound BaseWriter
+        # (_schema_class is None) this is skipped and the raw dump is unchanged.
+        schema_class = cls._schema_class
+        if schema_class is not None:
+            deriver = cls(output_dir, compression=compression)
+            table = deriver._fill_identity_table(table)
+            _validate_partitioned_table(schema_class, table)
 
         # Validate the partition columns up front so the default path (or an
         # unsupported key) fails with an actionable message instead of a raw

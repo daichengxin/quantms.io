@@ -101,7 +101,7 @@ def _protein_maps(cm) -> _ProteinMaps:
     m = _ProteinMaps()
     for cf in cm:  # assigned IDs: runs are the consensus feature's member maps
         accumulate_cf_maps(cf, map_run, m)
-    for pid in cm.getUnassignedPeptideIdentifications():  # run from map_index/id_merge_index
+    for pid in cm.getUnassignedPeptideIdentifications():  # run from map_index or id_merge_index (merge order)
         accumulate_unassigned_maps(pid, resolve_run, m)
     return m
 
@@ -186,17 +186,15 @@ def _merge_protein_ids(cm) -> tuple[dict[str, bool], dict[str, float], dict[str,
     return acc_decoy, acc_qvalue, acc_gene, groups
 
 
-def accession_to_anchor(cm) -> dict[str, str]:
-    """Map each accession to its protein-group leader (the pg ``anchor_protein``).
+def accession_to_group(cm) -> dict[str, list[str]]:
+    """Map each accession to its full protein-group membership (feature.pg_accessions).
 
-    OpenMS defines the group leader as the group's first accession; the pg view
-    uses it as ``anchor_protein``. Sharing this map with the feature adapter lets
-    a feature stamp the SAME anchor as its protein group, so the documented
-    feature->pg join on ``anchor_protein`` holds for multi-accession groups
-    (a peptide's evidence order alone does not identify the leader).
-    """
+    group[0] is still the leader (feature.anchor_protein). Sharing the whole
+    membership lets a feature stamp BOTH anchor_protein AND pg_accessions, so the
+    feature->pg join is unambiguous even when two distinct groups share a leader
+    (bigbio/qpx#266, cf. #240)."""
     _, _, _, groups = _merge_protein_ids(cm)
-    return {acc: grp[0] for grp in groups for acc in grp}
+    return {acc: list(grp) for grp in groups for acc in grp}
 
 
 def _map_info(cm) -> dict[int, tuple[str, str]]:
@@ -287,18 +285,31 @@ def consensus_protein_groups_to_records(
     return build_pg_records(cm, map_info, m, pep_intensity, sdrf_path, top)
 
 
+def pg_units_and_labels(map_info, sdrf_path) -> tuple[set[tuple[str, ...]], list[str]]:
+    """Return the ``(grouped_runs units, labels)`` a pg build spans for this map.
+
+    Used by :func:`build_pg_records` (which emits one row per (group, unit,
+    label)) to decide how runs are grouped into quantification units and which
+    labels exist. A unit is the set of raw files aggregated together (SDRF
+    fractions grouped; else all runs as one unit); labels are the isobaric
+    channels or ``LFQ``.
+    """
+    all_runs = sorted({run for run, _ in map_info.values()})
+    # grouped_runs unit per run, from the SDRF (fractions grouped); else one unit.
+    run_to_grouped = fraction_groups_from_sdrf(sdrf_path)
+    units = {tuple(v) for v in run_to_grouped.values()} if run_to_grouped else {tuple(all_runs)}
+    labels = sorted({label for _, label in map_info.values()})
+    return units, labels
+
+
 def build_pg_records(cm, map_info, m: _ProteinMaps, pep_intensity: dict, sdrf_path, top: int) -> list[dict]:
     """Build pg records from already-accumulated maps + peptide intensities.
 
     Separated from the accumulation so both the multi-pass adapter and the
     single-pass streaming driver share the exact record-building logic.
     """
-    all_runs = sorted({run for run, _ in map_info.values()})
-    # grouped_runs unit per run, from the SDRF (fractions grouped); else one unit.
-    run_to_grouped = fraction_groups_from_sdrf(sdrf_path)
-    units = {tuple(v) for v in run_to_grouped.values()} if run_to_grouped else {tuple(all_runs)}
     # One pg row per (protein group, unit, label): the isobaric channels, or "LFQ".
-    labels = sorted({label for _, label in map_info.values()})
+    units, labels = pg_units_and_labels(map_info, sdrf_path)
 
     acc_decoy, acc_qvalue, acc_gene, groups = _merge_protein_ids(cm)
     quant_method = "unnormalized_unique_peptide_sum" if not top else f"unnormalized_unique_peptide_top{top}_sum"
